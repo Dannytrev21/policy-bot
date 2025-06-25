@@ -95,7 +95,11 @@ func (ec *EvalContext) ParseConfig(ctx context.Context, trigger common.Trigger) 
 		return nil, nil
 	}
 
-	evaluator, err := policy.ParsePolicy(fc.Config)
+	opts := &policy.GlobalOptions{
+		IgnoreEditedComments: ec.Options.IgnoreEditedComments,
+	}
+
+	evaluator, err := policy.ParsePolicy(fc.Config, opts)
 	if err != nil {
 		msg := fmt.Sprintf("Invalid policy in %s: %s", fc.Source, fc.Path)
 		logger.Warn().Err(err).Msg(msg)
