@@ -1,0 +1,82 @@
+# Test configuration for HTTP and SQS event processing
+# This configuration enables both webhook and SQS processing for testing
+
+server:
+  address: "127.0.0.1"
+  port: 8080
+  public_url: "http://localhost:8080"
+
+logging:
+  level: "info"
+  text: true
+
+github:
+  web_url: "https://github.com"
+  v3_api_url: "https://api.github.com"
+  v4_api_url: "https://api.github.com/graphql"
+  app:
+    integration_id: 123456
+    webhook_secret: "test-webhook-secret-123"
+    private_key: |
+      -----BEGIN RSA PRIVATE KEY-----
+      MIIEowIBAAKCAQEA4f5wg5l2hKsTeNem/V41fGnJm6gOdrj8ym3rFkEjWT2JTvVa
+      aBU9i/xh8Y2u5z8c5eD5uaJBvP3wWnpGJhZUOJKpfq2CBlsUAJl5xY0xQ7vZ9L3B
+      7s+t7OJ4k5pZs3+1+r2+3+4+5+6+7+8+9+10+11+12+13+14+15+16+17+18+19+20
+      -----END RSA PRIVATE KEY-----
+  oauth:
+    client_id: "test-client-id"
+    client_secret: "test-client-secret"
+
+sessions:
+  key: "test-session-key-for-cookies"
+
+workers:
+  workers: 2
+  queue_size: 10
+  github_timeout: 10s
+
+# SQS Configuration for testing
+sqs:
+  enabled: true
+  region: "us-east-1"
+  endpoint_url: "http://localhost:4566"  # LocalStack
+  queues:
+    installation: "http://localhost:4566/000000000000/github-installation"
+    pull_request: "http://localhost:4566/000000000000/github-pull-request"
+    pull_request_review: "http://localhost:4566/000000000000/github-pull-request-review"
+    issue_comment: "http://localhost:4566/000000000000/github-issue-comment"
+    status: "http://localhost:4566/000000000000/github-status"
+    check_run: "http://localhost:4566/000000000000/github-check-run"
+  
+  # Event routing for testing different scenarios
+  event_routing:
+    pull_request: "both"      # Test both HTTP and SQS
+    issue_comment: "both"     # Test both HTTP and SQS
+    status: "sqs"             # SQS only
+    check_run: "http"         # HTTP only
+  
+  # Default worker configuration
+  workers_per_queue: 2
+  
+  # Per-queue worker allocation for testing
+  queue_workers:
+    installation: 1      # Low volume
+    pull_request: 3      # Medium volume  
+    pull_request_review: 2  # Medium volume
+    issue_comment: 2     # Medium volume
+    status: 5            # High volume - status events are frequent
+    check_run: 3         # Medium-high volume
+  max_messages: 5
+  visibility_timeout: 30
+  wait_time_seconds: 5
+  shutdown_timeout: 10s
+  
+  # Retry configuration
+  enable_retry: true
+  max_retries: 2
+
+# Test options (minimal for testing)
+options:
+  policy_path: ".policy.yml"
+  shared_repository: ".github"
+  status_check_context: "policy-bot-test"

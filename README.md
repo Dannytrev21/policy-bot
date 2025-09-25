@@ -1141,7 +1141,15 @@ sqs:
     status: "sqs"             # Process only via SQS
     issue_comment: "http"     # Process only via HTTP
   # Worker configuration
-  workers_per_queue: 5        # Number of workers per queue
+  workers_per_queue: 5        # Default number of workers per queue
+  # Per-queue worker allocation (overrides workers_per_queue for specific events)
+  queue_workers:
+    installation: 2           # Low volume - app installs are rare
+    pull_request: 8           # Medium-high volume
+    pull_request_review: 5    # Medium volume
+    issue_comment: 6          # Medium volume
+    status: 15                # High volume - status checks are very frequent
+    check_run: 10             # Medium-high volume
   max_messages: 10            # Max messages per SQS request (1-10)
   visibility_timeout: 30      # Message visibility timeout (seconds)
   wait_time_seconds: 20       # Long polling wait time (0-20 seconds)
@@ -1191,6 +1199,22 @@ If not specified, events default to being processed via SQS if a queue is config
 - **Idempotency**: GitHub delivery IDs ensure duplicate events are handled gracefully
 - **Context Enrichment**: SQS messages receive the same context metadata as HTTP events
 - **Metrics**: Comprehensive metrics for both HTTP and SQS processing paths
+- **Per-Queue Scaling**: Different worker counts per event type based on volume
+
+#### Worker Allocation Strategy
+
+Event types have different volumes and processing requirements. The recommended worker allocation is:
+
+| Event Type | Volume | Recommended Workers | Reason |
+|------------|--------|-------------------|---------|
+| `installation` | Very Low | 1-2 | App installs are rare |
+| `pull_request` | Medium-High | 6-10 | Core functionality, moderate volume |
+| `pull_request_review` | Medium | 4-6 | Reviews happen frequently but not as much as status |
+| `issue_comment` | Medium | 4-8 | Comments are common but can be bursty |
+| `status` | Very High | 10-20 | Status checks fire for every commit, CI/CD |
+| `check_run` | High | 8-15 | GitHub Actions and external CI systems |
+
+Adjust based on your organization's usage patterns. Monitor queue depth and processing latency to optimize.
 
 #### Benefits
 

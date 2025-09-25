@@ -34,6 +34,7 @@ import (
 	"github.com/palantir/go-githubapp/oauth2"
 	"github.com/palantir/policy-bot/pull"
 	"github.com/palantir/policy-bot/server/handler"
+	"github.com/palantir/policy-bot/server/sqsconsumer"
 	"github.com/palantir/policy-bot/version"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
@@ -55,7 +56,7 @@ const (
 type Server struct {
 	config      *Config
 	base        *baseapp.Server
-	sqsConsumer SQSConsumerV2
+	sqsConsumer sqsconsumer.Consumer
 }
 
 // New instantiates a new Server.
@@ -212,7 +213,23 @@ func New(c *Config) (*Server, error) {
 	)
 
 	// Create SQS consumer using the same scheduler and handlers
-	sqsConsumer, err := NewSQSConsumerV2(&c.SQS, handlers, scheduler, logger, base.Registry())
+	sqsConfig := &sqsconsumer.Config{
+		Enabled:           c.SQS.Enabled,
+		Region:            c.SQS.Region,
+		EndpointURL:       c.SQS.EndpointURL,
+		Queues:            c.SQS.Queues,
+		EventRouting:      c.SQS.EventRouting,
+		WorkersPerQueue:   c.SQS.WorkersPerQueue,
+		QueueWorkers:      c.SQS.QueueWorkers,
+		MaxMessages:       c.SQS.MaxMessages,
+		VisibilityTimeout: c.SQS.VisibilityTimeout,
+		WaitTimeSeconds:   c.SQS.WaitTimeSeconds,
+		ShutdownTimeout:   c.SQS.ShutdownTimeout,
+		EnableRetry:       c.SQS.EnableRetry,
+		MaxRetries:        c.SQS.MaxRetries,
+	}
+
+	sqsConsumer, err := sqsconsumer.New(sqsConfig, handlers, scheduler, logger, base.Registry())
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create SQS consumer")
 	}
@@ -308,7 +325,11 @@ func (s *Server) Start() error {
 			defer shutdownCancel()
 
 			if sqsErr := s.sqsConsumer.Stop(shutdownCtx); sqsErr != nil {
-				zerolog.Ctx(shutdownCtx).Error().Err(sqsErr).Msg("Error stopping SQS consumer")
+				logger := baseapp.NewLogger(baseapp.LoggingConfig{
+					Level:  s.config.Logging.Level,
+					Pretty: s.config.Logging.Text,
+				})
+				logger.Error().Err(sqsErr).Msg("Error stopping SQS consumer")
 			}
 		}()
 	}

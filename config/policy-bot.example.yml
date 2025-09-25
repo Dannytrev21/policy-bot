@@ -72,14 +72,12 @@ logging:
 #   # endpoint_url: "http://localhost:4566"
 #   # Map GitHub event types to SQS queue URLs
 #   queues:
+#     installation: "https://sqs.us-east-1.amazonaws.com/123456789012/github-installation"
 #     pull_request: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request"
 #     pull_request_review: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request-review"
 #     issue_comment: "https://sqs.us-east-1.amazonaws.com/123456789012/github-issue-comment"
 #     status: "https://sqs.us-east-1.amazonaws.com/123456789012/github-status"
 #     check_run: "https://sqs.us-east-1.amazonaws.com/123456789012/github-check-run"
-#     workflow_run: "https://sqs.us-east-1.amazonaws.com/123456789012/github-workflow-run"
-#     installation: "https://sqs.us-east-1.amazonaws.com/123456789012/github-installation"
-#     merge_group: "https://sqs.us-east-1.amazonaws.com/123456789012/github-merge-group"
 #   # Event routing: control which events are processed via SQS vs HTTP vs both
 #   # Valid values: "sqs", "http", "both". If not specified, defaults to SQS for configured queues.
 #   # This enables gradual migration from HTTP to SQS.
@@ -87,8 +85,17 @@ logging:
 #     pull_request: "both"      # Process via both HTTP and SQS (useful during migration)
 #     status: "sqs"             # Process only via SQS
 #     issue_comment: "http"     # Process only via HTTP
-#   # Number of worker goroutines per queue (default: 5)
+#   # Default number of worker goroutines per queue (default: 5)
 #   workers_per_queue: 5
+#   # Per-queue worker allocation (overrides workers_per_queue for specific events)
+#   # Allocate more workers to high-volume events like status, fewer to low-volume ones
+#   queue_workers:
+#     installation: 2          # Low volume - app installs are rare
+#     pull_request: 8          # Medium-high volume
+#     pull_request_review: 5   # Medium volume
+#     issue_comment: 6         # Medium volume
+#     status: 15               # High volume - status checks are very frequent
+#     check_run: 10            # Medium-high volume
 #   # Maximum messages to receive in a single SQS request (1-10, default: 10)
 #   max_messages: 10
 #   # Message visibility timeout in seconds (default: 30)

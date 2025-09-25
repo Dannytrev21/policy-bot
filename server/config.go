@@ -105,6 +105,9 @@ type SQSConfig struct {
 	// Number of workers per queue (defaults to 5)
 	WorkersPerQueue int `yaml:"workers_per_queue"`
 
+	// Per-queue worker allocation (overrides WorkersPerQueue for specific event types)
+	QueueWorkers map[string]int `yaml:"queue_workers"`
+
 	// Maximum number of messages to receive in a single request (1-10)
 	MaxMessages int `yaml:"max_messages"`
 
