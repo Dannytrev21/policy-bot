@@ -44,6 +44,7 @@ type Config struct {
 	Datadog    datadog.Config                `yaml:"datadog"`
 	Prometheus prometheus.Config             `yaml:"prometheus"`
 	Workers    WorkerConfig                  `yaml:"workers"`
+	SQS        SQSConfig                     `yaml:"sqs"`
 }
 
 type LoggingConfig struct {
@@ -82,6 +83,45 @@ type WorkerConfig struct {
 type SessionsConfig struct {
 	Key      string `yaml:"key"`
 	Lifetime string `yaml:"lifetime"`
+}
+
+type SQSConfig struct {
+	// Enable SQS event consumption
+	Enabled bool `yaml:"enabled"`
+
+	// AWS region for SQS queues
+	Region string `yaml:"region"`
+
+	// AWS endpoint URL for LocalStack/testing (optional)
+	EndpointURL string `yaml:"endpoint_url"`
+
+	// Map of GitHub event type to SQS queue URL
+	Queues map[string]string `yaml:"queues"`
+
+	// Event routing: specify which events to process via SQS vs HTTP
+	// If not specified, all events configured in Queues are processed via SQS
+	EventRouting map[string]string `yaml:"event_routing"` // event_type -> "sqs" | "http" | "both"
+
+	// Number of workers per queue (defaults to 5)
+	WorkersPerQueue int `yaml:"workers_per_queue"`
+
+	// Maximum number of messages to receive in a single request (1-10)
+	MaxMessages int `yaml:"max_messages"`
+
+	// Message visibility timeout in seconds
+	VisibilityTimeout int `yaml:"visibility_timeout"`
+
+	// Wait time for long polling (0-20 seconds)
+	WaitTimeSeconds int `yaml:"wait_time_seconds"`
+
+	// Maximum time to wait for graceful shutdown
+	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
+
+	// Enable retry on message processing failure
+	EnableRetry bool `yaml:"enable_retry"`
+
+	// Maximum number of retries before sending to DLQ
+	MaxRetries int `yaml:"max_retries"`
 }
 
 func ParseConfig(bytes []byte) (*Config, error) {

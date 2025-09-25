@@ -1110,6 +1110,101 @@ generated values:
 - Client secret (`github.oauth.client_secret`)
 - Private key (`github.app.private_key`)
 
+### SQS Event Consumption <!-- omit in toc -->
+
+`policy-bot` supports consuming GitHub events from AWS SQS queues as an alternative
+to HTTP webhooks. This provides improved reliability, scalability, and decoupling
+of event ingestion from processing.
+
+#### Configuration
+
+Add the following to your server configuration file:
+
+```yaml
+sqs:
+  # Enable SQS event consumption
+  enabled: true
+  # AWS region where your SQS queues are located
+  region: "us-east-1"
+  # AWS endpoint URL for LocalStack/testing (optional)
+  # endpoint_url: "http://localhost:4566"
+  # Map GitHub event types to SQS queue URLs
+  queues:
+    pull_request: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request"
+    pull_request_review: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request-review"
+    issue_comment: "https://sqs.us-east-1.amazonaws.com/123456789012/github-issue-comment"
+    # Add other event types as needed
+  # Event routing: control which events are processed via SQS vs HTTP vs both
+  # This enables gradual migration and A/B testing
+  event_routing:
+    pull_request: "both"      # Process via both HTTP and SQS
+    status: "sqs"             # Process only via SQS
+    issue_comment: "http"     # Process only via HTTP
+  # Worker configuration
+  workers_per_queue: 5        # Number of workers per queue
+  max_messages: 10            # Max messages per SQS request (1-10)
+  visibility_timeout: 30      # Message visibility timeout (seconds)
+  wait_time_seconds: 20       # Long polling wait time (0-20 seconds)
+  shutdown_timeout: 30s       # Graceful shutdown timeout
+  # Retry configuration
+  enable_retry: true          # Enable custom retry logic
+  max_retries: 3              # Max retries before giving up
+```
+
+#### Prerequisites
+
+1. AWS credentials configured (via IAM role, environment variables, or AWS credentials file)
+2. SQS queues created for the GitHub event types you want to handle
+3. IAM permissions for `sqs:ReceiveMessage`, `sqs:DeleteMessage`, and `sqs:GetQueueAttributes`
+
+#### Message Format
+
+SQS messages can be in two formats:
+
+1. **Structured format** (recommended):
+   ```json
+   {
+     "event_type": "pull_request",
+     "delivery_id": "12345678-1234-1234-1234-123456789012",
+     "payload": { /* GitHub webhook payload */ },
+     "source": "sqs"
+   }
+   ```
+
+2. **Raw GitHub webhook payload**: The entire webhook payload as JSON
+
+#### Event Routing
+
+The `event_routing` configuration allows fine-grained control over which events
+are processed via which method:
+
+- `"sqs"` - Process only via SQS
+- `"http"` - Process only via HTTP webhooks  
+- `"both"` - Process via both (useful during migration)
+
+If not specified, events default to being processed via SQS if a queue is configured.
+
+#### Architecture
+
+- **Parallel Processing**: HTTP and SQS consumers run in parallel, sharing the same event handlers
+- **Shared Scheduler**: Both paths use the same worker pool and scheduling logic
+- **Idempotency**: GitHub delivery IDs ensure duplicate events are handled gracefully
+- **Context Enrichment**: SQS messages receive the same context metadata as HTTP events
+- **Metrics**: Comprehensive metrics for both HTTP and SQS processing paths
+
+#### Benefits
+
+- **Reliability**: Messages are persisted and automatically retried on failure
+- **Scalability**: Handle high event volumes with configurable workers per queue
+- **Decoupling**: Separate event ingestion from processing
+- **Gradual Migration**: Route events per type during migration
+- **Testing**: LocalStack support for local development
+- **Observability**: Built-in metrics and structured logging
+- **Enterprise Ready**: AWS SDK v2, proper error handling, graceful shutdown
+
+Both HTTP webhooks and SQS can be enabled simultaneously, allowing for gradual
+migration, A/B testing, or hybrid deployments based on your requirements.
+
 ### Operations <!-- omit in toc -->
 
 `policy-bot` uses [go-baseapp](https://github.com/palantir/go-baseapp) and

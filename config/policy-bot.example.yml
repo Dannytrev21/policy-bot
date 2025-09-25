@@ -60,6 +60,48 @@ logging:
 #   queue_size: 100
 #   github_timeout: 10s
 
+# Options for consuming GitHub events from AWS SQS queues. This is an alternative
+# to receiving events via HTTP webhooks. Both can be enabled simultaneously.
+#
+# sqs:
+#   # Enable SQS event consumption
+#   enabled: false
+#   # AWS region where your SQS queues are located
+#   region: "us-east-1"
+#   # AWS endpoint URL for LocalStack/testing (optional)
+#   # endpoint_url: "http://localhost:4566"
+#   # Map GitHub event types to SQS queue URLs
+#   queues:
+#     pull_request: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request"
+#     pull_request_review: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request-review"
+#     issue_comment: "https://sqs.us-east-1.amazonaws.com/123456789012/github-issue-comment"
+#     status: "https://sqs.us-east-1.amazonaws.com/123456789012/github-status"
+#     check_run: "https://sqs.us-east-1.amazonaws.com/123456789012/github-check-run"
+#     workflow_run: "https://sqs.us-east-1.amazonaws.com/123456789012/github-workflow-run"
+#     installation: "https://sqs.us-east-1.amazonaws.com/123456789012/github-installation"
+#     merge_group: "https://sqs.us-east-1.amazonaws.com/123456789012/github-merge-group"
+#   # Event routing: control which events are processed via SQS vs HTTP vs both
+#   # Valid values: "sqs", "http", "both". If not specified, defaults to SQS for configured queues.
+#   # This enables gradual migration from HTTP to SQS.
+#   event_routing:
+#     pull_request: "both"      # Process via both HTTP and SQS (useful during migration)
+#     status: "sqs"             # Process only via SQS
+#     issue_comment: "http"     # Process only via HTTP
+#   # Number of worker goroutines per queue (default: 5)
+#   workers_per_queue: 5
+#   # Maximum messages to receive in a single SQS request (1-10, default: 10)
+#   max_messages: 10
+#   # Message visibility timeout in seconds (default: 30)
+#   visibility_timeout: 30
+#   # Long polling wait time in seconds (0-20, default: 20)
+#   wait_time_seconds: 20
+#   # Maximum time to wait for graceful shutdown (default: 30s)
+#   shutdown_timeout: 30s
+#   # Enable retry on message processing failure (default: false)
+#   enable_retry: true
+#   # Maximum number of retries before giving up (default: 3)
+#   max_retries: 3
+
 # Options for connecting to GitHub
 github:
   # The URL of the GitHub homepage. Can also be set by the GITHUB_WEB_URL

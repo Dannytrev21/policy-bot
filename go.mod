@@ -4,6 +4,9 @@ go 1.25.0
 
 require (
 	github.com/alexedwards/scs v1.4.1
+	github.com/aws/aws-sdk-go-v2 v1.39.1
+	github.com/aws/aws-sdk-go-v2/config v1.31.10
+	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.7
 	github.com/bluekeyes/hatpear v0.1.2
 	github.com/bluekeyes/templatetree v0.5.0
 	github.com/c2h5oh/datasize v0.0.0-20231215233829-aa82cc1e6500
@@ -28,6 +31,17 @@ require (
 require (
 	github.com/DataDog/datadog-go/v5 v5.8.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
+	github.com/aws/aws-sdk-go-v2/credentials v1.18.14 // indirect
+	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.8 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.8 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.8 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/ini v1.8.3 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.1 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.8 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sso v1.29.4 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.35.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.38.5 // indirect
+	github.com/aws/smithy-go v1.23.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bradleyfalzon/ghinstallation/v2 v2.16.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -49,6 +63,7 @@ require (
 	github.com/sergi/go-diff v1.4.0 // indirect
 	github.com/shurcooL/graphql v0.0.0-20230722043721-ed46e5a46466 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
+	github.com/stretchr/objx v0.5.2 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	golang.org/x/crypto v0.42.0 // indirect
 	golang.org/x/oauth2 v0.31.0 // indirect

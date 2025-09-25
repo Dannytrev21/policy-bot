@@ -53,8 +53,9 @@ const (
 )
 
 type Server struct {
-	config *Config
-	base   *baseapp.Server
+	config      *Config
+	base        *baseapp.Server
+	sqsConsumer SQSConsumerV2
 }
 
 // New instantiates a new Server.
@@ -185,27 +186,36 @@ func New(c *Config) (*Server, error) {
 		workers = DefaultWebhookWorkers
 	}
 
+	handlers := []githubapp.EventHandler{
+		&handler.Installation{Base: basePolicyHandler},
+		&handler.MergeGroup{Base: basePolicyHandler},
+		&handler.PullRequest{Base: basePolicyHandler},
+		&handler.PullRequestReview{Base: basePolicyHandler},
+		&handler.IssueComment{Base: basePolicyHandler},
+		&handler.Status{Base: basePolicyHandler},
+		&handler.CheckRun{Base: basePolicyHandler},
+		&handler.WorkflowRun{Base: basePolicyHandler},
+	}
+
+	// Create the scheduler that both HTTP and SQS will use
+	scheduler := githubapp.QueueAsyncScheduler(
+		queueSize, workers,
+		githubapp.WithSchedulingMetrics(base.Registry()),
+		githubapp.WithAsyncErrorCallback(githubapp.MetricsAsyncErrorCallback(base.Registry())),
+	)
+
 	dispatcher := githubapp.NewEventDispatcher(
-		[]githubapp.EventHandler{
-			&handler.Installation{Base: basePolicyHandler},
-			&handler.MergeGroup{Base: basePolicyHandler},
-			&handler.PullRequest{Base: basePolicyHandler},
-			&handler.PullRequestReview{Base: basePolicyHandler},
-			&handler.IssueComment{Base: basePolicyHandler},
-			&handler.Status{Base: basePolicyHandler},
-			&handler.CheckRun{Base: basePolicyHandler},
-			&handler.WorkflowRun{Base: basePolicyHandler},
-		},
+		handlers,
 		c.Github.App.WebhookSecret,
 		githubapp.WithErrorCallback(githubapp.MetricsErrorCallback(base.Registry())),
-		githubapp.WithScheduler(
-			githubapp.QueueAsyncScheduler(
-				queueSize, workers,
-				githubapp.WithSchedulingMetrics(base.Registry()),
-				githubapp.WithAsyncErrorCallback(githubapp.MetricsAsyncErrorCallback(base.Registry())),
-			),
-		),
+		githubapp.WithScheduler(scheduler),
 	)
+
+	// Create SQS consumer using the same scheduler and handlers
+	sqsConsumer, err := NewSQSConsumerV2(&c.SQS, handlers, scheduler, logger, base.Registry())
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create SQS consumer")
+	}
 
 	templates, err := handler.LoadTemplates(&c.Files, basePath, c.Github.WebURL)
 	if err != nil {
@@ -269,17 +279,41 @@ func New(c *Config) (*Server, error) {
 	mux.Handle(pat.New("/details/*"), details)
 
 	return &Server{
-		config: c,
-		base:   base,
+		config:      c,
+		base:        base,
+		sqsConsumer: sqsConsumer,
 	}, nil
 }
 
 // Start is blocking and long-running
 func (s *Server) Start() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	if s.config.Datadog.Address != "" {
 		if err := datadog.StartEmitter(s.base, s.config.Datadog); err != nil {
 			return err
 		}
 	}
+
+	// Start SQS consumer if enabled (non-blocking)
+	if s.config.SQS.Enabled {
+		if err := s.sqsConsumer.Start(ctx); err != nil {
+			return errors.Wrap(err, "failed to start SQS consumer")
+		}
+
+		// Set up graceful shutdown for SQS consumer
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer shutdownCancel()
+
+			if sqsErr := s.sqsConsumer.Stop(shutdownCtx); sqsErr != nil {
+				zerolog.Ctx(shutdownCtx).Error().Err(sqsErr).Msg("Error stopping SQS consumer")
+			}
+		}()
+	}
+
+	// Start the HTTP server (this blocks until shutdown)
+	// Both HTTP and SQS now run in parallel - SQS consumers are already running in goroutines
 	return s.base.Start()
 }
