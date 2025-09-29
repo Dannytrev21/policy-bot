@@ -24,7 +24,8 @@ import (
 )
 
 var serverCmdConfig struct {
-	Path string
+	Path     string
+	TestMode bool
 }
 
 var ServerCmd = &cobra.Command{
@@ -67,7 +68,13 @@ func serverCmd(cmd *cobra.Command, args []string) error {
 		return errors.Wrapf(err, "failed to read server config")
 	}
 
-	s, err := server.New(cfg)
+	var s *server.Server
+	if serverCmdConfig.TestMode {
+		// Use test-friendly server creation that handles GitHub App validation gracefully
+		s, err = server.NewWithTestHandlers(cfg, nil)
+	} else {
+		s, err = server.New(cfg)
+	}
 	if err != nil {
 		return err
 	}
@@ -79,4 +86,5 @@ func init() {
 	RootCmd.AddCommand(ServerCmd)
 
 	ServerCmd.Flags().StringVarP(&serverCmdConfig.Path, "config", "c", "config/policy-bot.yml", "configuration file for policy-bot")
+	ServerCmd.Flags().BoolVar(&serverCmdConfig.TestMode, "test-mode", false, "run in test mode (skips GitHub App validation)")
 }

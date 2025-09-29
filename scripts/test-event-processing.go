@@ -152,7 +152,7 @@ func main() {
 			QueueSize: 10,
 		},
 		SQS: server.SQSConfig{
-			Enabled:     true,
+			Enabled:     false, // Disable SQS for testing without LocalStack
 			Region:      "us-east-1",
 			EndpointURL: "http://localhost:4566", // LocalStack
 			Queues: map[string]string{
@@ -197,13 +197,21 @@ func main() {
 	fmt.Println("📡 Testing HTTP Webhook Events...")
 	testHTTPEvents(testHandler)
 
-	// Test SQS events
-	fmt.Println("\n📨 Testing SQS Events...")
-	testSQSEvents(testHandler)
+	// Test SQS events (only if SQS is enabled)
+	if serverConfig.SQS.Enabled {
+		fmt.Println("\n📨 Testing SQS Events...")
+		testSQSEvents(testHandler)
+	} else {
+		fmt.Println("\n📨 SQS Events disabled (LocalStack not available)")
+	}
 
-	// Test parallel events
-	fmt.Println("\n🔄 Testing Parallel HTTP and SQS Events...")
-	testParallelEvents(testHandler, srv.Address())
+	// Test parallel events (only if SQS is enabled)
+	if serverConfig.SQS.Enabled {
+		fmt.Println("\n🔄 Testing Parallel HTTP and SQS Events...")
+		testParallelEvents(testHandler, srv.Address())
+	} else {
+		fmt.Println("\n🔄 Parallel testing disabled (SQS not available)")
+	}
 
 	// Wait a bit for all events to be processed
 	time.Sleep(3 * time.Second)

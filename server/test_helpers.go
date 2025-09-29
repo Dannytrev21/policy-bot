@@ -282,3 +282,11 @@ func (s *Server) Address() string {
 	// For now, return a default that matches the test configuration
 	return "localhost:8080"
 }
+
+// Shutdown gracefully stops the HTTP server for tests.
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s == nil || s.base == nil {
+		return nil
+	}
+	return s.base.HTTPServer().Shutdown(ctx)
+}

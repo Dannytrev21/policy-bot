@@ -18,11 +18,34 @@ github:
     integration_id: 123456
     webhook_secret: "test-webhook-secret-123"
     private_key: |
-      -----BEGIN RSA PRIVATE KEY-----
-      MIIEowIBAAKCAQEA4f5wg5l2hKsTeNem/V41fGnJm6gOdrj8ym3rFkEjWT2JTvVa
-      aBU9i/xh8Y2u5z8c5eD5uaJBvP3wWnpGJhZUOJKpfq2CBlsUAJl5xY0xQ7vZ9L3B
-      7s+t7OJ4k5pZs3+1+r2+3+4+5+6+7+8+9+10+11+12+13+14+15+16+17+18+19+20
-      -----END RSA PRIVATE KEY-----
+      -----BEGIN PRIVATE KEY-----
+      MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCpBPCbbPHrtTCk
+      qwjuLrsXyj7WYDhBdtM9v5wXeJp92hqCj6gJBrJlY9s6IaRFN7IRUNqh+yk9BBpG
+      W5fpS2aI3aWCWHebQobRgWt5KSy2vIMSRK0lYj5r5FQ33npMPz9zvtOIS4f/OuC7
+      M/2JPJN0LXug4M5CMeqPxAX+cy6Uk9Fm97Bkt9qIpPgvgKyIanE3f0zlzkCV7Okx
+      KvLa9sQh1OnXDRV6LSWrH00h84HxS6Zv9ndoaGgxLWvLTQFIBrGCyGZvO6KbM3dt
+      /GkbGElGu3Yo41VgLlNhU8uloN/HFiK7lAUPPrLMB9BC/YPAqoHDKJ+wACn+0pxZ
+      0BFqKcDnAgMBAAECggEAKNABjXZMIF97JHgMSv9LvB3g+ID5dI1Nyt5GwcAkhfkx
+      Z49qwus0DpmDKVFQSkp9nALLGEv+lDY2ZgDd+L51Pt1Oht/32azBwzseCX6wxltU
+      xweAS8OiUQkscOUu4NRw7PEKQSID79R2yZ1vPkE7VdVZweomxAMroZVy4RNNDyER
+      mtcwuNHbAbyKYrq7iWDwpyJhSxLlH9+dXWmbIHp70J1uiWnm/Brs8HopibKS/Gya
+      OhKrTwpqR6WpXODIWQo4ghZIMc3SEzEiGygomQo1s/JnC+ZffNTBaF8Bt9z2O3S2
+      OIK3RBvafmfZjG5gWvHMu35dk6ap0tihr5jsmO3xiQKBgQDjB+Txisvn5nB3bViX
+      qeyQOSb1YJJ8brVHLR/IaN3F24zFcbK3I9hU102BDN4JhHW4OW4r58w6LCqrVtYd
+      NAzj03rqchHRHTuomEFFcHJw561dP1P7XtD4jMRy5oxp6wa0O4y33TgQr6XEklmx
+      Afb6WvjDOFsHFvQydjm7ShEm6wKBgQC+lg/bXvvaPtJCKl3RJpGEZUMggvMQWa1p
+      zO3km8aVTQHmQ0b7akdnglGHsER0DrFLn7dtqBYVfoyL994ICs95yUUh6hMG6Hk8
+      Gvrtz3QWz859XcCKFHMTmelvQCkudssnbmWNTrSnq+pWSyGBWoPYNL4i3n5/htDl
+      tB0/uQIG9QKBgE/2mNnGhDlCvfwihGCu1gaaSrGEeTPgnnLaXuZsoSguQy/L8yF0
+      O57uUnsQuCfsAraHa9mFBDa9Fa5RoIqaqauY8iMfWE0qGbgxIFQ/3d8MitBcHM1d
+      wQa6NfsuXuhzgmH6035zKWsfIqjQz0x8H6xgXFwOPmmJ2Sro3z6rQM1PAoGBAKoq
+      bCAPb8mOe8ct8rQyvoy6qTPXF9UKbOZhXirW13ko18BTY4ZJf1WxKsB/Jq+FCtId
+      2fYjtQweALlcZ7dAh70ScxJz3+c0HEMJR/CbYOiZRKH02luvJIxkyONXIy3kTUF4
+      tV1036IxwjqoPFM1kTCy7u1NQR72LYBa0B68Pk4dAoGBANAP3pSx3X9IacLPdCFZ
+      RbTpnzUlPGUfhDIztYpt4o4XJIUWTqkua17n0UFrAEsz9hWJApIF88V2a6HO2m8q
+      4ZQUcYsJURnVXDI1cP2XIOUbWh28l8YyEPNvdZ+gFmEPbuPPBLIPpQi+oiIFUICD
+      VO9x3spm/KLa3Ce3+GWdSQ24
+      -----END PRIVATE KEY-----
   oauth:
     client_id: "test-client-id"
     client_secret: "test-client-secret"
@@ -41,12 +64,12 @@ sqs:
   region: "us-east-1"
   endpoint_url: "http://localhost:4566"  # LocalStack
   queues:
-    installation: "http://localhost:4566/000000000000/github-installation"
-    pull_request: "http://localhost:4566/000000000000/github-pull-request"
-    pull_request_review: "http://localhost:4566/000000000000/github-pull-request-review"
-    issue_comment: "http://localhost:4566/000000000000/github-issue-comment"
-    status: "http://localhost:4566/000000000000/github-status"
-    check_run: "http://localhost:4566/000000000000/github-check-run"
+    installation: "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/github-installation"
+    pull_request: "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/github-pull-request"
+    pull_request_review: "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/github-pull-request-review"
+    issue_comment: "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/github-issue-comment"
+    status: "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/github-status"
+    check_run: "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/github-check-run"
   
   # Event routing for testing different scenarios
   event_routing:
