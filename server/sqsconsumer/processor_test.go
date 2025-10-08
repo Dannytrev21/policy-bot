@@ -118,8 +118,8 @@ func TestProcessor_Metrics(t *testing.T) {
 
 	// Test metrics recording
 	startTime := time.Now()
-	processor.recordMetrics("pull_request", startTime, nil)
-	processor.recordMetrics("pull_request", startTime, assert.AnError)
+	processor.recordMetrics("pull_request", "cloud", startTime, nil)
+	processor.recordMetrics("pull_request", "enterprise", startTime, assert.AnError)
 }
 
 func TestProcessor_ContextValues(t *testing.T) {

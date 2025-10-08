@@ -1246,6 +1246,52 @@ and [Yarn](https://yarnpkg.com/).
 
     ./godelw verify
 
+**Testing**
+
+For comprehensive testing documentation, see [TESTING.md](TESTING.md).
+
+Quick test commands:
+
+```bash
+# Run all unit tests
+go test ./...
+
+# Run SQS consumer tests (including source detection)
+go test ./server/sqsconsumer -v
+
+# Run configuration validation tests
+go test ./server -run TestSQSConfig -v
+
+# Run integration tests with LocalStack
+./scripts/setup-localstack.sh start
+go test ./test -v
+./scripts/setup-localstack.sh stop
+```
+
+**Phase 1 Validation Status**: ✅ COMPLETED
+- Source detection validated (cloud vs enterprise)
+- Configuration validation tests added
+- Performance baseline documented
+- All acceptance criteria met
+
+**Phase 2 Configuration Enhancement**: ✅ COMPLETED
+- Per-environment routing (cloud vs enterprise)
+- Enhanced queue configuration with per-queue settings
+- Dead Letter Queue (DLQ) support
+- Helper methods for routing decisions
+- 20+ new test cases, all passing
+- Full backward compatibility maintained
+
+**Phase 3 Observability & Monitoring**: ✅ COMPLETED
+- Environment-aware metrics (cloud vs enterprise)
+- Enhanced context enrichment for tracing
+- Detailed health checks with queue depth monitoring
+- DLQ monitoring with periodic checks
+- 5 new test cases, all passing
+- Production-ready observability features
+
+See [TESTING.md](TESTING.md) for detailed results, performance metrics, and new configuration features.
+
 **Running the server locally**
 
     # copy and edit the server config

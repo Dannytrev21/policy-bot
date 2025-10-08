@@ -32,12 +32,18 @@ import (
 
 const (
 	// Context keys for SQS processing
-	SQSEventSourceKey = "sqs_event_source"
+	SQSEventSourceKey    = "sqs_event_source"
+	SQSEventEnvironment  = "sqs_event_environment"
+	SQSQueueName         = "sqs_queue_name"
+	SQSMessageID         = "sqs_message_id"
+	SQSReceiptHandle     = "sqs_receipt_handle"
 
 	// Metrics keys
 	MetricsKeyMessagesProcessed = "sqs.messages.processed"
 	MetricsKeyMessagesFailed    = "sqs.messages.failed"
 	MetricsKeyProcessingTime    = "sqs.processing.time"
+	MetricsKeyQueueDepth        = "sqs.queue.depth"
+	MetricsKeyDLQMessages       = "sqs.dlq.messages"
 )
 
 // SQSMessage represents a GitHub webhook message in SQS
@@ -126,17 +132,25 @@ func (p *Processor) ProcessMessage(ctx context.Context, eventType, queueURL stri
 		return errors.Wrap(err, "failed to parse SQS message")
 	}
 
-	// Add SQS context metadata
-	ctx = context.WithValue(ctx, SQSEventSourceKey, "sqs")
-
 	// Detect source from headers
 	detectedSource := p.detectSourceFromHeaders(sqsMsg)
+
+	// Add enriched SQS context metadata for tracing
+	ctx = context.WithValue(ctx, SQSEventSourceKey, "sqs")
+	ctx = context.WithValue(ctx, SQSEventEnvironment, detectedSource)
+	ctx = context.WithValue(ctx, SQSQueueName, eventType)
+	ctx = context.WithValue(ctx, SQSMessageID, aws.ToString(message.MessageId))
+	if message.ReceiptHandle != nil {
+		ctx = context.WithValue(ctx, SQSReceiptHandle, aws.ToString(message.ReceiptHandle))
+	}
 
 	msgLogger := p.logger.With().
 		Str("delivery_id", sqsMsg.DeliveryID).
 		Str("message_id", aws.ToString(message.MessageId)).
-		Str("detected_source", detectedSource).
+		Str("environment", detectedSource).
 		Str("event_type", sqsMsg.EventType).
+		Str("queue_name", eventType).
+		Str("source", "sqs").
 		Logger()
 
 	// Log Host header if present
@@ -177,8 +191,8 @@ func (p *Processor) ProcessMessage(ctx context.Context, eventType, queueURL stri
 	// Use the scheduler to process the event (maintains consistency with HTTP path)
 	err = scheduler.Schedule(ctx, dispatch)
 
-	// Record metrics
-	p.recordMetrics(sqsMsg.EventType, start, err)
+	// Record metrics with environment context
+	p.recordMetrics(sqsMsg.EventType, detectedSource, start, err)
 
 	if err != nil {
 		msgLogger.Error().Err(err).Msg("Failed to schedule GitHub event from SQS")
@@ -311,14 +325,37 @@ func (p *Processor) handleRetry(ctx context.Context, queueURL string, message ty
 }
 
 // recordMetrics records processing metrics if registry is available
-func (p *Processor) recordMetrics(eventType string, start time.Time, err error) {
+// Includes environment context for better observability
+func (p *Processor) recordMetrics(eventType, environment string, start time.Time, err error) {
 	if p.registry == nil {
 		return
 	}
 
-	// Record processing time
+	duration := time.Since(start)
+
+	// Log structured metrics for observability
+	logEvent := p.logger.With().
+		Str("event_type", eventType).
+		Str("environment", environment).
+		Str("source", "sqs").
+		Dur("processing_duration", duration).
+		Bool("success", err == nil).
+		Logger()
+
+	if err != nil {
+		logEvent.Debug().Msg("SQS message processing completed with error")
+	} else {
+		logEvent.Debug().Msg("SQS message processing completed successfully")
+	}
+
+	// Record processing time per event type
 	if processingTimer := metrics.GetOrRegisterTimer(fmt.Sprintf("%s.%s", MetricsKeyProcessingTime, eventType), p.registry); processingTimer != nil {
 		processingTimer.UpdateSince(start)
+	}
+
+	// Record environment-specific processing time
+	if envTimer := metrics.GetOrRegisterTimer(fmt.Sprintf("%s.%s.%s", MetricsKeyProcessingTime, environment, eventType), p.registry); envTimer != nil {
+		envTimer.UpdateSince(start)
 	}
 
 	// Record success/failure counters
@@ -326,9 +363,17 @@ func (p *Processor) recordMetrics(eventType string, start time.Time, err error) 
 		if failedCounter := metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s", MetricsKeyMessagesFailed, eventType), p.registry); failedCounter != nil {
 			failedCounter.Inc(1)
 		}
+		// Environment-specific failure counter
+		if envFailedCounter := metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s.%s", MetricsKeyMessagesFailed, environment, eventType), p.registry); envFailedCounter != nil {
+			envFailedCounter.Inc(1)
+		}
 	} else {
 		if processedCounter := metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s", MetricsKeyMessagesProcessed, eventType), p.registry); processedCounter != nil {
 			processedCounter.Inc(1)
+		}
+		// Environment-specific success counter
+		if envProcessedCounter := metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s.%s", MetricsKeyMessagesProcessed, environment, eventType), p.registry); envProcessedCounter != nil {
+			envProcessedCounter.Inc(1)
 		}
 	}
 }

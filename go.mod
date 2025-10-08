@@ -6,6 +6,7 @@ require (
 	github.com/alexedwards/scs v1.4.1
 	github.com/aws/aws-sdk-go-v2 v1.39.1
 	github.com/aws/aws-sdk-go-v2/config v1.31.10
+	github.com/aws/aws-sdk-go-v2/credentials v1.18.14
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.7
 	github.com/bluekeyes/hatpear v0.1.2
 	github.com/bluekeyes/templatetree v0.5.0
@@ -31,7 +32,6 @@ require (
 require (
 	github.com/DataDog/datadog-go/v5 v5.8.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.18.14 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.8 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.8 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.8 // indirect

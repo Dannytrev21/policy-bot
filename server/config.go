@@ -116,12 +116,21 @@ type SQSConfig struct {
 	// AWS endpoint URL for LocalStack/testing (optional)
 	EndpointURL string `yaml:"endpoint_url"`
 
+	// DEPRECATED: Use EventQueues for enhanced configuration
 	// Map of GitHub event type to SQS queue URL
 	Queues map[string]string `yaml:"queues"`
 
+	// Enhanced event-to-queue mapping with per-queue configuration
+	EventQueues map[string]QueueConfig `yaml:"event_queues"`
+
+	// DEPRECATED: Use EnvironmentEventRouting for per-environment control
 	// Event routing: specify which events to process via SQS vs HTTP
 	// If not specified, all events configured in Queues are processed via SQS
 	EventRouting map[string]string `yaml:"event_routing"` // event_type -> "sqs" | "http" | "both"
+
+	// Per-environment and per-event-type routing
+	// This allows different routing strategies for cloud vs enterprise
+	EnvironmentEventRouting EnvironmentRouting `yaml:"environment_event_routing"`
 
 	// Number of workers per queue (defaults to 5)
 	WorkersPerQueue int `yaml:"workers_per_queue"`
@@ -146,6 +155,200 @@ type SQSConfig struct {
 
 	// Maximum number of retries before sending to DLQ
 	MaxRetries int `yaml:"max_retries"`
+
+	// Dead Letter Queue configuration
+	DLQ DLQConfig `yaml:"dlq"`
+}
+
+// QueueConfig provides per-queue configuration options
+type QueueConfig struct {
+	// Queue URL (required)
+	URL string `yaml:"url"`
+
+	// Number of workers for this specific queue
+	Workers int `yaml:"workers"`
+
+	// Maximum retries before sending to DLQ
+	MaxRetries int `yaml:"max_retries"`
+
+	// Message visibility timeout in seconds
+	VisibilityTimeout int `yaml:"visibility_timeout"`
+}
+
+// EnvironmentRouting provides per-environment routing configuration
+// This allows cloud and enterprise to have different routing strategies
+type EnvironmentRouting struct {
+	// Cloud GitHub (GHEC) event routing
+	Cloud map[string]string `yaml:"cloud"` // event_type -> "http" | "sqs" | "both"
+
+	// Enterprise GitHub (GHES) event routing
+	Enterprise map[string]string `yaml:"enterprise"` // event_type -> "http" | "sqs" | "both"
+}
+
+// DLQConfig configures Dead Letter Queue behavior
+type DLQConfig struct {
+	// Enable DLQ processing
+	Enabled bool `yaml:"enabled"`
+
+	// Maximum times a message can be received before being sent to DLQ
+	MaxReceiveCount int `yaml:"max_receive_count"`
+
+	// Suffix to append to queue names for DLQ (e.g., "-dlq")
+	QueueSuffix string `yaml:"queue_suffix"`
+}
+
+// Validate validates the SQS configuration
+func (c *SQSConfig) Validate() error {
+	if !c.Enabled {
+		return nil // SQS disabled, no validation needed
+	}
+
+	// Check that at least one queue configuration exists (legacy or new)
+	if len(c.Queues) == 0 && len(c.EventQueues) == 0 {
+		return errors.New("SQS enabled but no queues configured")
+	}
+
+	// Validate EventQueues configuration
+	for eventType, queueConfig := range c.EventQueues {
+		if queueConfig.URL == "" {
+			return errors.Errorf("queue URL missing for event type: %s", eventType)
+		}
+		// Workers will be set to defaults if not specified, so no validation needed
+	}
+
+	// Validate routing strategies
+	validStrategies := map[string]bool{"http": true, "sqs": true, "both": true}
+
+	// Validate environment-specific routing
+	for eventType, strategy := range c.EnvironmentEventRouting.Cloud {
+		if !validStrategies[strategy] {
+			return errors.Errorf("invalid routing strategy for cloud/%s: %s (must be 'http', 'sqs', or 'both')", eventType, strategy)
+		}
+	}
+
+	for eventType, strategy := range c.EnvironmentEventRouting.Enterprise {
+		if !validStrategies[strategy] {
+			return errors.Errorf("invalid routing strategy for enterprise/%s: %s (must be 'http', 'sqs', or 'both')", eventType, strategy)
+		}
+	}
+
+	// Validate legacy EventRouting for backward compatibility
+	for eventType, strategy := range c.EventRouting {
+		if !validStrategies[strategy] {
+			return errors.Errorf("invalid routing strategy for %s: %s (must be 'http', 'sqs', or 'both')", eventType, strategy)
+		}
+	}
+
+	// Validate DLQ configuration
+	if c.DLQ.Enabled {
+		if c.DLQ.MaxReceiveCount < 1 {
+			return errors.New("DLQ max_receive_count must be at least 1")
+		}
+		if c.DLQ.QueueSuffix == "" {
+			c.DLQ.QueueSuffix = "-dlq" // Set default
+		}
+	}
+
+	return nil
+}
+
+// GetRoutingStrategy determines the routing strategy for a specific event type and environment
+// Returns "http", "sqs", or "both"
+func (c *SQSConfig) GetRoutingStrategy(environment, eventType string) string {
+	// First, check environment-specific routing (new configuration)
+	if environment == "cloud" {
+		if strategy, exists := c.EnvironmentEventRouting.Cloud[eventType]; exists {
+			return strategy
+		}
+	} else if environment == "enterprise" {
+		if strategy, exists := c.EnvironmentEventRouting.Enterprise[eventType]; exists {
+			return strategy
+		}
+	}
+
+	// Fall back to legacy EventRouting for backward compatibility
+	if strategy, exists := c.EventRouting[eventType]; exists {
+		return strategy
+	}
+
+	// Default behavior based on environment
+	if environment == "enterprise" {
+		// Enterprise defaults to HTTP only (no SQS available yet)
+		return "http"
+	}
+
+	// Cloud defaults to HTTP for safety (explicit configuration required for SQS)
+	return "http"
+}
+
+// GetQueueURL returns the queue URL for a specific event type
+// Supports both legacy Queues and new EventQueues configuration
+func (c *SQSConfig) GetQueueURL(eventType string) string {
+	// Try new EventQueues first
+	if queueConfig, exists := c.EventQueues[eventType]; exists {
+		return queueConfig.URL
+	}
+
+	// Fall back to legacy Queues
+	if queueURL, exists := c.Queues[eventType]; exists {
+		return queueURL
+	}
+
+	return ""
+}
+
+// GetQueueWorkers returns the number of workers for a specific event type
+// Considers EventQueues.Workers, QueueWorkers, and WorkersPerQueue in priority order
+func (c *SQSConfig) GetQueueWorkers(eventType string) int {
+	// 1. Check EventQueues.Workers (highest priority)
+	if queueConfig, exists := c.EventQueues[eventType]; exists && queueConfig.Workers > 0 {
+		return queueConfig.Workers
+	}
+
+	// 2. Check QueueWorkers map
+	if workers, exists := c.QueueWorkers[eventType]; exists && workers > 0 {
+		return workers
+	}
+
+	// 3. Use WorkersPerQueue default
+	if c.WorkersPerQueue > 0 {
+		return c.WorkersPerQueue
+	}
+
+	// 4. Final fallback default
+	return 5
+}
+
+// GetVisibilityTimeout returns the visibility timeout for a specific event type
+func (c *SQSConfig) GetVisibilityTimeout(eventType string) int {
+	// Check EventQueues.VisibilityTimeout
+	if queueConfig, exists := c.EventQueues[eventType]; exists && queueConfig.VisibilityTimeout > 0 {
+		return queueConfig.VisibilityTimeout
+	}
+
+	// Fall back to global VisibilityTimeout
+	if c.VisibilityTimeout > 0 {
+		return c.VisibilityTimeout
+	}
+
+	// Default to 30 seconds
+	return 30
+}
+
+// GetMaxRetries returns the max retries for a specific event type
+func (c *SQSConfig) GetMaxRetries(eventType string) int {
+	// Check EventQueues.MaxRetries
+	if queueConfig, exists := c.EventQueues[eventType]; exists && queueConfig.MaxRetries > 0 {
+		return queueConfig.MaxRetries
+	}
+
+	// Fall back to global MaxRetries
+	if c.MaxRetries > 0 {
+		return c.MaxRetries
+	}
+
+	// Default to 3 retries
+	return 3
 }
 
 func ParseConfig(bytes []byte) (*Config, error) {

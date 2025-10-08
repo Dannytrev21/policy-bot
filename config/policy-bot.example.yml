@@ -66,11 +66,19 @@ logging:
 # sqs:
 #   # Enable SQS event consumption
 #   enabled: false
+#
 #   # AWS region where your SQS queues are located
 #   region: "us-east-1"
+#
 #   # AWS endpoint URL for LocalStack/testing (optional)
 #   # endpoint_url: "http://localhost:4566"
-#   # Map GitHub event types to SQS queue URLs
+#
+#   # ===========================================================================
+#   # Queue Configuration
+#   # ===========================================================================
+#
+#   # OPTION 1: Simple queue mapping (legacy, backward compatible)
+#   # Map GitHub event types directly to SQS queue URLs
 #   queues:
 #     installation: "https://sqs.us-east-1.amazonaws.com/123456789012/github-installation"
 #     pull_request: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request"
@@ -78,17 +86,76 @@ logging:
 #     issue_comment: "https://sqs.us-east-1.amazonaws.com/123456789012/github-issue-comment"
 #     status: "https://sqs.us-east-1.amazonaws.com/123456789012/github-status"
 #     check_run: "https://sqs.us-east-1.amazonaws.com/123456789012/github-check-run"
-#   # Event routing: control which events are processed via SQS vs HTTP vs both
-#   # Valid values: "sqs", "http", "both". If not specified, defaults to SQS for configured queues.
-#   # This enables gradual migration from HTTP to SQS.
+#
+#   # OPTION 2: Enhanced queue mapping with per-queue configuration (recommended)
+#   # Provides fine-grained control over each queue's behavior
+#   # event_queues:
+#   #   pull_request:
+#   #     url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request"
+#   #     workers: 10              # Number of concurrent workers for this queue
+#   #     max_retries: 3           # Retries before sending to DLQ
+#   #     visibility_timeout: 60   # How long message is hidden after being received
+#   #
+#   #   status:
+#   #     url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-status"
+#   #     workers: 15              # High volume events need more workers
+#   #     max_retries: 2
+#   #     visibility_timeout: 30
+#   #
+#   #   pull_request_review:
+#   #     url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request-review"
+#   #     workers: 5
+#   #     max_retries: 3
+#   #     visibility_timeout: 45
+#
+#   # ===========================================================================
+#   # Event Routing Configuration
+#   # ===========================================================================
+#
+#   # OPTION 1: Simple event routing (legacy, backward compatible)
+#   # Control which events are processed via SQS vs HTTP vs both
+#   # Valid values: "sqs", "http", "both"
+#   # This enables gradual migration from HTTP to SQS
 #   event_routing:
 #     pull_request: "both"      # Process via both HTTP and SQS (useful during migration)
 #     status: "sqs"             # Process only via SQS
 #     issue_comment: "http"     # Process only via HTTP
+#
+#   # OPTION 2: Per-environment event routing (recommended for dual-environment setups)
+#   # Allows different routing strategies for cloud vs enterprise
+#   # IMPORTANT: Enterprise GitHub currently only sends webhooks (no SQS)
+#   # environment_event_routing:
+#   #   cloud:
+#   #     # Cloud (GHEC) events - SQS available
+#   #     pull_request: "sqs"        # Cloud PR events via SQS only
+#   #     status: "both"             # Cloud status via both HTTP and SQS
+#   #     pull_request_review: "sqs" # Cloud reviews via SQS
+#   #     check_run: "http"          # Cloud check runs via HTTP only
+#   #     workflow_run: "sqs"        # Cloud workflows via SQS
+#   #     issue_comment: "http"      # Cloud comments via HTTP
+#   #     merge_group: "sqs"         # Cloud merge groups via SQS
+#   #
+#   #   enterprise:
+#   #     # Enterprise (GHES) events - currently webhook only
+#   #     # Can be changed to "sqs" or "both" when enterprise SQS is available
+#   #     pull_request: "http"        # Enterprise PR events via webhook only
+#   #     status: "http"              # Enterprise status via webhook only
+#   #     pull_request_review: "http" # Enterprise reviews via webhook only
+#   #     check_run: "http"           # Enterprise check runs via webhook only
+#   #     workflow_run: "http"        # Enterprise workflows via webhook only
+#   #     issue_comment: "http"       # Enterprise comments via webhook only
+#   #     merge_group: "http"         # Enterprise merge groups via webhook only
+#
+#   # ===========================================================================
+#   # Worker Configuration
+#   # ===========================================================================
+#
 #   # Default number of worker goroutines per queue (default: 5)
 #   workers_per_queue: 5
+#
 #   # Per-queue worker allocation (overrides workers_per_queue for specific events)
 #   # Allocate more workers to high-volume events like status, fewer to low-volume ones
+#   # Note: If using event_queues with per-queue workers, those take precedence
 #   queue_workers:
 #     installation: 2          # Low volume - app installs are rare
 #     pull_request: 8          # Medium-high volume
@@ -96,18 +163,40 @@ logging:
 #     issue_comment: 6         # Medium volume
 #     status: 15               # High volume - status checks are very frequent
 #     check_run: 10            # Medium-high volume
+#
+#   # ===========================================================================
+#   # SQS Behavior Configuration
+#   # ===========================================================================
+#
 #   # Maximum messages to receive in a single SQS request (1-10, default: 10)
 #   max_messages: 10
+#
 #   # Message visibility timeout in seconds (default: 30)
+#   # How long a message is hidden from other consumers after being received
 #   visibility_timeout: 30
+#
 #   # Long polling wait time in seconds (0-20, default: 20)
+#   # How long to wait for messages when the queue is empty
 #   wait_time_seconds: 20
+#
 #   # Maximum time to wait for graceful shutdown (default: 30s)
 #   shutdown_timeout: 30s
+#
 #   # Enable retry on message processing failure (default: false)
 #   enable_retry: true
+#
 #   # Maximum number of retries before giving up (default: 3)
 #   max_retries: 3
+#
+#   # ===========================================================================
+#   # Dead Letter Queue (DLQ) Configuration
+#   # ===========================================================================
+#
+#   # Dead Letter Queue configuration for handling failed messages
+#   # dlq:
+#   #   enabled: true
+#   #   max_receive_count: 3    # Messages go to DLQ after 3 failed attempts
+#   #   queue_suffix: "-dlq"    # Suffix for DLQ names (e.g., "github-pull-request-dlq")
 
 # ==============================================================================
 # GitHub Configuration
