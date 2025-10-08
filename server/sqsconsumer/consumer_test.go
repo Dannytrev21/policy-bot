@@ -28,7 +28,7 @@ func TestConsumer_Disabled(t *testing.T) {
 	}
 
 	logger := zerolog.New(nil)
-	consumer, err := New(config, nil, nil, logger, nil)
+	consumer, err := New(config, nil, nil, nil, nil, logger, nil)
 	assert.NoError(t, err)
 
 	// Should be a no-op consumer

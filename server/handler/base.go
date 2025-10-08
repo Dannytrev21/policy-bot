@@ -16,6 +16,7 @@ package handler
 
 import (
 	"context"
+	"sync"
 
 	"github.com/google/go-github/v74/github"
 	"github.com/palantir/go-baseapp/baseapp"
@@ -33,13 +34,34 @@ const (
 type Base struct {
 	githubapp.ClientCreator
 
-	Installations githubapp.InstallationsService
-	GlobalCache   pull.GlobalCache
-	ConfigFetcher *ConfigFetcher
-	BaseConfig    *baseapp.HTTPConfig
-	PullOpts      *PullEvaluationOptions
+	Installations               githubapp.InstallationsService
+	ConfigFetcher               *ConfigFetcher
+	AutorRemediateConfigFetcher *ConfigFetcher
+	GlobalCache                 pull.GlobalCache
+	BaseConfig                  *baseapp.HTTPConfig
+	PullOpts                    *PullEvaluationOptions
+	InstallationIdMap           map[int64]int64
+	GithubCloud                 bool
+	mu                          *sync.RWMutex
 
-	AppName string
+	AppName              string
+	DefaultFetchedConfig *FetchedConfig
+}
+
+func (base *Base) Initialize() {
+
+	if base.InstallationIdMap == nil {
+		base.InstallationIdMap = make(map[int64]int64)
+	}
+
+	if base.mu == nil {
+		base.mu = &sync.RWMutex{}
+	}
+
+	if base.DefaultFetchedConfig == nil {
+		base.DefaultFetchedConfig = &FetchedConfig{}
+	}
+
 }
 
 // PostStatus posts a GitHub commit status with consistent logging.

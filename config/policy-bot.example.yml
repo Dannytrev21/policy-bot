@@ -109,39 +109,140 @@ logging:
 #   # Maximum number of retries before giving up (default: 3)
 #   max_retries: 3
 
-# Options for connecting to GitHub
-github:
-  # The URL of the GitHub homepage. Can also be set by the GITHUB_WEB_URL
-  # environment variable.
-  web_url: "https://github.com"
-  # The base URL for v3 (REST) API requests. Can also be set by the
-  # GITHUB_V3_API_URL environment variable.
-  v3_api_url: "https://api.github.com"
-  # The base URL for v4 (GraphQL) API requests. Can also be set by the
-  # GITHUB_V4_API_URL environment variable.
-  v4_api_url: "https://api.github.com/graphql"
+# ==============================================================================
+# GitHub Configuration
+# ==============================================================================
+# Configure one or both GitHub app connections. The application supports:
+# - GitHub Enterprise Cloud (github.com or GitHub Enterprise Cloud accounts)
+# - GitHub Enterprise Server (self-hosted GitHub instances)
+#
+# You can configure one or both depending on your needs. When both are
+# configured, the application routes webhooks and API calls based on the
+# source (detected via headers or SQS message content).
+#
+# Environment variable prefix:
+# - GitHub Enterprise: GITHUB_ENTERPRISE_*
+# - GitHub Cloud: GITHUB_CLOUD_*
+# ==============================================================================
+
+# GitHub Enterprise Server Configuration
+# Use this for self-hosted GitHub Enterprise Server instances
+github_enterprise:
+  # The URL of the GitHub Enterprise homepage
+  # Environment variable: GITHUB_ENTERPRISE_GITHUB_WEB_URL
+  web_url: "https://github.enterprise.company.com"
+
+  # The base URL for v3 (REST) API requests
+  # Environment variable: GITHUB_ENTERPRISE_GITHUB_V3_API_URL
+  v3_api_url: "https://github.enterprise.company.com/api/v3"
+
+  # The base URL for v4 (GraphQL) API requests
+  # Environment variable: GITHUB_ENTERPRISE_GITHUB_V4_API_URL
+  v4_api_url: "https://github.enterprise.company.com/api/graphql"
+
+  # GitHub App configuration
   app:
-    # The integration ID of the GitHub app. Can also be set by the
-    # GITHUB_APP_INTEGRATION_ID environment variable.
-    integration_id: 1
-    # A random string used to validate webhooks. Can also be set by the
-    # GITHUB_APP_WEBHOOK_SECRET environment variable.
-    webhook_secret: "app_secret"
-    # The private key of the GitHub app. Can also be set by the
-    # GITHUB_APP_PRIVATE_KEY environment variable.
+    # The integration ID of your GitHub App
+    # Environment variable: GITHUB_ENTERPRISE_GITHUB_APP_INTEGRATION_ID
+    integration_id: 123
+
+    # Webhook secret for validating webhook requests
+    # Environment variable: GITHUB_ENTERPRISE_GITHUB_APP_WEBHOOK_SECRET
+    webhook_secret: "enterprise_webhook_secret"
+
+    # The private key of your GitHub App (in PEM format)
+    # Environment variable: GITHUB_ENTERPRISE_GITHUB_APP_PRIVATE_KEY
     private_key: |
       -----BEGIN RSA PRIVATE KEY-----
-      xxxxx
-      xxxxx
-      xxxxx
+      MIIEpAIBAAKCAQEA...
+      ...your enterprise private key...
       -----END RSA PRIVATE KEY-----
+
+  # OAuth configuration (optional, required for UI login features)
   oauth:
-    # The client ID of the OAuth app associated with the GitHub app. Can also
-    # be set by the GITHUB_OAUTH_CLIENT_ID environment variable.
-    client_id: "client_id"
-    # The client secret of the OAuth app associated with the GitHub app. Can
-    # also be set by the GITHUB_OAUTH_CLIENT_SECRET environment variable.
-    client_secret: "client_secret"
+    # OAuth app client ID associated with your GitHub App
+    # Environment variable: GITHUB_ENTERPRISE_GITHUB_OAUTH_CLIENT_ID
+    client_id: "enterprise_oauth_client_id"
+
+    # OAuth app client secret
+    # Environment variable: GITHUB_ENTERPRISE_GITHUB_OAUTH_CLIENT_SECRET
+    client_secret: "enterprise_oauth_client_secret"
+
+  # Optional: Custom webhook route for this app (defaults to /api/github/hook)
+  # webhook_route: "/api/github/enterprise/hook"
+
+  # Optional: Event routing configuration for SQS vs HTTP
+  # Controls which events are processed via SQS, HTTP, or both
+  # event_routing:
+  #   pull_request: "sqs"
+  #   status: "http"
+  #   issue_comment: "both"
+
+# GitHub Enterprise Cloud Configuration
+# Use this for github.com or GitHub Enterprise Cloud accounts
+github_cloud:
+  # The URL of the GitHub homepage (typically github.com)
+  # Environment variable: GITHUB_CLOUD_GITHUB_WEB_URL
+  web_url: "https://github.com"
+
+  # The base URL for v3 (REST) API requests
+  # Environment variable: GITHUB_CLOUD_GITHUB_V3_API_URL
+  v3_api_url: "https://api.github.com"
+
+  # The base URL for v4 (GraphQL) API requests
+  # Environment variable: GITHUB_CLOUD_GITHUB_V4_API_URL
+  v4_api_url: "https://api.github.com/graphql"
+
+  # GitHub App configuration
+  app:
+    # The integration ID of your GitHub App
+    # Environment variable: GITHUB_CLOUD_GITHUB_APP_INTEGRATION_ID
+    integration_id: 456
+
+    # Webhook secret for validating webhook requests
+    # Environment variable: GITHUB_CLOUD_GITHUB_APP_WEBHOOK_SECRET
+    webhook_secret: "cloud_webhook_secret"
+
+    # The private key of your GitHub App (in PEM format)
+    # Environment variable: GITHUB_CLOUD_GITHUB_APP_PRIVATE_KEY
+    private_key: |
+      -----BEGIN RSA PRIVATE KEY-----
+      MIIEpAIBAAKCAQEA...
+      ...your cloud private key...
+      -----END RSA PRIVATE KEY-----
+
+  # OAuth configuration (optional, required for UI login features)
+  oauth:
+    # OAuth app client ID associated with your GitHub App
+    # Environment variable: GITHUB_CLOUD_GITHUB_OAUTH_CLIENT_ID
+    client_id: "cloud_oauth_client_id"
+
+    # OAuth app client secret
+    # Environment variable: GITHUB_CLOUD_GITHUB_OAUTH_CLIENT_SECRET
+    client_secret: "cloud_oauth_client_secret"
+
+  # Optional: Custom webhook route for this app (defaults to /api/github/hook)
+  # webhook_route: "/api/github/cloud/hook"
+
+  # Optional: Event routing configuration for SQS vs HTTP
+  # Controls which events are processed via SQS, HTTP, or both
+  # event_routing:
+  #   pull_request: "both"
+  #   status: "sqs"
+  #   check_run: "sqs"
+
+# ==============================================================================
+# Configuration Notes:
+# ==============================================================================
+# 1. You must configure at least one of github_enterprise or github_cloud
+# 2. When both are configured, webhooks are routed based on:
+#    - HTTP: X-GitHub-Enterprise-Host header (GHES) or x-dcp-destination-host (GHEC)
+#    - SQS: Host field in the message headers
+# 3. All URL fields (web_url, v3_api_url, v4_api_url) are required
+# 4. All app fields (integration_id, webhook_secret, private_key) are required
+# 5. OAuth fields are optional but both must be set if you want OAuth features
+# 6. Use environment variables for sensitive data in production
+# ==============================================================================
 
 # Options for user sessions
 sessions:
@@ -150,7 +251,11 @@ sessions:
   key: "secretsessionkey"
 
 # Options for application behavior. The defaults are shown below.
+# Note: You can configure separate options for cloud_options and enterprise_options
+# if you need different behavior for each GitHub instance.
 #
+# cloud_options:
+# enterprise_options:
 # options:
 #   # The path to the policy file in a repository. Can also be set by the
 #   # POLICYBOT_OPTIONS_POLICY_PATH environment variable.

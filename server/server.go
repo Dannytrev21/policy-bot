@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	"github.com/palantir/go-githubapp/oauth2"
 	"github.com/palantir/policy-bot/pull"
 	"github.com/palantir/policy-bot/server/handler"
+	"github.com/palantir/policy-bot/server/middleware"
 	"github.com/palantir/policy-bot/server/sqsconsumer"
 	"github.com/palantir/policy-bot/version"
 	"github.com/pkg/errors"
@@ -51,6 +53,7 @@ const (
 
 	DefaultHTTPCacheSize     = 50 * datasize.MB
 	DefaultPushedAtCacheSize = 100_000
+	DefaultPolicyBotRoute    = "/policy-bot"
 )
 
 type Server struct {
@@ -105,24 +108,58 @@ func New(c *Config) (*Server, error) {
 		githubTimeout = DefaultGitHubTimeout
 	}
 
-	v4URL, err := url.Parse(c.Github.V4APIURL)
+	// Use enterprise config for V4 URL, fallback to cloud if not set
+	enterpriseV4URL := c.GithubEnterprise.V4APIURL
+	if enterpriseV4URL == "" {
+		enterpriseV4URL = c.GithubCloud.V4APIURL
+	}
+	if enterpriseV4URL == "" {
+		return nil, errors.New("no GitHub v4 API URL configured: must set v4_api_url in github_enterprise or github_cloud")
+	}
+
+	environmentProxy := os.Getenv("AWS_PROXY")
+
+	if len(environmentProxy) == 0 {
+		environmentProxy = os.Getenv("HTTP_PROXY")
+	}
+
+	proxyURL, err := url.Parse(environmentProxy)
 	if err != nil {
-		return nil, errors.Wrap(err, "invalid v4 API URL")
+		return nil, errors.Wrap(err, "invalid proxy URL")
+	}
+
+	transport := &http.Transport{
+		Proxy: http.ProxyURL(proxyURL),
 	}
 
 	userAgent := fmt.Sprintf("policy-bot/%s", version.GetVersion())
-	cc, err := githubapp.NewDefaultCachingClientCreator(
-		c.Github,
+	enterpriseClientCreator, err := githubapp.NewDefaultCachingClientCreator(
+		c.GithubEnterprise.Config,
+		githubapp.WithClientUserAgent(userAgent),
+		githubapp.WithClientTimeout(githubTimeout),
+		githubapp.WithTransport(transport),
+		githubapp.WithClientCaching(true, func() httpcache.Cache {
+			return lrucache.New(maxSize, 0)
+		}),
+		githubapp.WithClientMiddleware(
+			githubapp.ClientLogging(zerolog.DebugLevel),
+			githubapp.ClientMetrics(base.Registry()),
+		),
+	)
+
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to initialize enterprise client creator")
+	}
+
+	cloudClientCreator, err := githubapp.NewDefaultCachingClientCreator(
+		c.GithubCloud.Config,
 		githubapp.WithClientUserAgent(userAgent),
 		githubapp.WithClientTimeout(githubTimeout),
 		githubapp.WithClientCaching(true, func() httpcache.Cache {
 			return lrucache.New(maxSize, 0)
 		}),
 		githubapp.WithClientMiddleware(
-			githubapp.ClientLogging(
-				zerolog.DebugLevel,
-				githubapp.LogRequestBody("^"+v4URL.Path+"$"),
-			),
+			githubapp.ClientLogging(zerolog.DebugLevel),
 			githubapp.ClientMetrics(base.Registry()),
 		),
 	)
@@ -130,12 +167,22 @@ func New(c *Config) (*Server, error) {
 		return nil, errors.Wrap(err, "failed to initialize client creator")
 	}
 
-	appClient, err := cc.NewAppClient()
+	enterpriseAppClient, err := enterpriseClientCreator.NewAppClient()
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to initialize Github app client")
 	}
 
-	app, _, err := appClient.Apps.Get(context.Background(), "")
+	enterpriseApp, _, err := enterpriseAppClient.Apps.Get(context.Background(), "")
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get configured GitHub app")
+	}
+
+	cloudAppClient, err := cloudClientCreator.NewAppClient()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to initialize Github app client")
+	}
+
+	cloudApp, _, err := cloudAppClient.Apps.Get(context.Background(), "")
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get configured GitHub app")
 	}
@@ -150,31 +197,48 @@ func New(c *Config) (*Server, error) {
 		return nil, errors.Wrap(err, "failed to initialize global cache")
 	}
 
-	policyPaths := []string{c.Options.PolicyPath}
-	if c.Options.ForceSharedPolicy {
-		policyPaths = []string{}
-	}
+	// policyPaths := []string{c.Options.PolicyPath}
+	// if c.Options.ForceSharedPolicy {
+	// 	policyPaths = []string{}
+	// }
 
-	sharedPolicyPaths := []string{}
-	if c.Options.SharedPolicyPath != nil {
-		sharedPolicyPaths = []string{*c.Options.SharedPolicyPath}
-	}
+	// sharedPolicyPaths := []string{}
+	// if c.Options.SharedPolicyPath != nil {
+	// 	sharedPolicyPaths = []string{*c.Options.SharedPolicyPath}
+	// }
 
-	basePolicyHandler := handler.Base{
-		ClientCreator: cc,
+	enterpriseBasePolicyHandler := handler.Base{
+		ClientCreator: enterpriseClientCreator,
 		BaseConfig:    &c.Server,
-		Installations: githubapp.NewInstallationsService(appClient),
+		Installations: githubapp.NewInstallationsService(enterpriseAppClient),
 		GlobalCache:   globalCache,
 
-		PullOpts: &c.Options,
+		PullOpts: &c.EnterpriseOptions,
 		ConfigFetcher: &handler.ConfigFetcher{
 			Loader: appconfig.NewLoader(
-				policyPaths,
-				appconfig.WithOwnerDefault(*c.Options.SharedRepository, sharedPolicyPaths),
+				[]string{c.EnterpriseOptions.PolicyPath},
+				appconfig.WithOwnerDefault(c.EnterpriseOptions.SharedRepository, []string{c.EnterpriseOptions.SharedPolicyPath}),
 			),
 		},
 
-		AppName: app.GetSlug(),
+		AppName: enterpriseApp.GetSlug(),
+	}
+
+	cloudBasePolicyHandler := handler.Base{
+		ClientCreator: cloudClientCreator,
+		BaseConfig:    &c.Server,
+		Installations: githubapp.NewInstallationsService(cloudAppClient),
+		GlobalCache:   globalCache,
+
+		PullOpts: &c.CloudOptions,
+		ConfigFetcher: &handler.ConfigFetcher{
+			Loader: appconfig.NewLoader(
+				[]string{c.CloudOptions.PolicyPath},
+				appconfig.WithOwnerDefault(c.CloudOptions.SharedRepository, []string{c.CloudOptions.SharedPolicyPath}),
+			),
+		},
+
+		AppName: cloudApp.GetSlug(),
 	}
 
 	queueSize := c.Workers.QueueSize
@@ -187,29 +251,53 @@ func New(c *Config) (*Server, error) {
 		workers = DefaultWebhookWorkers
 	}
 
-	handlers := []githubapp.EventHandler{
-		&handler.Installation{Base: basePolicyHandler},
-		&handler.MergeGroup{Base: basePolicyHandler},
-		&handler.PullRequest{Base: basePolicyHandler},
-		&handler.PullRequestReview{Base: basePolicyHandler},
-		&handler.IssueComment{Base: basePolicyHandler},
-		&handler.Status{Base: basePolicyHandler},
-		&handler.CheckRun{Base: basePolicyHandler},
-		&handler.WorkflowRun{Base: basePolicyHandler},
+	enterpriseHandlers := []githubapp.EventHandler{
+		&handler.Installation{Base: enterpriseBasePolicyHandler},
+		&handler.MergeGroup{Base: enterpriseBasePolicyHandler},
+		&handler.PullRequest{Base: enterpriseBasePolicyHandler},
+		&handler.PullRequestReview{Base: enterpriseBasePolicyHandler},
+		&handler.IssueComment{Base: enterpriseBasePolicyHandler},
+		&handler.Status{Base: enterpriseBasePolicyHandler},
+		&handler.CheckRun{Base: enterpriseBasePolicyHandler},
+		&handler.WorkflowRun{Base: enterpriseBasePolicyHandler},
+	}
+
+	cloudHandlers := []githubapp.EventHandler{
+		&handler.Installation{Base: cloudBasePolicyHandler},
+		&handler.MergeGroup{Base: cloudBasePolicyHandler},
+		&handler.PullRequest{Base: cloudBasePolicyHandler},
+		&handler.PullRequestReview{Base: cloudBasePolicyHandler},
+		&handler.IssueComment{Base: cloudBasePolicyHandler},
+		&handler.Status{Base: cloudBasePolicyHandler},
+		&handler.CheckRun{Base: cloudBasePolicyHandler},
+		&handler.WorkflowRun{Base: cloudBasePolicyHandler},
 	}
 
 	// Create the scheduler that both HTTP and SQS will use
-	scheduler := githubapp.QueueAsyncScheduler(
+	cloudScheduler := githubapp.QueueAsyncScheduler(
 		queueSize, workers,
 		githubapp.WithSchedulingMetrics(base.Registry()),
 		githubapp.WithAsyncErrorCallback(githubapp.MetricsAsyncErrorCallback(base.Registry())),
 	)
 
-	dispatcher := githubapp.NewEventDispatcher(
-		handlers,
-		c.Github.App.WebhookSecret,
+	enterpriseScheduler := githubapp.QueueAsyncScheduler(
+		queueSize, workers,
+		githubapp.WithSchedulingMetrics(base.Registry()),
+		githubapp.WithAsyncErrorCallback(githubapp.MetricsAsyncErrorCallback(base.Registry())),
+	)
+
+	enterpriseDispatcher := githubapp.NewEventDispatcher(
+		enterpriseHandlers,
+		c.GithubEnterprise.App.WebhookSecret,
 		githubapp.WithErrorCallback(githubapp.MetricsErrorCallback(base.Registry())),
-		githubapp.WithScheduler(scheduler),
+		githubapp.WithScheduler(enterpriseScheduler),
+	)
+
+	cloudDispatcher := githubapp.NewEventDispatcher(
+		cloudHandlers,
+		c.GithubCloud.App.WebhookSecret,
+		githubapp.WithErrorCallback(githubapp.MetricsErrorCallback(base.Registry())),
+		githubapp.WithScheduler(cloudScheduler),
 	)
 
 	// Create SQS consumer using the same scheduler and handlers
@@ -229,12 +317,21 @@ func New(c *Config) (*Server, error) {
 		MaxRetries:        c.SQS.MaxRetries,
 	}
 
-	sqsConsumer, err := sqsconsumer.New(sqsConfig, handlers, scheduler, logger, base.Registry())
+	sqsConsumer, err := sqsconsumer.New(sqsConfig, enterpriseHandlers, cloudHandlers, enterpriseScheduler, cloudScheduler, logger, base.Registry())
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create SQS consumer")
 	}
 
-	templates, err := handler.LoadTemplates(&c.Files, basePath, c.Github.WebURL)
+	// Use cloud WebURL for templates, fallback to enterprise if cloud not set
+	webURL := c.GithubCloud.WebURL
+	if webURL == "" {
+		webURL = c.GithubEnterprise.WebURL
+	}
+	if webURL == "" {
+		return nil, errors.New("no GitHub web URL configured: must set web_url in github_cloud or github_enterprise")
+	}
+
+	templates, err := handler.LoadTemplates(&c.Files, basePath, webURL)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to load templates")
 	}
@@ -247,52 +344,118 @@ func New(c *Config) (*Server, error) {
 		base.Mux().Handle(pat.New(basePath+"/*"), mux)
 	}
 
-	// webhook route
-	mux.Handle(pat.Post(githubapp.DefaultWebhookRoute), dispatcher)
+	// ============================================================================
+	// Route Configuration:
+	//
+	// Header-based routing (via middleware):
+	//   - /api/github/hook -> webhooks (enterprise/cloud based on headers)
+	//   - / -> index page (enterprise/cloud based on headers)
+	//   - /api/simulate/* -> simulation (enterprise/cloud based on headers)
+	//
+	// Path-based routing (explicit):
+	//   - /details/ghes/* -> GitHub Enterprise Server details
+	//   - /details/ghec/* -> GitHub Enterprise Cloud details
+	//
+	// Shared routes:
+	//   - /api/health -> combined health check
+	//   - /api/metrics -> Prometheus metrics
+	//   - /api/validate -> policy validation utility
+	//   - /static/* -> static assets
+	//   - /oauth/callback -> OAuth callback (session-based)
+	//
+	// Routing priority:
+	//   1. X-GitHub-Enterprise-Host header -> enterprise
+	//   2. x-dcp-destination-host header -> cloud
+	//   3. source query parameter -> enterprise/cloud
+	//   4. Default -> cloud
+	// ============================================================================
 
-	simulateHandler := &handler.Simulate{
-		Base: basePolicyHandler,
+	// Webhook endpoint uses header-based routing:
+	// - X-GitHub-Enterprise-Host header -> enterprise dispatcher
+	// - x-dcp-destination-host header -> cloud dispatcher
+	// - No header -> defaults to cloud dispatcher
+	mux.Handle(pat.Post(githubapp.DefaultWebhookRoute),
+		middleware.SelectWebhookDispatcher(enterpriseDispatcher, cloudDispatcher))
+
+	enterpriseSimulateHandler := &handler.Simulate{
+		Base: enterpriseBasePolicyHandler,
+	}
+
+	cloudSimulateHandler := &handler.Simulate{
+		Base: cloudBasePolicyHandler,
 	}
 
 	// additional API routes
 	mux.Handle(pat.Get("/api/health"), handler.Health())
 	mux.Handle(pat.Get("/api/metrics"), handler.Metrics(base.Registry(), c.Prometheus))
+
+	// Policy validation endpoint - shared utility, no source separation needed
 	mux.Handle(pat.Put("/api/validate"), handler.Validate())
-	mux.Handle(pat.Post("/api/simulate/:owner/:repo/:number"), hatpear.Try(simulateHandler))
+
+	// Policy simulation endpoint - routes based on headers or source param
+	mux.Handle(pat.Post("/api/simulate/:owner/:repo/:number"),
+		middleware.SelectAPIHandler(
+			hatpear.Try(enterpriseSimulateHandler),
+			hatpear.Try(cloudSimulateHandler)))
 
 	oauth2RedirectURL := *publicURL
 	oauth2RedirectURL.Path = basePath + oauth2.DefaultRoute
 
+	// Use cloud config for OAuth, fallback to enterprise if not set
+	oauthConfig := c.GithubCloud.Config
+	if oauthConfig.App.IntegrationID == 0 {
+		oauthConfig = c.GithubEnterprise.Config
+	}
+	if oauthConfig.App.IntegrationID == 0 {
+		return nil, errors.New("no GitHub app configured: must set app.integration_id in github_cloud or github_enterprise")
+	}
+
+	// OAuth callback is shared between enterprise and cloud
+	// Session state determines which GitHub instance to authenticate with
 	mux.Handle(pat.Get(oauth2.DefaultRoute), oauth2.NewHandler(
-		oauth2.GetConfig(c.Github, nil),
+		oauth2.GetConfig(oauthConfig, nil),
 		oauth2.WithStore(&oauth2.SessionStateStore{
 			Sessions: sessions,
 		}),
-		oauth2.OnLogin(handler.Login(c.Github, basePath, sessions)),
+		oauth2.OnLogin(handler.Login(oauthConfig, basePath, sessions)),
 		oauth2.WithRedirectURL(oauth2RedirectURL.String()),
 	))
 
 	// additional client routes
 	mux.Handle(pat.Get("/favicon.ico"), http.RedirectHandler(basePath+"/static/img/favicon.ico", http.StatusFound))
 	mux.Handle(pat.Get("/static/*"), handler.Static(basePath+"/static/", &c.Files))
-	mux.Handle(pat.Get("/"), hatpear.Try(&handler.Index{
-		Base:         basePolicyHandler,
-		GithubConfig: &c.Github,
-		Templates:    templates,
-	}))
 
-	detailsHandler := handler.Details{
-		Base:      basePolicyHandler,
+	// Index page uses header-based routing to display appropriate GitHub App info
+	mux.Handle(pat.Get("/"), middleware.SelectIndexHandler(enterpriseBasePolicyHandler, cloudBasePolicyHandler, &c.GithubEnterprise.Config, &c.GithubCloud.Config, templates))
+
+	enterpriseDetailsHandler := handler.Details{
+		Base:      enterpriseBasePolicyHandler,
 		Sessions:  sessions,
 		Templates: templates,
 	}
 
+	cloudDetailsHandler := handler.Details{
+		Base:      cloudBasePolicyHandler,
+		Sessions:  sessions,
+		Templates: templates,
+	}
+
+	// Details pages use explicit path separation:
+	// - /details/ghes/* for GitHub Enterprise Server
+	// - /details/ghec/* for GitHub Enterprise Cloud
 	details := goji.SubMux()
 	details.Use(handler.RequireLogin(sessions, basePath))
-	details.Handle(pat.Get("/:owner/:repo/:number"), hatpear.Try(&detailsHandler))
-	details.Handle(pat.Get("/:owner/:repo/:number/reviewers"), hatpear.Try(&handler.DetailsReviewers{
-		Details: detailsHandler,
+
+	details.Handle(pat.Get("/ghes/:owner/:repo/:number"), hatpear.Try(&enterpriseDetailsHandler))
+	details.Handle(pat.Get("/ghes/:owner/:repo/:number/reviewers"), hatpear.Try(&handler.DetailsReviewers{
+		Details: enterpriseDetailsHandler,
 	}))
+
+	details.Handle(pat.Get("/ghec/:owner/:repo/:number"), hatpear.Try(&cloudDetailsHandler))
+	details.Handle(pat.Get("/ghec/:owner/:repo/:number/reviewers"), hatpear.Try(&handler.DetailsReviewers{
+		Details: cloudDetailsHandler,
+	}))
+
 	mux.Handle(pat.New("/details/*"), details)
 
 	return &Server{

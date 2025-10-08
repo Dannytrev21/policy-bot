@@ -106,8 +106,10 @@ type consumer struct {
 // New creates a new SQS consumer
 func New(
 	cfg *Config,
-	handlers []githubapp.EventHandler,
-	scheduler githubapp.Scheduler,
+	cloudHandlers []githubapp.EventHandler,
+	enterpriseHandlers []githubapp.EventHandler,
+	cloudScheduler githubapp.Scheduler,
+	enterpriseScheduler githubapp.Scheduler,
 	logger zerolog.Logger,
 	registry metrics.Registry,
 ) (Consumer, error) {
@@ -140,8 +142,11 @@ func New(
 	processor := NewProcessor(
 		processorConfig,
 		sqsClient,
-		handlers,
-		scheduler,
+		enterpriseHandlers,
+		cloudHandlers,
+		enterpriseScheduler,
+		cloudScheduler,
+		cloudScheduler, // Default shared scheduler
 		logger,
 		registry,
 	)

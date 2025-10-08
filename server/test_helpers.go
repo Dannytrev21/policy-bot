@@ -86,14 +86,20 @@ func NewWithTestHandlers(c *Config, testHandlers []githubapp.EventHandler) (*Ser
 		githubTimeout = DefaultGitHubTimeout
 	}
 
-	v4URL, err := url.Parse(c.Github.V4APIURL)
+	// Use cloud config for tests, fallback to enterprise if not set
+	testConfig := c.GithubCloud.Config
+	if testConfig.App.IntegrationID == 0 {
+		testConfig = c.GithubEnterprise.Config
+	}
+
+	v4URL, err := url.Parse(testConfig.V4APIURL)
 	if err != nil {
 		return nil, errors.Wrap(err, "invalid v4 API URL")
 	}
 
 	userAgent := fmt.Sprintf("policy-bot/%s", version.GetVersion())
 	cc, err := githubapp.NewDefaultCachingClientCreator(
-		c.Github,
+		testConfig,
 		githubapp.WithClientUserAgent(userAgent),
 		githubapp.WithClientTimeout(githubTimeout),
 		githubapp.WithClientCaching(true, func() httpcache.Cache {
@@ -141,14 +147,14 @@ func NewWithTestHandlers(c *Config, testHandlers []githubapp.EventHandler) (*Ser
 		handlers = testHandlers
 	} else {
 		// Create minimal policy handlers for normal operation
-		policyPaths := []string{c.Options.PolicyPath}
-		if c.Options.ForceSharedPolicy {
+		policyPaths := []string{c.CloudOptions.PolicyPath}
+		if c.CloudOptions.ForceSharedPolicy {
 			policyPaths = []string{}
 		}
 
 		sharedPolicyPaths := []string{}
-		if c.Options.SharedPolicyPath != nil {
-			sharedPolicyPaths = []string{*c.Options.SharedPolicyPath}
+		if c.CloudOptions.SharedPolicyPath != "" {
+			sharedPolicyPaths = []string{c.CloudOptions.SharedPolicyPath}
 		}
 
 		basePolicyHandler := handler.Base{
@@ -156,11 +162,11 @@ func NewWithTestHandlers(c *Config, testHandlers []githubapp.EventHandler) (*Ser
 			BaseConfig:    &c.Server,
 			Installations: githubapp.NewInstallationsService(appClient),
 			GlobalCache:   globalCache,
-			PullOpts:      &c.Options,
+			PullOpts:      &c.CloudOptions,
 			ConfigFetcher: &handler.ConfigFetcher{
 				Loader: appconfig.NewLoader(
 					policyPaths,
-					appconfig.WithOwnerDefault(*c.Options.SharedRepository, sharedPolicyPaths),
+					appconfig.WithOwnerDefault(c.CloudOptions.SharedRepository, sharedPolicyPaths),
 				),
 			},
 			AppName: app.GetSlug(),
@@ -197,7 +203,7 @@ func NewWithTestHandlers(c *Config, testHandlers []githubapp.EventHandler) (*Ser
 
 	dispatcher := githubapp.NewEventDispatcher(
 		handlers,
-		c.Github.App.WebhookSecret,
+		testConfig.App.WebhookSecret,
 		githubapp.WithErrorCallback(githubapp.MetricsErrorCallback(base.Registry())),
 		githubapp.WithScheduler(scheduler),
 	)
@@ -219,13 +225,13 @@ func NewWithTestHandlers(c *Config, testHandlers []githubapp.EventHandler) (*Ser
 		MaxRetries:        c.SQS.MaxRetries,
 	}
 
-	sqsConsumer, err := sqsconsumer.New(sqsConfig, handlers, scheduler, logger, base.Registry())
+	sqsConsumer, err := sqsconsumer.New(sqsConfig, handlers, handlers, scheduler, scheduler, logger, base.Registry())
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create SQS consumer")
 	}
 
 	// Templates are optional for testing
-	_, err = handler.LoadTemplates(&c.Files, basePath, c.Github.WebURL)
+	_, err = handler.LoadTemplates(&c.Files, basePath, testConfig.WebURL)
 	if err != nil {
 		// For testing, we can ignore template loading errors
 		logger.Warn().Err(err).Msg("Failed to load templates (continuing anyway)")
@@ -251,16 +257,16 @@ func NewWithTestHandlers(c *Config, testHandlers []githubapp.EventHandler) (*Ser
 
 	// For testing, we might not need all the OAuth and UI routes
 	// Only add them if we have proper configuration
-	if c.Github.OAuth.ClientID != "" && c.Github.OAuth.ClientSecret != "" {
+	if testConfig.OAuth.ClientID != "" && testConfig.OAuth.ClientSecret != "" {
 		oauth2RedirectURL := *publicURL
 		oauth2RedirectURL.Path = basePath + oauth2.DefaultRoute
 
 		mux.Handle(pat.Get(oauth2.DefaultRoute), oauth2.NewHandler(
-			oauth2.GetConfig(c.Github, nil),
+			oauth2.GetConfig(testConfig, nil),
 			oauth2.WithStore(&oauth2.SessionStateStore{
 				Sessions: sessions,
 			}),
-			oauth2.OnLogin(handler.Login(c.Github, basePath, sessions)),
+			oauth2.OnLogin(handler.Login(testConfig, basePath, sessions)),
 			oauth2.WithRedirectURL(oauth2RedirectURL.String()),
 		))
 	}

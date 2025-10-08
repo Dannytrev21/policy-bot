@@ -367,18 +367,20 @@ func setupTestServer(t *testing.T, config *IntegrationTestConfig, handler *TestE
 			Level: "debug",
 			Text:  true,
 		},
-		Github: githubapp.Config{
-			WebURL:   "https://github.com",
-			V3APIURL: "https://api.github.com",
-			V4APIURL: "https://api.github.com/graphql",
-			App: struct {
-				IntegrationID int64  `yaml:"integration_id" json:"integrationId"`
-				WebhookSecret string `yaml:"webhook_secret" json:"webhookSecret"`
-				PrivateKey    string `yaml:"private_key" json:"privateKey"`
-			}{
-				IntegrationID: 123456,
-				WebhookSecret: config.WebhookSecret,
-				PrivateKey:    testPrivateKey,
+		GithubCloud: server.GithubAppConfig{
+			Config: githubapp.Config{
+				WebURL:   "https://github.com",
+				V3APIURL: "https://api.github.com",
+				V4APIURL: "https://api.github.com/graphql",
+				App: struct {
+					IntegrationID int64  `yaml:"integration_id" json:"integrationId"`
+					WebhookSecret string `yaml:"webhook_secret" json:"webhookSecret"`
+					PrivateKey    string `yaml:"private_key" json:"privateKey"`
+				}{
+					IntegrationID: 123456,
+					WebhookSecret: config.WebhookSecret,
+					PrivateKey:    testPrivateKey,
+				},
 			},
 		},
 		Sessions: server.SessionsConfig{

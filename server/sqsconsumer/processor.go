@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -41,11 +42,12 @@ const (
 
 // SQSMessage represents a GitHub webhook message in SQS
 type SQSMessage struct {
-	EventType  string          `json:"event_type"`
-	DeliveryID string          `json:"delivery_id"`
-	Payload    json.RawMessage `json:"payload"`
-	RetryCount int             `json:"retry_count,omitempty"`
-	Source     string          `json:"source,omitempty"` // "webhook" or "sqs"
+	EventType  string                 `json:"event_type"`
+	DeliveryID string                 `json:"delivery_id"`
+	Headers    map[string]interface{} `json:"headers,omitempty"` // GitHub webhook headers containing Host field
+	Payload    json.RawMessage        `json:"payload"`
+	RetryCount int                    `json:"retry_count,omitempty"`
+	Source     string                 `json:"source,omitempty"` // Deprecated - kept for backward compatibility
 }
 
 // ProcessorConfig contains configuration for the SQS message processor
@@ -57,12 +59,14 @@ type ProcessorConfig struct {
 
 // Processor handles processing of individual SQS messages
 type Processor struct {
-	config    *ProcessorConfig
-	sqsClient SQSClient
-	handlers  map[string]githubapp.EventHandler
-	scheduler githubapp.Scheduler
-	logger    zerolog.Logger
-	registry  metrics.Registry
+	config              *ProcessorConfig
+	sqsClient           SQSClient
+	enterpriseHandlers  map[string]githubapp.EventHandler
+	cloudHandlers       map[string]githubapp.EventHandler
+	enterpriseScheduler githubapp.Scheduler
+	cloudScheduler      githubapp.Scheduler
+	logger              zerolog.Logger
+	registry            metrics.Registry
 }
 
 // SQSClient interface for SQS operations (allows mocking)
@@ -75,26 +79,38 @@ type SQSClient interface {
 func NewProcessor(
 	config *ProcessorConfig,
 	sqsClient SQSClient,
-	handlers []githubapp.EventHandler,
+	enterpriseHandlers []githubapp.EventHandler,
+	cloudHandlers []githubapp.EventHandler,
+	enterpriseScheduler githubapp.Scheduler,
+	cloudScheduler githubapp.Scheduler,
 	scheduler githubapp.Scheduler,
 	logger zerolog.Logger,
 	registry metrics.Registry,
 ) *Processor {
 	// Build handler map
-	handlerMap := make(map[string]githubapp.EventHandler)
-	for _, handler := range handlers {
+	enterpriseHandlerMap := make(map[string]githubapp.EventHandler)
+	for _, handler := range enterpriseHandlers {
 		for _, eventType := range handler.Handles() {
-			handlerMap[eventType] = handler
+			enterpriseHandlerMap[eventType] = handler
+		}
+	}
+
+	cloudHandlerMap := make(map[string]githubapp.EventHandler)
+	for _, handler := range cloudHandlers {
+		for _, eventType := range handler.Handles() {
+			cloudHandlerMap[eventType] = handler
 		}
 	}
 
 	return &Processor{
-		config:    config,
-		sqsClient: sqsClient,
-		handlers:  handlerMap,
-		scheduler: scheduler,
-		logger:    logger.With().Str("component", "sqs_processor").Logger(),
-		registry:  registry,
+		config:              config,
+		sqsClient:           sqsClient,
+		enterpriseHandlers:  enterpriseHandlerMap,
+		cloudHandlers:       cloudHandlerMap,
+		enterpriseScheduler: enterpriseScheduler,
+		cloudScheduler:      cloudScheduler,
+		logger:              logger.With().Str("component", "sqs_processor").Logger(),
+		registry:            registry,
 	}
 }
 
@@ -113,12 +129,22 @@ func (p *Processor) ProcessMessage(ctx context.Context, eventType, queueURL stri
 	// Add SQS context metadata
 	ctx = context.WithValue(ctx, SQSEventSourceKey, "sqs")
 
+	// Detect source from headers
+	detectedSource := p.detectSourceFromHeaders(sqsMsg)
+
 	msgLogger := p.logger.With().
 		Str("delivery_id", sqsMsg.DeliveryID).
 		Str("message_id", aws.ToString(message.MessageId)).
-		Str("source", sqsMsg.Source).
+		Str("detected_source", detectedSource).
 		Str("event_type", sqsMsg.EventType).
 		Logger()
+
+	// Log Host header if present
+	if sqsMsg.Headers != nil {
+		if host, ok := sqsMsg.Headers["Host"].(string); ok {
+			msgLogger = msgLogger.With().Str("host_header", host).Logger()
+		}
+	}
 
 	ctx = msgLogger.WithContext(ctx)
 
@@ -127,9 +153,11 @@ func (p *Processor) ProcessMessage(ctx context.Context, eventType, queueURL stri
 	// Record processing start time for metrics
 	start := time.Now()
 
+	handler, scheduler := p.selectHandler(sqsMsg)
+
 	// Find the appropriate handler
-	handler, exists := p.handlers[sqsMsg.EventType]
-	if !exists {
+
+	if handler == nil {
 		msgLogger.Debug().Msgf("No handler for event type: %s", sqsMsg.EventType)
 		// Delete message since we can't process it anyway
 		return p.deleteMessage(ctx, queueURL, message.ReceiptHandle, msgLogger)
@@ -147,7 +175,7 @@ func (p *Processor) ProcessMessage(ctx context.Context, eventType, queueURL stri
 	}
 
 	// Use the scheduler to process the event (maintains consistency with HTTP path)
-	err = p.scheduler.Schedule(ctx, dispatch)
+	err = scheduler.Schedule(ctx, dispatch)
 
 	// Record metrics
 	p.recordMetrics(sqsMsg.EventType, start, err)
@@ -172,19 +200,58 @@ func (p *Processor) ProcessMessage(ctx context.Context, eventType, queueURL stri
 func (p *Processor) parseMessage(eventType string, message types.Message) (SQSMessage, error) {
 	var sqsMsg SQSMessage
 
+	// Try to unmarshal as our structured SQS message format
 	if err := json.Unmarshal([]byte(*message.Body), &sqsMsg); err != nil {
-		// If it's not our expected format, treat the body as raw payload
-		sqsMsg = SQSMessage{
-			EventType:  eventType,
-			DeliveryID: aws.ToString(message.MessageId),
-			Payload:    json.RawMessage(*message.Body),
-			Source:     "sqs",
+		// If it's not our expected format, check if it's a GitHub webhook with headers
+		var webhookData map[string]interface{}
+		if err2 := json.Unmarshal([]byte(*message.Body), &webhookData); err2 == nil {
+			// Check if this looks like a GitHub webhook with headers at the top level
+			if headers, hasHeaders := webhookData["headers"].(map[string]interface{}); hasHeaders {
+				// Extract payload if it exists separately
+				var payload json.RawMessage
+				if payloadData, hasPayload := webhookData["payload"]; hasPayload {
+					payload, _ = json.Marshal(payloadData)
+				} else {
+					// If no separate payload field, the whole message might be the payload
+					payload = json.RawMessage(*message.Body)
+				}
+
+				sqsMsg = SQSMessage{
+					EventType:  eventType,
+					DeliveryID: aws.ToString(message.MessageId),
+					Headers:    headers,
+					Payload:    payload,
+				}
+
+				p.logger.Debug().
+					Interface("headers", headers).
+					Msg("Parsed GitHub webhook with headers")
+			} else {
+				// No headers found, treat entire body as payload
+				sqsMsg = SQSMessage{
+					EventType:  eventType,
+					DeliveryID: aws.ToString(message.MessageId),
+					Payload:    json.RawMessage(*message.Body),
+				}
+			}
+		} else {
+			// Complete fallback - couldn't parse at all, treat as raw payload
+			sqsMsg = SQSMessage{
+				EventType:  eventType,
+				DeliveryID: aws.ToString(message.MessageId),
+				Payload:    json.RawMessage(*message.Body),
+			}
 		}
-	} else {
-		// Ensure source is set for structured messages
-		if sqsMsg.Source == "" {
-			sqsMsg.Source = "sqs"
-		}
+	}
+
+	// Set default event type if not provided
+	if sqsMsg.EventType == "" {
+		sqsMsg.EventType = eventType
+	}
+
+	// Ensure payload is set if it's still nil (shouldn't happen, but be safe)
+	if sqsMsg.Payload == nil || len(sqsMsg.Payload) == 0 {
+		sqsMsg.Payload = json.RawMessage(*message.Body)
 	}
 
 	return sqsMsg, nil
@@ -263,5 +330,59 @@ func (p *Processor) recordMetrics(eventType string, start time.Time, err error) 
 		if processedCounter := metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s", MetricsKeyMessagesProcessed, eventType), p.registry); processedCounter != nil {
 			processedCounter.Inc(1)
 		}
+	}
+}
+
+// detectSourceFromHeaders examines the headers in the SQS message to determine source
+func (p *Processor) detectSourceFromHeaders(sqsMsg SQSMessage) string {
+	// Check headers for Host field
+	if sqsMsg.Headers != nil {
+		if host, ok := sqsMsg.Headers["Host"].(string); ok {
+			// If Host contains "ghec", it's cloud
+			if strings.Contains(strings.ToLower(host), "ghec") {
+				p.logger.Debug().
+					Str("host", host).
+					Str("detected_source", "cloud").
+					Msg("Detected cloud source from Host header containing 'ghec'")
+				return "cloud"
+			}
+			// Otherwise it's enterprise
+			p.logger.Debug().
+				Str("host", host).
+				Str("detected_source", "enterprise").
+				Msg("Detected enterprise source from Host header (no 'ghec')")
+			return "enterprise"
+		}
+	}
+
+	// Fallback: check legacy source field for backward compatibility
+	if sqsMsg.Source == "enterprise" {
+		p.logger.Debug().
+			Str("legacy_source", sqsMsg.Source).
+			Msg("Using legacy source field for routing")
+		return "enterprise"
+	}
+
+	// Default to cloud (consistent with HTTP routing)
+	p.logger.Debug().
+		Msg("No Host header or source field found, defaulting to cloud")
+	return "cloud"
+}
+
+func (p *Processor) selectHandler(sqsMsg SQSMessage) (githubapp.EventHandler, githubapp.Scheduler) {
+	source := p.detectSourceFromHeaders(sqsMsg)
+
+	if source == "enterprise" {
+		enterpriseHandler, exists := p.enterpriseHandlers[sqsMsg.EventType]
+		if !exists {
+			return nil, nil
+		}
+		return enterpriseHandler, p.enterpriseScheduler
+	} else {
+		cloudHandler, exists := p.cloudHandlers[sqsMsg.EventType]
+		if !exists {
+			return nil, nil
+		}
+		return cloudHandler, p.cloudScheduler
 	}
 }

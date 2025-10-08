@@ -29,8 +29,8 @@ const (
 type PullEvaluationOptions struct {
 	PolicyPath string `yaml:"policy_path"`
 
-	SharedRepository *string `yaml:"shared_repository"`
-	SharedPolicyPath *string `yaml:"shared_policy_path"`
+	SharedRepository string `yaml:"shared_repository"`
+	SharedPolicyPath string `yaml:"shared_policy_path"`
 
 	// Ignore PolicyPath and use SharedRepository and SharedPolicyPath only.
 	ForceSharedPolicy bool `yaml:"force_shared_policy"`
@@ -76,21 +76,21 @@ func (p *PullEvaluationOptions) fillDefaults() {
 	if p.PolicyPath == "" {
 		p.PolicyPath = DefaultPolicyPath
 	}
-	if p.SharedRepository == nil {
+	if p.SharedRepository == "" {
 		defaultSharedRepository := DefaultSharedRepository
-		p.SharedRepository = &defaultSharedRepository
+		p.SharedRepository = defaultSharedRepository
 	}
-	if p.SharedPolicyPath == nil {
+	if p.SharedPolicyPath == "" {
 		defaultSharedPolicyPath := DefaultSharedPolicyPath
-		p.SharedPolicyPath = &defaultSharedPolicyPath
+		p.SharedPolicyPath = defaultSharedPolicyPath
 	}
 
 	// Explicitly set either `SharedRepository` or `SharedPolicyPath` to an
 	// empty string to disable the shared repository feature.
-	if *p.SharedRepository == "" || *p.SharedPolicyPath == "" {
+	if p.SharedRepository == "" || p.SharedPolicyPath == "" {
 		emptyString := ""
-		p.SharedRepository = &emptyString
-		p.SharedPolicyPath = nil
+		p.SharedRepository = emptyString
+		p.SharedPolicyPath = emptyString
 	}
 
 	if p.StatusCheckContext == "" {
@@ -100,8 +100,8 @@ func (p *PullEvaluationOptions) fillDefaults() {
 
 func (p *PullEvaluationOptions) SetValuesFromEnv(prefix string) {
 	setStringFromEnv("POLICY_PATH", prefix, &p.PolicyPath)
-	setStringPtrFromEnv("SHARED_REPOSITORY", prefix, &p.SharedRepository)
-	setStringPtrFromEnv("SHARED_POLICY_PATH", prefix, &p.SharedPolicyPath)
+	setStringPtrFromEnv("SHARED_REPOSITORY", prefix, p.SharedRepository)
+	setStringPtrFromEnv("SHARED_POLICY_PATH", prefix, p.SharedPolicyPath)
 	setStringFromEnv("STATUS_CHECK_CONTEXT", prefix, &p.StatusCheckContext)
 	setBoolFromEnv("EXPAND_REQUIRED_REVIEWERS", prefix, &p.ExpandRequiredReviewers)
 	setBoolFromEnv("STRICT_REVIEW_DISMISSAL", prefix, &p.StrictReviewDismissal)
@@ -118,9 +118,9 @@ func setStringFromEnv(key, prefix string, value *string) bool {
 	return false
 }
 
-func setStringPtrFromEnv(key, prefix string, value **string) bool {
+func setStringPtrFromEnv(key, prefix string, value string) bool {
 	if v, ok := os.LookupEnv(prefix + key); ok {
-		*value = &v
+		value = v
 		return true
 	}
 	return false
