@@ -426,7 +426,6 @@ Enhance metrics, logging, and health checks for production visibility.
 - [x] Health checks provide queue depth information
 - [x] DLQ monitoring implemented
 - [x] Context properly enriched for tracing
-- [ ] Grafana dashboard created (deferred to Phase 4)
 
 ---
 
@@ -871,20 +870,18 @@ func (p *Processor) detectSourceFromHeaders(sqsMsg SQSMessage) string {
 
 ### A.2 SQS Message Format
 ```json
+
 {
-  "event_type": "pull_request",
-  "delivery_id": "12345-67890-abcdef",
-  "headers": {
-    "Host": "ghec.example.com",
-    "X-GitHub-Event": "pull_request",
-    "X-GitHub-Delivery": "12345-67890-abcdef"
-  },
-  "payload": {
     "action": "opened",
     "pull_request": { /* ... */ },
-    "repository": { /* ... */ }
-  }
+    "repository": { /* ... */ }, 
+    "headers": {
+        "Host": "ghec.example.com",
+        "X-GitHub-Event": "pull_request",
+        "X-GitHub-Delivery": "12345-67890-abcdef"
+    }
 }
+
 ```
 
 ### A.3 Queue Name Convention

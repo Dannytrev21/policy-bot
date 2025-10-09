@@ -208,10 +208,11 @@ func New(c *Config) (*Server, error) {
 	// }
 
 	enterpriseBasePolicyHandler := handler.Base{
-		ClientCreator: enterpriseClientCreator,
-		BaseConfig:    &c.Server,
-		Installations: githubapp.NewInstallationsService(enterpriseAppClient),
-		GlobalCache:   globalCache,
+		ClientCreator:     enterpriseClientCreator,
+		BaseConfig:        &c.Server,
+		Installations:     githubapp.NewInstallationsService(enterpriseAppClient),
+		InstallationIdMap: make(map[int64]int64),
+		GlobalCache:       globalCache,
 
 		PullOpts: &c.EnterpriseOptions,
 		ConfigFetcher: &handler.ConfigFetcher{
@@ -410,14 +411,28 @@ func New(c *Config) (*Server, error) {
 		return nil, errors.New("no GitHub app configured: must set app.integration_id in github_cloud or github_enterprise")
 	}
 
+	ghecAuthPath := basePath + "/api/github/auth/ghec"
+	ghesAuthPath := basePath + "/api/github/auth/ghes"
+
 	// OAuth callback is shared between enterprise and cloud
 	// Session state determines which GitHub instance to authenticate with
-	mux.Handle(pat.Get(oauth2.DefaultRoute), oauth2.NewHandler(
-		oauth2.GetConfig(oauthConfig, nil),
+	mux.Handle(pat.Get(ghesAuthPath), oauth2.NewHandler(
+		oauth2.GetConfig(c.GithubEnterprise.Config, nil),
+		oauth2.ForceTLS(forceTLS),
 		oauth2.WithStore(&oauth2.SessionStateStore{
 			Sessions: sessions,
 		}),
-		oauth2.OnLogin(handler.Login(oauthConfig, basePath, sessions)),
+		oauth2.OnLogin(handler.Login(c.GithubEnterprise.Config, basePath, sessions)),
+		oauth2.WithRedirectURL(oauth2RedirectURL.String()),
+	))
+
+	mux.Handle(pat.Get(ghecAuthPath), oauth2.NewHandler(
+		oauth2.GetConfig(c.GithubCloud.Config, nil),
+		oauth2.ForceTLS(forceTLS),
+		oauth2.WithStore(&oauth2.SessionStateStore{
+			Sessions: sessions,
+		}),
+		oauth2.OnLogin(handler.Login(c.GithubCloud.Config, basePath, sessions)),
 		oauth2.WithRedirectURL(oauth2RedirectURL.String()),
 	))
 
