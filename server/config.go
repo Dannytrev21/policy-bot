@@ -20,11 +20,11 @@ import (
 	"time"
 
 	"github.com/c2h5oh/datasize"
-	"github.com/palantir/go-baseapp/appmetrics/emitter/datadog"
-	"github.com/palantir/go-baseapp/appmetrics/emitter/prometheus"
 	"github.com/palantir/go-baseapp/baseapp"
+	"github.com/palantir/go-baseapp/baseapp/datadog"
 	"github.com/palantir/go-githubapp/githubapp"
 	"github.com/palantir/policy-bot/server/handler"
+	"github.com/palantir/policy-bot/server/metricsbridge"
 	"github.com/pkg/errors"
 	"gopkg.in/yaml.v2"
 )
@@ -63,7 +63,7 @@ type Config struct {
 	EnterpriseOptions handler.PullEvaluationOptions `yaml:"enterprise_options"`
 	Files             handler.FilesConfig           `yaml:"files"`
 	Datadog           datadog.Config                `yaml:"datadog"`
-	Prometheus        prometheus.Config             `yaml:"prometheus"`
+	Prometheus        metricsbridge.Config          `yaml:"prometheus"`
 	Workers           WorkerConfig                  `yaml:"workers"`
 	SQS               SQSConfig                     `yaml:"sqs"`
 }
@@ -115,6 +115,11 @@ type SQSConfig struct {
 
 	// AWS endpoint URL for LocalStack/testing (optional)
 	EndpointURL string `yaml:"endpoint_url"`
+
+	// Processing mode: "scheduler" (legacy) or "direct" (worker pools)
+	// Default: "scheduler" for backward compatibility
+	// "direct" mode bypasses the internal scheduler and uses dedicated worker pools
+	ProcessingMode string `yaml:"processing_mode"`
 
 	// DEPRECATED: Use EventQueues for enhanced configuration
 	// Map of GitHub event type to SQS queue URL

@@ -433,7 +433,9 @@ func sendHTTPWebhook(t *testing.T, serverURL, secret string, event GitHubEvent) 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() {
+		require.NoError(t, resp.Body.Close())
+	}()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }

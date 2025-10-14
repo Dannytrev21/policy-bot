@@ -32,11 +32,11 @@ import (
 
 const (
 	// Context keys for SQS processing
-	SQSEventSourceKey    = "sqs_event_source"
-	SQSEventEnvironment  = "sqs_event_environment"
-	SQSQueueName         = "sqs_queue_name"
-	SQSMessageID         = "sqs_message_id"
-	SQSReceiptHandle     = "sqs_receipt_handle"
+	SQSEventSourceKey   = "sqs_event_source"
+	SQSEventEnvironment = "sqs_event_environment"
+	SQSQueueName        = "sqs_queue_name"
+	SQSMessageID        = "sqs_message_id"
+	SQSReceiptHandle    = "sqs_receipt_handle"
 
 	// Metrics keys
 	MetricsKeyMessagesProcessed = "sqs.messages.processed"
@@ -61,6 +61,7 @@ type ProcessorConfig struct {
 	EnableRetry       bool
 	MaxRetries        int
 	VisibilityTimeout int
+	ProcessingMode    string // "scheduler" or "direct"
 }
 
 // Processor handles processing of individual SQS messages
@@ -71,14 +72,18 @@ type Processor struct {
 	cloudHandlers       map[string]githubapp.EventHandler
 	enterpriseScheduler githubapp.Scheduler
 	cloudScheduler      githubapp.Scheduler
+	workerPoolMgr       *WorkerPoolManager
 	logger              zerolog.Logger
 	registry            metrics.Registry
+	queueWorkers        map[string]int // Worker count per event type
 }
 
 // SQSClient interface for SQS operations (allows mocking)
 type SQSClient interface {
 	DeleteMessage(ctx context.Context, params *sqs.DeleteMessageInput, optFns ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
 	SendMessage(ctx context.Context, params *sqs.SendMessageInput, optFns ...func(*sqs.Options)) (*sqs.SendMessageOutput, error)
+	GetQueueAttributes(ctx context.Context, params *sqs.GetQueueAttributesInput, optFns ...func(*sqs.Options)) (*sqs.GetQueueAttributesOutput, error)
+	ReceiveMessage(ctx context.Context, params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
 }
 
 // NewProcessor creates a new SQS message processor
@@ -90,6 +95,7 @@ func NewProcessor(
 	enterpriseScheduler githubapp.Scheduler,
 	cloudScheduler githubapp.Scheduler,
 	scheduler githubapp.Scheduler,
+	workerPoolMgr *WorkerPoolManager,
 	logger zerolog.Logger,
 	registry metrics.Registry,
 ) *Processor {
@@ -115,8 +121,10 @@ func NewProcessor(
 		cloudHandlers:       cloudHandlerMap,
 		enterpriseScheduler: enterpriseScheduler,
 		cloudScheduler:      cloudScheduler,
+		workerPoolMgr:       workerPoolMgr,
 		logger:              logger.With().Str("component", "sqs_processor").Logger(),
 		registry:            registry,
+		queueWorkers:        make(map[string]int),
 	}
 }
 
@@ -180,22 +188,20 @@ func (p *Processor) ProcessMessage(ctx context.Context, eventType, queueURL stri
 	// Convert payload to bytes for the handler
 	payloadBytes := []byte(sqsMsg.Payload)
 
-	// Create a dispatch for the scheduler
-	dispatch := githubapp.Dispatch{
-		Handler:    handler,
-		EventType:  sqsMsg.EventType,
-		DeliveryID: sqsMsg.DeliveryID,
-		Payload:    payloadBytes,
+	// Process based on configured mode
+	if p.config.ProcessingMode == "direct" {
+		// Direct processing mode - bypass scheduler, use worker pool
+		err = p.processViaDirect(ctx, sqsMsg, handler, payloadBytes, msgLogger)
+	} else {
+		// Legacy scheduler mode
+		err = p.processViaScheduler(ctx, sqsMsg, handler, scheduler, payloadBytes, msgLogger)
 	}
-
-	// Use the scheduler to process the event (maintains consistency with HTTP path)
-	err = scheduler.Schedule(ctx, dispatch)
 
 	// Record metrics with environment context
 	p.recordMetrics(sqsMsg.EventType, detectedSource, start, err)
 
 	if err != nil {
-		msgLogger.Error().Err(err).Msg("Failed to schedule GitHub event from SQS")
+		msgLogger.Error().Err(err).Msg("Failed to process GitHub event from SQS")
 
 		// Handle retries if enabled
 		if p.config.EnableRetry && sqsMsg.RetryCount < p.config.MaxRetries {
@@ -417,6 +423,15 @@ func (p *Processor) detectSourceFromHeaders(sqsMsg SQSMessage) string {
 func (p *Processor) selectHandler(sqsMsg SQSMessage) (githubapp.EventHandler, githubapp.Scheduler) {
 	source := p.detectSourceFromHeaders(sqsMsg)
 
+	// Record routing decision metrics
+	if p.registry != nil {
+		routingMetric := metrics.GetOrRegisterCounter(
+			fmt.Sprintf("sqs.routing.%s.%s", source, sqsMsg.EventType),
+			p.registry,
+		)
+		routingMetric.Inc(1)
+	}
+
 	if source == "enterprise" {
 		enterpriseHandler, exists := p.enterpriseHandlers[sqsMsg.EventType]
 		if !exists {
@@ -430,4 +445,69 @@ func (p *Processor) selectHandler(sqsMsg SQSMessage) (githubapp.EventHandler, gi
 		}
 		return cloudHandler, p.cloudScheduler
 	}
+}
+
+// processViaDirect processes an event directly using worker pools
+func (p *Processor) processViaDirect(ctx context.Context, sqsMsg SQSMessage, handler githubapp.EventHandler, payload []byte, logger zerolog.Logger) error {
+	if p.workerPoolMgr == nil {
+		return errors.New("worker pool manager not initialized for direct processing")
+	}
+
+	// Get worker count for this event type (default to 5)
+	workerCount := 5
+	if count, exists := p.queueWorkers[sqsMsg.EventType]; exists && count > 0 {
+		workerCount = count
+	}
+
+	// Get or create worker pool for this event type
+	pool := p.workerPoolMgr.GetOrCreatePool(sqsMsg.EventType, workerCount, handler)
+
+	logger.Debug().
+		Str("processing_mode", "direct").
+		Int("worker_capacity", workerCount).
+		Msg("Processing event via worker pool")
+
+	// Process the event through the worker pool
+	err := pool.Process(ctx, sqsMsg.EventType, sqsMsg.DeliveryID, payload)
+	if err != nil {
+		logger.Error().
+			Err(err).
+			Msg("Worker pool processing failed")
+		return err
+	}
+
+	logger.Debug().Msg("Successfully processed event via worker pool")
+	return nil
+}
+
+// processViaScheduler processes an event using the legacy scheduler
+func (p *Processor) processViaScheduler(ctx context.Context, sqsMsg SQSMessage, handler githubapp.EventHandler, scheduler githubapp.Scheduler, payload []byte, logger zerolog.Logger) error {
+	logger.Debug().
+		Str("processing_mode", "scheduler").
+		Msg("Processing event via scheduler")
+
+	// Create a dispatch for the scheduler
+	dispatch := githubapp.Dispatch{
+		Handler:    handler,
+		EventType:  sqsMsg.EventType,
+		DeliveryID: sqsMsg.DeliveryID,
+		Payload:    payload,
+	}
+
+	// Use the scheduler to process the event (maintains consistency with HTTP path)
+	err := scheduler.Schedule(ctx, dispatch)
+	if err != nil {
+		logger.Error().
+			Err(err).
+			Msg("Scheduler processing failed")
+		return err
+	}
+
+	logger.Debug().Msg("Successfully scheduled event")
+	return nil
+}
+
+// SetQueueWorkers sets the worker count per event type for direct processing
+func (p *Processor) SetQueueWorkers(queueWorkers map[string]int) {
+	p.queueWorkers = queueWorkers
 }

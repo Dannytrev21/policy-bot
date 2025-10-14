@@ -18,7 +18,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/google/go-github/v74/github"
+	"github.com/google/go-github/v47/github"
 	"github.com/palantir/go-baseapp/baseapp"
 	"github.com/palantir/go-githubapp/githubapp"
 	"github.com/palantir/policy-bot/policy/common"
@@ -37,7 +37,6 @@ type Base struct {
 	Installations               githubapp.InstallationsService
 	ConfigFetcher               *ConfigFetcher
 	AutorRemediateConfigFetcher *ConfigFetcher
-	GlobalCache                 pull.GlobalCache
 	BaseConfig                  *baseapp.HTTPConfig
 	PullOpts                    *PullEvaluationOptions
 	InstallationIdMap           map[int64]int64
@@ -92,7 +91,7 @@ func (b *Base) NewEvalContext(ctx context.Context, installationID int64, loc pul
 	}
 
 	mbrCtx := NewCrossOrgMembershipContext(ctx, client, loc.Owner, b.Installations, b.ClientCreator)
-	prctx, err := pull.NewGitHubContext(ctx, mbrCtx, b.GlobalCache, client, v4client, loc)
+	prctx, err := pull.NewGitHubContext(ctx, mbrCtx, client, v4client, loc)
 	if err != nil {
 		return nil, err
 	}

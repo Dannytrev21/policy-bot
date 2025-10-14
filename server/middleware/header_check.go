@@ -180,7 +180,12 @@ func SelectIndexHandler(
 			Templates:    templates,
 		}
 
-		indexHandler.ServeHTTP(w, r)
+		if err := indexHandler.ServeHTTP(w, r); err != nil {
+			logger.Error().
+				Err(err).
+				Str("route", routeName).
+				Msg("Failed to render index handler")
+		}
 	}
 }
 

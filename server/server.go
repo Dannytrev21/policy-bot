@@ -28,12 +28,11 @@ import (
 	"github.com/c2h5oh/datasize"
 	"github.com/die-net/lrucache"
 	"github.com/gregjones/httpcache"
-	datadog "github.com/palantir/go-baseapp/appmetrics/emitter/datadog"
 	"github.com/palantir/go-baseapp/baseapp"
+	datadog "github.com/palantir/go-baseapp/baseapp/datadog"
 	"github.com/palantir/go-githubapp/appconfig"
 	"github.com/palantir/go-githubapp/githubapp"
 	"github.com/palantir/go-githubapp/oauth2"
-	"github.com/palantir/policy-bot/pull"
 	"github.com/palantir/policy-bot/server/handler"
 	"github.com/palantir/policy-bot/server/middleware"
 	"github.com/palantir/policy-bot/server/sqsconsumer"
@@ -192,11 +191,6 @@ func New(c *Config) (*Server, error) {
 		pushedAtSize = DefaultPushedAtCacheSize
 	}
 
-	globalCache, err := pull.NewLRUGlobalCache(pushedAtSize)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to initialize global cache")
-	}
-
 	// policyPaths := []string{c.Options.PolicyPath}
 	// if c.Options.ForceSharedPolicy {
 	// 	policyPaths = []string{}
@@ -212,7 +206,6 @@ func New(c *Config) (*Server, error) {
 		BaseConfig:        &c.Server,
 		Installations:     githubapp.NewInstallationsService(enterpriseAppClient),
 		InstallationIdMap: make(map[int64]int64),
-		GlobalCache:       globalCache,
 
 		PullOpts: &c.EnterpriseOptions,
 		ConfigFetcher: &handler.ConfigFetcher{
@@ -229,7 +222,6 @@ func New(c *Config) (*Server, error) {
 		ClientCreator: cloudClientCreator,
 		BaseConfig:    &c.Server,
 		Installations: githubapp.NewInstallationsService(cloudAppClient),
-		GlobalCache:   globalCache,
 
 		PullOpts: &c.CloudOptions,
 		ConfigFetcher: &handler.ConfigFetcher{
@@ -279,12 +271,14 @@ func New(c *Config) (*Server, error) {
 		queueSize, workers,
 		githubapp.WithSchedulingMetrics(base.Registry()),
 		githubapp.WithAsyncErrorCallback(githubapp.MetricsAsyncErrorCallback(base.Registry())),
+		githubapp.WithContextDeriver(context.WithoutCancel),
 	)
 
 	enterpriseScheduler := githubapp.QueueAsyncScheduler(
 		queueSize, workers,
 		githubapp.WithSchedulingMetrics(base.Registry()),
 		githubapp.WithAsyncErrorCallback(githubapp.MetricsAsyncErrorCallback(base.Registry())),
+		githubapp.WithContextDeriver(context.WithoutCancel),
 	)
 
 	enterpriseDispatcher := githubapp.NewEventDispatcher(
@@ -306,6 +300,7 @@ func New(c *Config) (*Server, error) {
 		Enabled:           c.SQS.Enabled,
 		Region:            c.SQS.Region,
 		EndpointURL:       c.SQS.EndpointURL,
+		ProcessingMode:    c.SQS.ProcessingMode,
 		Queues:            c.SQS.Queues,
 		EventRouting:      c.SQS.EventRouting,
 		WorkersPerQueue:   c.SQS.WorkersPerQueue,
@@ -318,7 +313,7 @@ func New(c *Config) (*Server, error) {
 		MaxRetries:        c.SQS.MaxRetries,
 	}
 
-	sqsConsumer, err := sqsconsumer.New(sqsConfig, enterpriseHandlers, cloudHandlers, enterpriseScheduler, cloudScheduler, logger, base.Registry())
+	sqsConsumer, err := sqsconsumer.New(sqsConfig, cloudHandlers, enterpriseHandlers, cloudScheduler, enterpriseScheduler, logger, base.Registry())
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create SQS consumer")
 	}

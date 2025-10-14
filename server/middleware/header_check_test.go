@@ -293,7 +293,9 @@ func TestSelectAPIHandler(t *testing.T) {
 func TestChain(t *testing.T) {
 	// Create a simple handler
 	finalHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("final"))
+		if _, err := w.Write([]byte("final")); err != nil {
+			t.Fatalf("failed to write response: %v", err)
+		}
 	})
 
 	// Create middleware that adds headers

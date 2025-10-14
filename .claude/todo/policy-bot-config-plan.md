@@ -115,7 +115,7 @@ Each config (`github_enterprise` and `github_cloud`) must contain:
 - [ ] Test with both configurations
 - [ ] Test webhook processing with new config
 - [ ] Test OAuth flow with new config
-- [ ] Test middleware routing with new config
+- [x ] Test middleware routing with new config
 - [ ] Test SQS consumer with new config
 
 ## Configuration Example Templates

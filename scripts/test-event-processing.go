@@ -363,7 +363,11 @@ func sendHTTPWebhook(event map[string]interface{}) {
 		fmt.Printf("❌ Failed to send HTTP webhook: %v\n", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			fmt.Printf("⚠️ Failed to close HTTP response body: %v\n", cerr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		fmt.Printf("❌ HTTP webhook failed with status: %d\n", resp.StatusCode)

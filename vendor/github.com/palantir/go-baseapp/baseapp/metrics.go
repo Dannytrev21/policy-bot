@@ -24,12 +24,11 @@ import (
 )
 
 const (
-	MetricsKeyRequests      = "server.requests"
-	MetricsKeyRequests2xx   = "server.requests.2xx"
-	MetricsKeyRequests3xx   = "server.requests.3xx"
-	MetricsKeyRequests4xx   = "server.requests.4xx"
-	MetricsKeyRequests5xx   = "server.requests.5xx"
-	MetricsKeyLatencySuffix = ".latency"
+	MetricsKeyRequests    = "server.requests"
+	MetricsKeyRequests2xx = "server.requests.2xx"
+	MetricsKeyRequests3xx = "server.requests.3xx"
+	MetricsKeyRequests4xx = "server.requests.4xx"
+	MetricsKeyRequests5xx = "server.requests.5xx"
 
 	MetricsKeyNumGoroutines = "server.goroutines"
 	MetricsKeyMemoryUsed    = "server.mem.used"
@@ -63,7 +62,6 @@ func RegisterDefaultMetrics(registry metrics.Registry) {
 		MetricsKeyRequests5xx,
 	} {
 		metrics.GetOrRegisterCounter(key, registry)
-		metrics.GetOrRegisterTimer(key+MetricsKeyLatencySuffix, registry)
 	}
 
 	registry.GetOrRegister(MetricsKeyNumGoroutines, func() metrics.Gauge {
@@ -82,26 +80,16 @@ func RegisterDefaultMetrics(registry metrics.Registry) {
 }
 
 // CountRequest is an AccessCallback that records metrics about the request.
-func CountRequest(r *http.Request, status int, _ int64, elapsed time.Duration) {
-	if IsIgnored(r, IgnoreRule{Metrics: true}) {
-		return
-	}
-
+func CountRequest(r *http.Request, status int, _ int64, _ time.Duration) {
 	registry := MetricsCtx(r.Context())
 
 	if c := registry.Get(MetricsKeyRequests); c != nil {
 		c.(metrics.Counter).Inc(1)
 	}
-	if t := registry.Get(MetricsKeyRequests + MetricsKeyLatencySuffix); t != nil {
-		t.(metrics.Timer).Update(elapsed)
-	}
 
 	if key := bucketStatus(status); key != "" {
 		if c := registry.Get(key); c != nil {
 			c.(metrics.Counter).Inc(1)
-		}
-		if t := registry.Get(key + MetricsKeyLatencySuffix); t != nil {
-			t.(metrics.Timer).Update(elapsed)
 		}
 	}
 }

@@ -147,7 +147,7 @@ func (r *Rule) Evaluate(ctx context.Context, prctx pull.Context) (res common.Res
 		return
 	}
 
-	approved, result, err := r.IsApproved(ctx, prctx, candidates)
+	approved, result, err := r.IsApproved(ctx, prctx)
 	if err != nil {
 		res.Error = errors.Wrap(err, "failed to compute approval status")
 		return
@@ -193,7 +193,13 @@ func (r *Rule) getReviewRequestRule() *common.ReviewRequestRule {
 	}
 }
 
-func (r *Rule) IsApproved(ctx context.Context, prctx pull.Context, candidates []*common.Candidate) (bool, common.RequiresResult, error) {
+func (r *Rule) IsApproved(ctx context.Context, prctx pull.Context) (bool, common.RequiresResult, error) {
+
+	candidates, _, err := r.FilteredCandidates(ctx, prctx)
+	if err != nil {
+		return false, common.RequiresResult{}, errors.Wrap(err, "failed to filter candidates")
+	}
+
 	approvedByActors, approvers, err := r.isApprovedByActors(ctx, prctx, candidates)
 	if err != nil {
 		return false, common.RequiresResult{}, err
@@ -374,8 +380,7 @@ func (r *Rule) filterInvalidCandidates(ctx context.Context, prctx pull.Context, 
 		return candidates, nil, nil
 	}
 
-	sha := commits[0].SHA
-	lastPushedAt, err := prctx.PushedAt(sha)
+	last := findLastPushed(commits)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "failed to get last push timestamp")
 	}
@@ -383,19 +388,19 @@ func (r *Rule) filterInvalidCandidates(ctx context.Context, prctx pull.Context, 
 	var allowed []*common.Candidate
 	var dismissed []*common.Dismissal
 	for _, c := range candidates {
-		if c.CreatedAt.After(lastPushedAt) {
+		if c.CreatedAt.After(*last.CommittedDate) {
 			allowed = append(allowed, c)
 		} else {
 			dismissed = append(dismissed, &common.Dismissal{
 				Candidate: c,
-				Reason:    fmt.Sprintf("Invalidated by push of %.7s", sha),
+				Reason:    fmt.Sprintf("Invalidated by push of %.7s", last.SHA),
 			})
 		}
 	}
 
 	log.Debug().Msgf(
 		"discarded %d candidates invalidated by push of %s on or before %s",
-		len(dismissed), sha, lastPushedAt.Format(time.RFC3339),
+		len(dismissed), last.SHA, last.CommittedDate.Format(time.RFC3339),
 	)
 
 	return allowed, dismissed, nil
@@ -524,6 +529,16 @@ func isIgnoredCommit(ctx context.Context, prctx pull.Context, actors *common.Act
 	}
 	// either all users are ignored or the commit has no users; only ignore in the first case
 	return len(c.Users()) > 0, nil
+}
+
+func findLastPushed(commits []*pull.Commit) *pull.Commit {
+	var last *pull.Commit
+	for _, c := range commits {
+		if c.CommittedDate != nil && (last == nil || c.CommittedDate.After(*last.CommittedDate)) {
+			last = c
+		}
+	}
+	return last
 }
 
 func numberOfApprovals(count int) string {

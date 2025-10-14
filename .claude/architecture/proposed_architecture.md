@@ -41,14 +41,13 @@ After evaluating multiple hypotheses using Tree of Thought methodology, we selec
 ### 1. SQS Message Format
 ```json
 {
-  "event_type": "pull_request",
   "delivery_id": "unique-id",
   "headers": {
     "Host": "ghec.example.com",  // Contains "ghec" for cloud events
     "X-GitHub-Event": "pull_request",
     "X-GitHub-Delivery": "unique-id"
   },
-  "payload": {
+  "pull_request": {
     // Standard GitHub webhook payload
   }
 }

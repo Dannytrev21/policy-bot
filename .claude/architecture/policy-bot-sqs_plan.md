@@ -471,11 +471,10 @@ SQS Flow
 
 
 Take a look at my current architecture by analyzing the codebase and the 
-`.claude/architecture/proposed_architecture.md` architecture file. Come up with a plan to do checklist to to implement the changes. Do not just brute force an idea. 
-use Tree of Thought (ToT) by proposing multiple hypothesis and picking an optimal one.  Output the plan in `.claude/architecture/proposed_architecture_plan.md` it should contain the implementation, testing, acceptance criteria for each step/phase. 
+`.claude/architecture/proposed_architecture.md` architecture file. Come up with a plan to do checklist to to implement the changes. Do not just brute force an idea. Use Tree of Thought (ToT) by proposing multiple hypothesis and picking an optimal one.  Output the plan in `.claude/architecture/proposed_architecture_plan.md` it should contain the design, implementation, testing, acceptance criteria for each step/phase. Consider best practices. 
 
-Proposed architecture: The idea is to have the sqs handle post github events that would normally be handled by either
- the cloud dispatcher or enterprise dispatcher. The sqs will then forward it to either the cloud handler (using cloud
+Context: for my application The idea is to have the sqs handle post github events that would normally be handled by either
+ the cloud github app or enterprise github app. The sqs will then forward it to either the cloud handler (using cloud
  github app/client) or enterprise handlers (using cloud github app/client). The main thing is that we are relying on 
 an external queue instead of an internal queue. The idea is to able to handle both kinds of events from the webhook 
 ("/api/github/hook") and from the SQS queues. 
@@ -490,9 +489,45 @@ SQS queue features
 
 
 SQS Flow
-- One of the sqs workers/goroutines polls the codegenie-car-policy-pr queue and recieves a pull request event
-- The SQS is routed to the appropriate github app/client (cloud or enterprise) depending on the host
-- They then invoke the appropriate handler 
+- One of the sqs workers/goroutines polls the codegenie-car-policy-pr queue and recieves a pull request event. There are sqs workers that are dedicated for each queue who sole purpose is to listen to events coming in from one sqs url and to handle one type of event handler (status/event)
+- The SQS uses appropriate github app/client (cloud or enterprise) depending on the host and it's corresponding handler
+
+# Task 1: Analyze the `.claude/architecture/proposed_architecture_plan.md` the `.claude/architecture/current_architecture_codex.md` and the existing codebase, like the `server/server.go`, the `server/config.go`, the `server/handler/base.go`, `server/handler/pullrequest.go`, the `server/sqsconsumer/consumer.go`, the `server/sqsconsumer/processor.go` and pay special attention to: 
+1. The parts about authentication once an event handler is invoked by the http and also sqs to get an understanding of the application.
+2. The sqs consumer worker system with seperate go routines 
+3. The `server/sqsconsumer/processor.go` using Cloud and Enterpise Schedulers/Handlers 
+4. The `var mux *goji.Mux` and `goji.SubMux()` in `server/server.go`
+
+Context: for my application The idea is to have the sqs handle post github events that would normally be handled by either
+ the cloud github app or enterprise github app. The sqs will then forward it to either the cloud handler (using cloud
+ github app/client) or enterprise handlers (using cloud github app/client). The main thing is that we are relying on 
+an external queue instead of an internal queue. The idea is to able to handle both kinds of events from the webhook 
+("/api/github/hook") and from the SQS queues. 
+
+SQS queue features
+- The message of the SQS contains a github event in json 
+- per event queue for both cloud and enterprise events 
+- for example codegenie-car-policy-status queue corresponds to all status events, while codegenie-car-policy-pr queue
+ corresponds to all pull request events 
+- The within the github event in the SQS message, there will be a field called headers, which contains "ghec" if it's
+ a cloud event otherwise it's an enterprise event (default)
+
+ SQS Flow
+- One of the sqs workers/goroutines polls the codegenie-car-policy-pr queue and recieves a pull request event. There are sqs workers that are dedicated for each queue who sole purpose is to listen to events coming in from one sqs url and to handle one type of event handler (status/event)
+- The SQS uses appropriate github app/client (cloud or enterprise) depending on the host and it's corresponding handler
 
 
+# Task 2: Analyze them and figure out ways to redesign or optimize them based on best system design practices. (Making sure not to touch the existing handlers)
+
+# Task 3: Help me answer these questions: 
+
+1. Can the sqsconsumer / processor use github cloud and github enterprise and login to use it after receiving a webhook? 
+
+2. Is the current way of using the cloud or enterprise scheduler the best way to go about having the sqs consumer / processor invoke the handlers? 
+3. How does the sqs handle thread safety? 
+4. Do the sqs components need any of the goji.Mux or goji.SubMux? 
+
+
+
+Given this information write the improvements to be done by doing a testing first strategy (TDD) Testing consumer.go, processor.go, server.go and it's ability to use the github resources (login) after first receiving a webhook. The tests should also answer my questions. Do not just brute force an idea, use Tree of Thought (ToT) by proposing multiple hypothesis and picking an optimal one. Start with unit tests then go to more complex plans. Write the testing plan here with the acceptance criteria and all the context needed for each test, so that an agentic AI bot like claude code or codex can accomplish it one by one: `.claude/todo/policy_bot_testing_plan_max.md`
  

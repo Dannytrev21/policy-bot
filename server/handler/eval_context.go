@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/google/go-github/v74/github"
+	"github.com/google/go-github/v47/github"
 	"github.com/palantir/policy-bot/policy"
 	"github.com/palantir/policy-bot/policy/common"
 	"github.com/palantir/policy-bot/pull"
@@ -189,7 +189,7 @@ func (ec *EvalContext) PostStatus(ctx context.Context, state, message string) {
 
 	status := github.RepoStatus{
 		State:       &state,
-		Context:     github.Ptr(fmt.Sprintf("%s: %s", ec.Options.StatusCheckContext, base)),
+		Context:     github.String(fmt.Sprintf("%s: %s", ec.Options.StatusCheckContext, base)),
 		Description: &message,
 		TargetURL:   &detailsURL,
 	}
@@ -208,7 +208,7 @@ func (ec *EvalContext) PostStatus(ctx context.Context, state, message string) {
 		logger.Err(err).Msg("Failed to post repo status")
 	}
 	if ec.Options.PostInsecureStatusChecks {
-		status.Context = github.Ptr(ec.Options.StatusCheckContext)
+		status.Context = github.String(ec.Options.StatusCheckContext)
 		if err := PostStatus(ctx, ec.Client, owner, repo, sha, &status); err != nil {
 			logger.Err(err).Msg("Failed to post insecure repo status")
 		}

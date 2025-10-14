@@ -102,6 +102,7 @@ func TestProcessor_Phase3_EnhancedMetrics(t *testing.T) {
 				&MockScheduler{},
 				&MockScheduler{},
 				&MockScheduler{},
+				NewWorkerPoolManager(logger, registry),
 				logger,
 				registry,
 			)

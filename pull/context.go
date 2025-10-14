@@ -44,11 +44,6 @@ type MembershipContext interface {
 type Context interface {
 	MembershipContext
 
-	// EvaluationTimestamp returns the time at the start of the pull request
-	// evaluation, usually the creation time of the context. All calls on the
-	// same context should return the same value.
-	EvaluationTimestamp() time.Time
-
 	// RepositoryOwner returns the owner of the repo that the pull request targets.
 	RepositoryOwner() string
 
@@ -92,10 +87,6 @@ type Context interface {
 	// commit order is implementation dependent.
 	Commits() ([]*Commit, error)
 
-	// PushedAt returns the time at which the commit with sha was pushed. The
-	// returned time may be after the actual push time, but must not be before.
-	PushedAt(sha string) (time.Time, error)
-
 	// Comments lists all comments on a Pull Request. The comment order is
 	// implementation dependent.
 	Comments() ([]*Comment, error)
@@ -123,11 +114,6 @@ type Context interface {
 
 	// LatestStatuses returns a map of status check names to the latest result
 	LatestStatuses() (map[string]string, error)
-
-	// LatestWorkflowRuns returns the latest GitHub Actions workflow runs for
-	// the pull request. The keys of the map are paths to the workflow files and
-	// the values are the conclusions of the latest runs, one per event type.
-	LatestWorkflowRuns() (map[string][]string, error)
 
 	// Labels returns a list of labels applied on the Pull Request
 	Labels() ([]string, error)
@@ -161,6 +147,10 @@ type Commit struct {
 	// committer is not a real user.
 	Committer string
 
+	// PushedAt is the timestamp when the commit was pushed. It is nil if that
+	// information is not available for this commit.
+	CommittedDate *time.Time
+
 	// Signature is the signature and details that was extracted from the commit.
 	// It is nil if the commit has no signature
 	Signature *Signature
@@ -183,16 +173,14 @@ type SignatureType string
 const (
 	SignatureGpg   SignatureType = "GpgSignature"
 	SignatureSmime SignatureType = "SmimeSignature"
-	SignatureSSH   SignatureType = "SshSignature"
 )
 
 type Signature struct {
-	Type           SignatureType
-	IsValid        bool
-	KeyID          string
-	KeyFingerprint string
-	Signer         string
-	State          string
+	Type    SignatureType
+	IsValid bool
+	KeyID   string
+	Signer  string
+	State   string
 }
 
 type Comment struct {

@@ -51,6 +51,9 @@ type Config struct {
 	// AWS endpoint URL for LocalStack/testing (optional)
 	EndpointURL string
 
+	// Processing mode: "scheduler" (legacy) or "direct" (worker pools)
+	ProcessingMode string
+
 	// Map of GitHub event type to SQS queue URL
 	Queues map[string]string
 
@@ -107,23 +110,26 @@ type Consumer interface {
 
 // QueueHealth represents health information for a single queue
 type QueueHealth struct {
-	QueueName         string `json:"queue_name"`
-	QueueURL          string `json:"queue_url"`
-	Status            string `json:"status"`
-	ApproxMessages    int64  `json:"approximate_messages"`
-	ApproxDelayed     int64  `json:"approximate_delayed_messages"`
-	ApproxNotVisible  int64  `json:"approximate_not_visible_messages"`
-	LastError         string `json:"last_error,omitempty"`
-	CheckedAt         string `json:"checked_at"`
+	QueueName        string `json:"queue_name"`
+	QueueURL         string `json:"queue_url"`
+	Status           string `json:"status"`
+	ApproxMessages   int64  `json:"approximate_messages"`
+	ApproxDelayed    int64  `json:"approximate_delayed_messages"`
+	ApproxNotVisible int64  `json:"approximate_not_visible_messages"`
+	LastError        string `json:"last_error,omitempty"`
+	CheckedAt        string `json:"checked_at"`
 }
 
 // consumer implements Consumer
 type consumer struct {
-	config    *Config
-	sqsClient *sqs.Client
-	processor *Processor
-	logger    zerolog.Logger
-	registry  metrics.Registry
+	config             *Config
+	sqsClient          SQSClient
+	processor          *Processor
+	workerPoolMgr      *WorkerPoolManager
+	logger             zerolog.Logger
+	registry           metrics.Registry
+	cloudHandlers      []githubapp.EventHandler
+	enterpriseHandlers []githubapp.EventHandler
 
 	// channels for coordinating shutdown
 	stopChan   chan struct{}
@@ -162,11 +168,20 @@ func New(
 		}
 	})
 
+	// Set default processing mode if not specified
+	if cfg.ProcessingMode == "" {
+		cfg.ProcessingMode = "scheduler" // Default to legacy mode
+	}
+
+	// Create worker pool manager for direct processing mode
+	workerPoolMgr := NewWorkerPoolManager(logger, registry)
+
 	// Create processor
 	processorConfig := &ProcessorConfig{
 		EnableRetry:       cfg.EnableRetry,
 		MaxRetries:        cfg.MaxRetries,
 		VisibilityTimeout: cfg.VisibilityTimeout,
+		ProcessingMode:    cfg.ProcessingMode,
 	}
 
 	processor := NewProcessor(
@@ -177,17 +192,26 @@ func New(
 		enterpriseScheduler,
 		cloudScheduler,
 		cloudScheduler, // Default shared scheduler
+		workerPoolMgr,
 		logger,
 		registry,
 	)
 
+	// Set worker counts for direct processing mode
+	if cfg.QueueWorkers != nil {
+		processor.SetQueueWorkers(cfg.QueueWorkers)
+	}
+
 	c := &consumer{
-		config:    cfg,
-		sqsClient: sqsClient,
-		processor: processor,
-		logger:    logger.With().Str("component", "sqs_consumer").Logger(),
-		registry:  registry,
-		stopChan:  make(chan struct{}),
+		config:             cfg,
+		sqsClient:          sqsClient,
+		processor:          processor,
+		workerPoolMgr:      workerPoolMgr,
+		cloudHandlers:      cloudHandlers,
+		enterpriseHandlers: enterpriseHandlers,
+		logger:             logger.With().Str("component", "sqs_consumer").Logger(),
+		registry:           registry,
+		stopChan:           make(chan struct{}),
 	}
 
 	// Initialize metrics
@@ -292,6 +316,11 @@ func (c *consumer) Stop(ctx context.Context) error {
 		shutdownTimeout = DefaultShutdownTimeout
 	}
 
+	// Create shutdown context with timeout
+	shutdownCtx, cancel := context.WithTimeout(ctx, shutdownTimeout)
+	defer cancel()
+
+	// Wait for all consumer workers to stop
 	done := make(chan struct{})
 	go func() {
 		c.wg.Wait()
@@ -300,8 +329,7 @@ func (c *consumer) Stop(ctx context.Context) error {
 
 	select {
 	case <-done:
-		c.logger.Info().Msg("All SQS consumer workers stopped gracefully")
-		return nil
+		c.logger.Info().Msg("All SQS consumer workers stopped")
 	case <-time.After(shutdownTimeout):
 		c.logger.Warn().Msg("SQS consumer shutdown timeout exceeded")
 		return errors.New("shutdown timeout exceeded")
@@ -309,6 +337,18 @@ func (c *consumer) Stop(ctx context.Context) error {
 		c.logger.Warn().Msg("SQS consumer shutdown context cancelled")
 		return ctx.Err()
 	}
+
+	// Shutdown worker pool manager if using direct mode
+	if c.config.ProcessingMode == "direct" && c.workerPoolMgr != nil {
+		c.logger.Info().Msg("Shutting down worker pool manager")
+		if err := c.workerPoolMgr.Shutdown(shutdownCtx); err != nil {
+			c.logger.Error().Err(err).Msg("Error shutting down worker pool manager")
+			return err
+		}
+	}
+
+	c.logger.Info().Msg("SQS consumer stopped gracefully")
+	return nil
 }
 
 // Health checks if the SQS consumer is healthy

@@ -100,8 +100,8 @@ func (p *PullEvaluationOptions) fillDefaults() {
 
 func (p *PullEvaluationOptions) SetValuesFromEnv(prefix string) {
 	setStringFromEnv("POLICY_PATH", prefix, &p.PolicyPath)
-	setStringPtrFromEnv("SHARED_REPOSITORY", prefix, p.SharedRepository)
-	setStringPtrFromEnv("SHARED_POLICY_PATH", prefix, p.SharedPolicyPath)
+	setStringPtrFromEnv("SHARED_REPOSITORY", prefix, &p.SharedRepository)
+	setStringPtrFromEnv("SHARED_POLICY_PATH", prefix, &p.SharedPolicyPath)
 	setStringFromEnv("STATUS_CHECK_CONTEXT", prefix, &p.StatusCheckContext)
 	setBoolFromEnv("EXPAND_REQUIRED_REVIEWERS", prefix, &p.ExpandRequiredReviewers)
 	setBoolFromEnv("STRICT_REVIEW_DISMISSAL", prefix, &p.StrictReviewDismissal)
@@ -118,9 +118,9 @@ func setStringFromEnv(key, prefix string, value *string) bool {
 	return false
 }
 
-func setStringPtrFromEnv(key, prefix string, value string) bool {
+func setStringPtrFromEnv(key, prefix string, value *string) bool {
 	if v, ok := os.LookupEnv(prefix + key); ok {
-		value = v
+		*value = v
 		return true
 	}
 	return false

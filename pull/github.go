@@ -16,12 +16,14 @@ package pull
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/google/go-github/v74/github"
+	"github.com/google/go-github/v47/github"
 	"github.com/pkg/errors"
+	"github.com/rs/zerolog"
 	"github.com/shurcooL/githubv4"
 )
 
@@ -38,9 +40,11 @@ const (
 // Locator identifies a pull request and optionally contains a full or partial
 // pull request object.
 type Locator struct {
-	Owner  string
-	Repo   string
-	Number int
+	Owner       string
+	Repo        string
+	PolicyOwner string
+	PolicyRepo  string
+	Number      int
 
 	Value *github.PullRequest
 }
@@ -70,7 +74,6 @@ func (loc Locator) IsComplete() bool {
 	case loc.Value.GetHead().GetRepo().GetID() == 0:
 	case loc.Value.GetHead().GetRepo().GetName() == "":
 	case loc.Value.GetHead().GetRepo().GetOwner().GetLogin() == "":
-	case loc.Value.GetChangedFiles() == 0:
 	default:
 		return true
 	}
@@ -99,7 +102,7 @@ func (loc Locator) toV4(ctx context.Context, client *githubv4.Client) (*v4PullRe
 	var v4 v4PullRequest
 	v4.Title = loc.Value.GetTitle()
 	v4.Author.Login = loc.Value.GetUser().GetLogin()
-	v4.CreatedAt = loc.Value.GetCreatedAt().Time
+	v4.CreatedAt = loc.Value.GetCreatedAt()
 	v4.State = loc.Value.GetState()
 	v4.IsCrossRepository = loc.Value.GetHead().GetRepo().GetID() != loc.Value.GetBase().GetRepo().GetID()
 	v4.HeadRefOID = loc.Value.GetHead().GetSHA()
@@ -107,9 +110,7 @@ func (loc Locator) toV4(ctx context.Context, client *githubv4.Client) (*v4PullRe
 	v4.HeadRepository.Name = loc.Value.GetHead().GetRepo().GetName()
 	v4.HeadRepository.Owner.Login = loc.Value.GetHead().GetRepo().GetOwner().GetLogin()
 	v4.BaseRefName = loc.Value.GetBase().GetRef()
-	v4.BaseRepository.DatabaseID = loc.Value.GetBase().GetRepo().GetID()
 	v4.IsDraft = loc.Value.GetDraft()
-	v4.ChangedFiles = loc.Value.GetChangedFiles()
 	return &v4, nil
 }
 
@@ -118,17 +119,16 @@ func (loc Locator) toV4(ctx context.Context, client *githubv4.Client) (*v4PullRe
 type GitHubContext struct {
 	MembershipContext
 
-	ctx         context.Context
-	client      *github.Client
-	v4client    *githubv4.Client
-	globalCache GlobalCache
+	ctx      context.Context
+	client   *github.Client
+	v4client *githubv4.Client
 
-	evalTimestamp time.Time
-
-	owner  string
-	repo   string
-	number int
-	pr     *v4PullRequest
+	owner       string
+	repo        string
+	policyOwner string
+	policyRepo  string
+	number      int
+	pr          *v4PullRequest
 
 	// cached fields
 	files         []*File
@@ -139,24 +139,17 @@ type GitHubContext struct {
 	collaborators []*Collaborator
 	permissions   map[string]Permission
 	teams         map[string]Permission
+	teamIDs       map[string]int64
+	membership    map[string]bool
 	statuses      map[string]string
 	labels        []string
-	pushedAt      map[string]time.Time
-	workflowRuns  map[string][]string
 }
 
 // NewGitHubContext creates a new pull.Context that makes GitHub requests to
 // obtain information. It caches responses for the lifetime of the context. The
 // pull request passed to the context must contain at least the base repository
 // and the number or the function panics.
-func NewGitHubContext(
-	ctx context.Context,
-	mbrCtx MembershipContext,
-	globalCache GlobalCache,
-	client *github.Client,
-	v4client *githubv4.Client,
-	loc Locator,
-) (Context, error) {
+func NewGitHubContext(ctx context.Context, mbrCtx MembershipContext, client *github.Client, v4client *githubv4.Client, loc Locator) (Context, error) {
 	if loc.Owner == "" || loc.Repo == "" || loc.Number == 0 {
 		panic("pull request object does not contain full identifying information")
 	}
@@ -169,22 +162,17 @@ func NewGitHubContext(
 	return &GitHubContext{
 		MembershipContext: mbrCtx,
 
-		ctx:         ctx,
-		client:      client,
-		v4client:    v4client,
-		globalCache: globalCache,
+		ctx:      ctx,
+		client:   client,
+		v4client: v4client,
 
-		evalTimestamp: time.Now(),
-
-		owner:  loc.Owner,
-		repo:   loc.Repo,
-		number: loc.Number,
-		pr:     pr,
+		owner:       loc.Owner,
+		repo:        loc.Repo,
+		policyOwner: loc.PolicyOwner,
+		policyRepo:  loc.PolicyRepo,
+		number:      loc.Number,
+		pr:          pr,
 	}, nil
-}
-
-func (ghc *GitHubContext) EvaluationTimestamp() time.Time {
-	return ghc.evalTimestamp
 }
 
 func (ghc *GitHubContext) RepositoryOwner() string {
@@ -271,11 +259,6 @@ func (ghc *GitHubContext) Branches() (base string, head string) {
 }
 
 func (ghc *GitHubContext) ChangedFiles() ([]*File, error) {
-	// Check if changed files exceeds the limit
-	if ghc.pr.ChangedFiles > MaxPullRequestFiles {
-		return nil, errors.Errorf("number of changed files (%d) exceeds limit (%d)", ghc.pr.ChangedFiles, MaxPullRequestFiles)
-	}
-
 	if ghc.files == nil {
 		opt := github.ListOptions{
 			PerPage: 100,
@@ -300,7 +283,7 @@ func (ghc *GitHubContext) ChangedFiles() ([]*File, error) {
 			switch f.GetStatus() {
 			case "added":
 				status = FileAdded
-			case "removed":
+			case "deleted":
 				status = FileDeleted
 			case "renamed":
 				// Break renames into components: the new file is added and we
@@ -324,7 +307,9 @@ func (ghc *GitHubContext) ChangedFiles() ([]*File, error) {
 			})
 		}
 	}
-
+	if len(ghc.files) >= MaxPullRequestFiles {
+		return nil, errors.Errorf("too many files in pull request, maximum is %d", MaxPullRequestFiles)
+	}
 	return ghc.files, nil
 }
 
@@ -334,114 +319,13 @@ func (ghc *GitHubContext) Commits() ([]*Commit, error) {
 		if err != nil {
 			return nil, err
 		}
+		backfillPushedAt(commits, ghc.pr.HeadRefOID)
 		ghc.commits = commits
 	}
 	if len(ghc.commits) >= MaxPullRequestCommits {
 		return nil, errors.Errorf("too many commits in pull request, maximum is %d", MaxPullRequestCommits)
 	}
 	return ghc.commits, nil
-}
-
-func (ghc *GitHubContext) PushedAt(sha string) (time.Time, error) {
-	repoID := ghc.pr.BaseRepository.DatabaseID
-	if ghc.pushedAt == nil {
-		ghc.pushedAt = make(map[string]time.Time)
-	}
-
-	// This list contains the commits that may contain the push time. When
-	// commits are pushed in a batch, only the head commit of the batch has a
-	// recorded time in GitHub, but all commits in the batch share the same
-	// timestamp. This list lets us cache the times for all of the commits in
-	// the batch that we considered while looking for the head of the batch.
-	candidateSHAs := []string{sha}
-
-	var pushedAt time.Time
-	var err error
-	for {
-		// Starting from the most recent SHA, search towards the head of the
-		// pull request until we find a commit that's either already in the
-		// cache or that has status checks. This commit is the head of the
-		// batch containing the initial commit.
-		sha := candidateSHAs[len(candidateSHAs)-1]
-
-		pushedAt, err = ghc.tryPushedAt(repoID, sha)
-		if err != nil {
-			return time.Time{}, err
-		}
-		if !pushedAt.IsZero() {
-			break
-		}
-
-		c, err := ghc.nextChildCommit(sha)
-		if err != nil {
-			return time.Time{}, err
-		}
-		if c == nil {
-			break
-		}
-		candidateSHAs = append(candidateSHAs, c.SHA)
-	}
-
-	// After looking at all relevant commits, if we found no push time, default
-	// to the evaluation timestamp (i.e. now)
-	if pushedAt.IsZero() {
-		pushedAt = ghc.EvaluationTimestamp()
-	}
-
-	for _, sha := range candidateSHAs {
-		ghc.pushedAt[sha] = pushedAt
-		if gc := ghc.globalCache; gc != nil {
-			gc.SetPushedAt(repoID, sha, pushedAt)
-		}
-	}
-
-	return pushedAt, nil
-}
-
-// tryPushedAt attempts to get the push time for a commit from the local cache,
-// the global cache, or the GitHub API. It returns the zero time if it could
-// not find a push time in any source.
-//
-// We prefer the local cache to the global cache because it helps when there is
-// no global cache and avoids the possibility that the global cache evicts
-// entries during the lifetime of the context.
-//
-// The local cache must be initialized before calling tryPushedAt.
-func (ghc *GitHubContext) tryPushedAt(repoID int64, sha string) (time.Time, error) {
-	if t, ok := ghc.pushedAt[sha]; ok {
-		return t, nil
-	}
-	if gc := ghc.globalCache; gc != nil {
-		if t, ok := gc.GetPushedAt(repoID, sha); ok {
-			ghc.pushedAt[sha] = t
-			return t, nil
-		}
-	}
-	return ghc.loadPushedAt(sha)
-}
-
-// nextChildCommit returns the child commit for the given SHA or nil if the SHA
-// is the head of the pull request. A child commit is a commit that has SHA as
-// a parent.
-func (ghc *GitHubContext) nextChildCommit(sha string) (*Commit, error) {
-	if sha == ghc.HeadSHA() {
-		// Optimization: exit early if asked about the head SHA
-		return nil, nil
-	}
-
-	commits, err := ghc.Commits()
-	if err != nil {
-		return nil, err
-	}
-
-	for _, c := range commits {
-		for _, parentSHA := range c.Parents {
-			if sha == parentSHA {
-				return c, nil
-			}
-		}
-	}
-	return nil, nil
 }
 
 func (ghc *GitHubContext) Comments() ([]*Comment, error) {
@@ -823,110 +707,15 @@ func (ghc *GitHubContext) getCheckStatuses() (map[string]string, error) {
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to get check runs for page %d", opt.Page)
 		}
-
-		// Check runs are ordered from most to least recent. In some cases,
-		// like when a commit is included in multiple PRs or when users re-run
-		// checks, there may be multiple runs with the same name. We only want
-		// to keep the first (most recent) result for each name.
 		for _, checkRun := range checkRuns.CheckRuns {
-			name := checkRun.GetName()
-			if _, exists := statuses[name]; !exists {
-				statuses[name] = checkRun.GetConclusion()
-			}
+			statuses[checkRun.GetName()] = checkRun.GetConclusion()
 		}
-
 		if resp.NextPage == 0 {
 			break
 		}
 		opt.Page = resp.NextPage
 	}
 	return statuses, nil
-}
-
-func (ghc *GitHubContext) LatestWorkflowRuns() (map[string][]string, error) {
-	if ghc.workflowRuns != nil {
-		return ghc.workflowRuns, nil
-	}
-
-	opt := &github.ListWorkflowRunsOptions{
-		ExcludePullRequests: true,
-		HeadSHA:             ghc.HeadSHA(),
-		ListOptions: github.ListOptions{
-			PerPage: 100,
-			Page:    0,
-		},
-	}
-
-	// The same workflow file can be triggered multiple times. For example:
-	//
-	// on:
-	//  pull_request:
-	//    types:
-	//      - opened
-	//      - synchronize
-	//      - edited
-	//  push:
-	//
-	// Within a single event type, we will take the latest result. For example,
-	// for a `pull_request` event:
-	//
-	// If the workflow passes for the `opened` event, yet fails for `edited`
-	// then we would consider the workflow passed initially, and then failed if
-	// the user makes an edit to the PR that causes the workflow to run and fail.
-	// This is because the failure came later and it's what GitHub will show on
-	// the UI as the result of this workflow.
-	//
-	// If a workflow is triggered by multiple event types (`pull_request` and
-	// `push` in the above example), we will apply the same logic to each event
-	// type separately. Effectively this means that each one of the types, if
-	// triggered, will have to match the policy separately. Assuming allowed
-	// conclusions of `success`, here this would mean that both the
-	// `pull_request` and `push` events would have to pass, if triggered, for
-	// the workflow to be considered successful.
-	runsWithDate := make(map[string]map[string]*github.WorkflowRun)
-	for {
-		runs, resp, err := ghc.client.Actions.ListRepositoryWorkflowRuns(ghc.ctx, ghc.owner, ghc.repo, opt)
-		if err != nil {
-			return nil, errors.Wrapf(err, "failed to get workflow runs for page %d", opt.Page)
-		}
-
-		for _, run := range runs.WorkflowRuns {
-			if run.GetStatus() != "completed" {
-				continue
-			}
-
-			eventName := run.GetEvent()
-
-			previousRuns := runsWithDate[*run.Path]
-			if previousRuns == nil {
-				previousRuns = make(map[string]*github.WorkflowRun)
-				runsWithDate[*run.Path] = previousRuns
-			}
-
-			previousRun := previousRuns[eventName]
-
-			// This is an older run than one we've already saw, so ignore it.
-			if previousRun != nil && run.GetUpdatedAt().Before(previousRun.GetUpdatedAt().Time) {
-				continue
-			}
-
-			previousRuns[eventName] = run
-		}
-
-		if resp.NextPage == 0 {
-			break
-		}
-		opt.Page = resp.NextPage
-	}
-	workflowRuns := make(map[string][]string, len(runsWithDate))
-
-	for path, eventRuns := range runsWithDate {
-		for _, run := range eventRuns {
-			workflowRuns[path] = append(workflowRuns[path], run.GetConclusion())
-		}
-	}
-
-	return workflowRuns, nil
 }
 
 func (ghc *GitHubContext) Labels() ([]string, error) {
@@ -1013,27 +802,51 @@ func (ghc *GitHubContext) loadPagedData() error {
 }
 
 func (ghc *GitHubContext) loadCommits() ([]*Commit, error) {
+	log := zerolog.Ctx(ghc.ctx)
+
 	rawCommits, err := ghc.loadRawCommits()
 	if err != nil {
 		return nil, err
 	}
 
+	var head *Commit
 	commits := make([]*Commit, 0, len(rawCommits))
-	foundHead := false
 
 	for _, r := range rawCommits {
 		c := r.Commit.ToCommit()
 		if c.SHA == ghc.pr.HeadRefOID {
-			foundHead = true
+			head = c
 		}
 		commits = append(commits, c)
 	}
 
 	// fail early if head is missing from the pull request
-	if !foundHead {
+	if head == nil {
 		return nil, errors.Errorf("head commit %.10s is missing, probably due to a force-push", ghc.pr.HeadRefOID)
 	}
 
+	// As of 2020-02-05, the pushed data may be missing when loaded via the
+	// pull request APIs if:
+	//
+	//  - the commit comes from a fork (always missing in this case)
+	//  - the data has not propagated yet
+	//
+	// In the second case, retrying after a delay can fix things, but the delay
+	// can be 15+ seconds in practice, so using the alternate API should
+	// improve latency at the cost of more API requests.
+	if head.CommittedDate == nil {
+		log.Debug().
+			Bool("fork", ghc.pr.IsCrossRepository).
+			Msgf("failed to load pushed date via pull request, falling back to commit APIs")
+
+		if err := ghc.loadPushedAt(commits); err != nil {
+			return nil, err
+		}
+	}
+
+	if head.CommittedDate == nil {
+		return nil, errors.Errorf("head commit %.10s is missing pushed date; this is probably a bug", ghc.pr.HeadRefOID)
+	}
 	return commits, nil
 }
 
@@ -1068,27 +881,93 @@ func (ghc *GitHubContext) loadRawCommits() ([]*v4PullRequestCommit, error) {
 	return commits, nil
 }
 
-func (ghc *GitHubContext) loadPushedAt(sha string) (time.Time, error) {
-	opt := &github.ListOptions{
-		PerPage: 100,
+func (ghc *GitHubContext) loadPushedAt(commits []*Commit) error {
+	commitsBySHA := make(map[string]*Commit, len(commits))
+	for _, c := range commits {
+		commitsBySHA[c.SHA] = c
 	}
 
-	// ListStatuses returns statuses in reverse chronological order, so the
-	// last item on the last page is the oldest status, which must have been
-	// posted after someone pushed the commit.
+	var q struct {
+		Repository struct {
+			Object struct {
+				Commit struct {
+					History struct {
+						PageInfo v4PageInfo
+						Nodes    []struct {
+							OID        string
+							PushedDate *time.Time
+						}
+					} `graphql:"history(first: 100, after: $cursor)"`
+				} `graphql:"... on Commit"`
+			} `graphql:"object(oid: $oid)"`
+		} `graphql:"repository(owner: $owner, name: $name)"`
+	}
+	qvars := map[string]interface{}{
+		"owner":  githubv4.String(ghc.pr.HeadRepository.Owner.Login),
+		"name":   githubv4.String(ghc.pr.HeadRepository.Name),
+		"oid":    githubv4.GitObjectID(ghc.pr.HeadRefOID),
+		"cursor": (*githubv4.String)(nil),
+	}
+
+	loaded := 0
 	for {
-		statuses, resp, err := ghc.client.Repositories.ListStatuses(ghc.ctx, ghc.owner, ghc.repo, sha, opt)
-		if err != nil {
-			return time.Time{}, errors.Wrapf(err, "failed to list statuses for page %d", opt.Page)
+		if err := ghc.v4client.Query(ghc.ctx, &q, qvars); err != nil {
+			return errors.Wrap(err, "failed to load commit pushed dates")
 		}
-		if len(statuses) == 0 {
-			return time.Time{}, nil
+		for _, n := range q.Repository.Object.Commit.History.Nodes {
+			if c, ok := commitsBySHA[n.OID]; ok {
+				c.CommittedDate = n.PushedDate
+				delete(commitsBySHA, n.OID)
+			}
 		}
-		if resp.NextPage == 0 {
-			last := statuses[len(statuses)-1]
-			return last.GetCreatedAt().Time, nil
+
+		loaded += len(q.Repository.Object.Commit.History.Nodes)
+		if loaded > len(commits) {
+			break
 		}
-		opt.Page = resp.NextPage
+
+		if !q.Repository.Object.Commit.History.PageInfo.UpdateCursor(qvars, "cursor") {
+			break
+		}
+	}
+
+	if len(commitsBySHA) > 0 {
+		missingSHAs := make([]string, 0, len(commitsBySHA))
+		for sha := range commitsBySHA {
+			missingSHAs = append(missingSHAs, sha)
+		}
+
+		err := &TemporaryError{fmt.Sprintf("%d commits were not found while loading pushed dates. Missing %s.",
+			len(commitsBySHA), strings.Join(missingSHAs, ", "))}
+		return err
+	}
+	return nil
+}
+
+func backfillPushedAt(commits []*Commit, headSHA string) {
+	commitsBySHA := make(map[string]*Commit, len(commits))
+	for _, c := range commits {
+		commitsBySHA[c.SHA] = c
+	}
+
+	root := headSHA
+	for {
+		c, ok := commitsBySHA[root]
+		if !ok || len(c.Parents) == 0 {
+			break
+		}
+
+		firstParent, ok := commitsBySHA[c.Parents[0]]
+		if !ok {
+			break
+		}
+
+		if firstParent.CommittedDate == nil {
+			firstParent.CommittedDate = c.CommittedDate
+		}
+
+		delete(commitsBySHA, root)
+		root = firstParent.SHA
 	}
 }
 
@@ -1100,7 +979,9 @@ type v4PullRequest struct {
 	State     string
 
 	IsCrossRepository bool
-	IsDraft           bool
+
+	// This field is in GraphQL Preview, so don't ask for it just yet
+	IsDraft bool `graphql:""`
 
 	HeadRefOID     string
 	HeadRefName    string
@@ -1109,12 +990,7 @@ type v4PullRequest struct {
 		Owner v4Actor
 	}
 
-	BaseRefName    string
-	BaseRepository struct {
-		DatabaseID int64
-	}
-
-	ChangedFiles int
+	BaseRefName string
 }
 
 type v4PageInfo struct {
@@ -1211,6 +1087,7 @@ type v4Commit struct {
 	Author          v4GitActor
 	Committer       v4GitActor
 	CommittedViaWeb bool
+	CommittedDate   *time.Time
 	Parents         struct {
 		Nodes []struct {
 			OID string
@@ -1236,6 +1113,7 @@ func (c *v4Commit) ToCommit() *Commit {
 		CommittedViaWeb: c.CommittedViaWeb,
 		Author:          c.Author.User.GetV3Login(),
 		Committer:       c.Committer.User.GetV3Login(),
+		CommittedDate:   c.CommittedDate,
 		Signature:       signature,
 	}
 }
@@ -1296,7 +1174,6 @@ type v4GitSignature struct {
 	Type  string           `graphql:"__typename"`
 	GPG   v4GpgSignature   `graphql:"... on GpgSignature"`
 	SMIME v4SmimeSignature `graphql:"... on SmimeSignature"`
-	SSH   v4SshSignature   `graphql:"... on SshSignature"`
 }
 
 func (s *v4GitSignature) ToSignature() *Signature {
@@ -1315,14 +1192,6 @@ func (s *v4GitSignature) ToSignature() *Signature {
 			Signer:  s.SMIME.Signer.GetV3Login(),
 			State:   s.SMIME.State,
 			Type:    SignatureSmime,
-		}
-	case SignatureSSH:
-		return &Signature{
-			IsValid:        s.SSH.IsValid,
-			KeyFingerprint: s.SSH.KeyFingerprint,
-			Signer:         s.SSH.Signer.GetV3Login(),
-			State:          s.SSH.State,
-			Type:           SignatureSSH,
 		}
 	default:
 		return nil
@@ -1343,17 +1212,6 @@ type v4GpgSignature struct {
 	Email             string
 	IsValid           bool
 	KeyID             string
-	Payload           string
-	Signature         string
-	Signer            *v4Actor
-	State             string
-	WasSignedByGitHub bool
-}
-
-type v4SshSignature struct {
-	Email             string
-	IsValid           bool
-	KeyFingerprint    string
 	Payload           string
 	Signature         string
 	Signer            *v4Actor
