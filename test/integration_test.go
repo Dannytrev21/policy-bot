@@ -119,16 +119,18 @@ func (h *TestEventHandler) Reset() {
 
 // Integration test configuration
 type IntegrationTestConfig struct {
-	UseLocalStack      bool
-	LocalStackURL      string
-	WebhookSecret      string
-	ServerPort         string
-	SQSQueueURLs       map[string]string
-	TestDuration       time.Duration
-	SQSWorkersPerQueue int
-	SQSMaxMessages     int
-	WorkerPoolSize     int
-	SQSWaitTimeSeconds int
+	UseLocalStack       bool
+	LocalStackURL       string
+	WebhookSecret       string
+	ServerPort          string
+	SQSQueueURLs        map[string]server.EventQueueConfig
+	TestDuration        time.Duration
+	SQSWorkersPerQueue  int
+	SQSMaxMessages      int
+	WorkerPoolSize      int
+	SQSWaitTimeSeconds  int
+	SQSProcessingMode   string // "scheduler" or "direct"
+	AdaptivePolling     bool   // Enable adaptive polling
 }
 
 func DefaultIntegrationTestConfig() *IntegrationTestConfig {
@@ -137,11 +139,35 @@ func DefaultIntegrationTestConfig() *IntegrationTestConfig {
 		LocalStackURL: "http://localhost:4566",
 		WebhookSecret: "test-webhook-secret-123",
 		ServerPort:    "8080",
-		SQSQueueURLs: map[string]string{
-			"pull_request":        "http://localhost:4566/000000000000/github-pull-request",
-			"pull_request_review": "http://localhost:4566/000000000000/github-pull-request-review",
-			"issue_comment":       "http://localhost:4566/000000000000/github-issue-comment",
-			"status":              "http://localhost:4566/000000000000/github-status",
+		SQSQueueURLs: map[string]server.EventQueueConfig{
+			"pull_request": {
+				EastRegionURL: "http://localhost:4566/000000000000/github-pull-request",
+				EventRouting:  "sqs",
+				GHECEnabled:   true,
+				GHESEnabled:   true,
+				QueueWorkers:  3,
+			},
+			"pull_request_review": {
+				EastRegionURL: "http://localhost:4566/000000000000/github-pull-request-review",
+				EventRouting:  "sqs",
+				GHECEnabled:   true,
+				GHESEnabled:   true,
+				QueueWorkers:  3,
+			},
+			"issue_comment": {
+				EastRegionURL: "http://localhost:4566/000000000000/github-issue-comment",
+				EventRouting:  "sqs",
+				GHECEnabled:   true,
+				GHESEnabled:   true,
+				QueueWorkers:  1,
+			},
+			"status": {
+				EastRegionURL: "http://localhost:4566/000000000000/github-status",
+				EventRouting:  "sqs",
+				GHECEnabled:   true,
+				GHESEnabled:   true,
+				QueueWorkers:  5,
+			},
 		},
 		TestDuration:       10 * time.Second,
 		SQSWorkersPerQueue: 2,
@@ -173,8 +199,8 @@ func TestIntegration_HTTPAndSQSEventProcessing(t *testing.T) {
 		defer localStack.Cleanup()
 
 		config.SQSQueueURLs = localStack.EnsureQueues(config.SQSQueueURLs)
-		for _, queueURL := range config.SQSQueueURLs {
-			localStack.PurgeQueue(QueueNameFromURL(queueURL))
+		for _, queueConfig := range config.SQSQueueURLs {
+			localStack.PurgeQueue(QueueNameFromURL(queueConfig.EastRegionURL))
 		}
 
 		sqsClient = localStack.Client()
@@ -233,7 +259,7 @@ func TestIntegration_HTTPAndSQSEventProcessing(t *testing.T) {
 			}
 
 			for _, event := range events {
-				sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type], event)
+				sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event)
 			}
 
 			// Wait for events to be processed
@@ -272,7 +298,7 @@ func TestIntegration_HTTPAndSQSEventProcessing(t *testing.T) {
 					{Type: "status", State: "pending", Context: "test-parallel"},
 				}
 				for _, event := range events {
-					sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type], event)
+					sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event)
 					time.Sleep(150 * time.Millisecond)
 				}
 			}()
@@ -501,6 +527,11 @@ func waitForEvents(t *testing.T, handler *TestEventHandler, expectedCount int, t
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Logf("Timeout waiting for %d events, got %d", expectedCount, handler.GetEventCount())
+}
+
+// parseGitHubEvent parses a JSON payload into a GitHubEvent struct
+func parseGitHubEvent(payload []byte, event *GitHubEvent) error {
+	return json.Unmarshal(payload, event)
 }
 
 // Test private key for GitHub App (not a real key)

@@ -230,10 +230,18 @@ func (p *Processor) parseMessage(eventType string, message types.Message) (SQSMe
 				// Extract payload if it exists separately
 				var payload json.RawMessage
 				if payloadData, hasPayload := webhookData["payload"]; hasPayload {
+					// Structured format with explicit payload field
 					payload, _ = json.Marshal(payloadData)
 				} else {
-					// If no separate payload field, the whole message might be the payload
-					payload = json.RawMessage(*message.Body)
+					// Webhook format: headers at root level, GitHub event data is everything else
+					// Extract the GitHub event by excluding the headers field
+					payloadData := make(map[string]interface{})
+					for k, v := range webhookData {
+						if k != "headers" {
+							payloadData[k] = v
+						}
+					}
+					payload, _ = json.Marshal(payloadData)
 				}
 
 				sqsMsg = SQSMessage{
@@ -245,6 +253,7 @@ func (p *Processor) parseMessage(eventType string, message types.Message) (SQSMe
 
 				p.logger.Debug().
 					Interface("headers", headers).
+					Int("payload_fields", len(webhookData)-1).
 					Msg("Parsed GitHub webhook with headers")
 			} else {
 				// No headers found, treat entire body as payload

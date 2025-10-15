@@ -157,13 +157,13 @@ func main() {
 			Enabled:     false, // Disable SQS for testing without LocalStack
 			Region:      "us-east-1",
 			EndpointURL: "http://localhost:4566", // LocalStack
-			Queues: map[string]string{
-				"pull_request":        "http://localhost:4566/000000000000/github-pull-request",
-				"pull_request_review": "http://localhost:4566/000000000000/github-pull-request-review",
-				"issue_comment":       "http://localhost:4566/000000000000/github-issue-comment",
-				"status":              "http://localhost:4566/000000000000/github-status",
-				"check_run":           "http://localhost:4566/000000000000/github-check-run",
-				"installation":        "http://localhost:4566/000000000000/github-installation",
+			Queues: map[string]server.EventQueueConfig{
+				"pull_request":        {EastRegionURL: "http://localhost:4566/000000000000/github-pull-request"},
+				"pull_request_review": {EastRegionURL: "http://localhost:4566/000000000000/github-pull-request-review"},
+				"issue_comment":       {EastRegionURL: "http://localhost:4566/000000000000/github-issue-comment"},
+				"status":              {EastRegionURL: "http://localhost:4566/000000000000/github-status"},
+				"check_run":           {EastRegionURL: "http://localhost:4566/000000000000/github-check-run"},
+				"installation":        {EastRegionURL: "http://localhost:4566/000000000000/github-installation"},
 			},
 			WorkersPerQueue:   2,
 			MaxMessages:       5,

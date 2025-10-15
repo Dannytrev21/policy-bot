@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
@@ -187,7 +188,7 @@ func TestProcessor_ParseMessage_WithHeaders(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			message := types.Message{
 				Body:      &tt.messageBody,
-				MessageId: stringPtr("test-message-id"),
+				MessageId: aws.String("test-message-id"),
 			}
 
 			result, err := processor.parseMessage(tt.eventType, message)
@@ -256,7 +257,7 @@ func TestProcessor_RealGitHubWebhookFormat(t *testing.T) {
 
 	message := types.Message{
 		Body:      &githubWebhook,
-		MessageId: stringPtr("sqs-message-id-12345"),
+		MessageId: aws.String("sqs-message-id-12345"),
 	}
 
 	// Parse the message
@@ -278,9 +279,4 @@ func TestProcessor_RealGitHubWebhookFormat(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "opened", payload["action"])
 	assert.Equal(t, float64(42), payload["number"])
-}
-
-// Helper function for string pointers
-func stringPtr(s string) *string {
-	return &s
 }

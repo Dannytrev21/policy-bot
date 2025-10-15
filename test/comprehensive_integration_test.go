@@ -51,8 +51,8 @@ func TestComprehensive_SQSToWorkerPoolToHandlers(t *testing.T) {
 	defer localStack.Cleanup()
 
 	config.SQSQueueURLs = localStack.EnsureQueues(config.SQSQueueURLs)
-	for _, queueURL := range config.SQSQueueURLs {
-		localStack.PurgeQueue(QueueNameFromURL(queueURL))
+	for _, queueConfig := range config.SQSQueueURLs {
+		localStack.PurgeQueue(QueueNameFromURL(queueConfig.EastRegionURL))
 	}
 
 	// Create test handlers that track which handler was invoked
@@ -77,7 +77,7 @@ func TestComprehensive_SQSToWorkerPoolToHandlers(t *testing.T) {
 
 		// Send message with GHEC host header
 		event := GitHubEvent{Type: "pull_request", Action: "opened", Number: 100}
-		sendSQSMessageWithHost(t, sqsClient, config.SQSQueueURLs[event.Type], event, "api.github.ghec.com")
+		sendSQSMessageWithHost(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event, "api.github.ghec.com")
 
 		waitForEventsGeneric(t, cloudHandler, 1, 5*time.Second)
 
@@ -96,7 +96,7 @@ func TestComprehensive_SQSToWorkerPoolToHandlers(t *testing.T) {
 
 		// Send message with enterprise host header
 		event := GitHubEvent{Type: "pull_request", Action: "opened", Number: 101}
-		sendSQSMessageWithHost(t, sqsClient, config.SQSQueueURLs[event.Type], event, "github.enterprise.com")
+		sendSQSMessageWithHost(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event, "github.enterprise.com")
 
 		waitForEventsGeneric(t, enterpriseHandler, 1, 5*time.Second)
 
@@ -187,8 +187,8 @@ func TestComprehensive_DualProcessing(t *testing.T) {
 	defer localStack.Cleanup()
 
 	config.SQSQueueURLs = localStack.EnsureQueues(config.SQSQueueURLs)
-	for _, queueURL := range config.SQSQueueURLs {
-		localStack.PurgeQueue(QueueNameFromURL(queueURL))
+	for _, queueConfig := range config.SQSQueueURLs {
+		localStack.PurgeQueue(QueueNameFromURL(queueConfig.EastRegionURL))
 	}
 
 	testHandler := NewTestEventHandler([]string{"pull_request", "pull_request_review", "issue_comment", "status"})
@@ -227,7 +227,7 @@ func TestComprehensive_DualProcessing(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 5; i++ {
 				event := GitHubEvent{Type: "status", State: "success", Context: fmt.Sprintf("test-%d", i)}
-				sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type], event)
+				sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event)
 				time.Sleep(75 * time.Millisecond)
 			}
 		}()
@@ -281,8 +281,8 @@ func TestComprehensive_GracefulShutdown(t *testing.T) {
 	defer localStack.Cleanup()
 
 	config.SQSQueueURLs = localStack.EnsureQueues(config.SQSQueueURLs)
-	for _, queueURL := range config.SQSQueueURLs {
-		localStack.PurgeQueue(QueueNameFromURL(queueURL))
+	for _, queueConfig := range config.SQSQueueURLs {
+		localStack.PurgeQueue(QueueNameFromURL(queueConfig.EastRegionURL))
 	}
 
 	slowHandler := NewSlowTestHandler([]string{"pull_request"}, 500*time.Millisecond)
@@ -302,7 +302,7 @@ func TestComprehensive_GracefulShutdown(t *testing.T) {
 	// Send events that will take time to process
 	for i := 0; i < 5; i++ {
 		event := GitHubEvent{Type: "pull_request", Action: "opened", Number: 400 + i}
-		sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type], event)
+		sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event)
 	}
 
 	// Let a few start processing
@@ -344,8 +344,8 @@ func TestComprehensive_HighVolumeBurst(t *testing.T) {
 	defer localStack.Cleanup()
 
 	config.SQSQueueURLs = localStack.EnsureQueues(config.SQSQueueURLs)
-	for _, queueURL := range config.SQSQueueURLs {
-		localStack.PurgeQueue(QueueNameFromURL(queueURL))
+	for _, queueConfig := range config.SQSQueueURLs {
+		localStack.PurgeQueue(QueueNameFromURL(queueConfig.EastRegionURL))
 	}
 
 	testHandler := NewTestEventHandler([]string{"pull_request", "status"})
@@ -369,7 +369,7 @@ func TestComprehensive_HighVolumeBurst(t *testing.T) {
 		eventCount := 50
 		for i := 0; i < eventCount; i++ {
 			event := GitHubEvent{Type: "status", State: "success", Context: fmt.Sprintf("burst-%d", i)}
-			sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type], event)
+			sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event)
 		}
 
 		// Wait for all events to be processed
@@ -404,8 +404,8 @@ func TestComprehensive_CloudVsEnterpriseRouting(t *testing.T) {
 	defer localStack.Cleanup()
 
 	config.SQSQueueURLs = localStack.EnsureQueues(config.SQSQueueURLs)
-	for _, queueURL := range config.SQSQueueURLs {
-		localStack.PurgeQueue(QueueNameFromURL(queueURL))
+	for _, queueConfig := range config.SQSQueueURLs {
+		localStack.PurgeQueue(QueueNameFromURL(queueConfig.EastRegionURL))
 	}
 
 	cloudHandler := NewRoutingTestHandler([]string{"pull_request", "status"}, "cloud")
@@ -461,7 +461,7 @@ func TestComprehensive_CloudVsEnterpriseRouting(t *testing.T) {
 			enterpriseHandler.Reset()
 
 			event := GitHubEvent{Type: "pull_request", Action: "opened", Number: 500}
-			sendSQSMessageWithHost(t, sqsClient, config.SQSQueueURLs[event.Type], event, tc.hostHeader)
+			sendSQSMessageWithHost(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event, tc.hostHeader)
 
 			waitForEventsGeneric(t, tc.expectedHandler, 1, 5*time.Second)
 
@@ -579,6 +579,14 @@ func (h *SlowTestHandler) Handle(ctx context.Context, eventType, deliveryID stri
 	return h.TestEventHandler.Handle(ctx, eventType, deliveryID, payload)
 }
 
+// getProcessingMode returns the processing mode for tests
+func getProcessingMode(config *IntegrationTestConfig) string {
+	if config.SQSProcessingMode != "" {
+		return config.SQSProcessingMode
+	}
+	return "scheduler" // Default for backward compatibility
+}
+
 // setupTestServerWithHandlers creates a test server with separate cloud and enterprise handlers
 func setupTestServerWithHandlers(t *testing.T, config *IntegrationTestConfig, cloudHandler, enterpriseHandler githubapp.EventHandler) (*server.Server, string, func()) {
 	port := 8080
@@ -653,12 +661,18 @@ func setupTestServerWithHandlers(t *testing.T, config *IntegrationTestConfig, cl
 			Enabled:           config.UseLocalStack,
 			Region:            "us-east-1",
 			EndpointURL:       config.LocalStackURL,
+			ProcessingMode:    getProcessingMode(config),
 			Queues:            config.SQSQueueURLs,
 			WorkersPerQueue:   sqsWorkers,
 			MaxMessages:       config.SQSMaxMessages,
 			VisibilityTimeout: 30,
 			WaitTimeSeconds:   config.SQSWaitTimeSeconds,
 			ShutdownTimeout:   5 * time.Second,
+			AdaptivePolling: server.AdaptivePollingConfig{
+				Enabled:     config.AdaptivePolling,
+				BaseBackoff: 1 * time.Second,
+				MaxBackoff:  30 * time.Second,
+			},
 		},
 	}
 

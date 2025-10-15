@@ -47,8 +47,8 @@ func TestComprehensive_MixedCloudAndEnterprise(t *testing.T) {
 	defer localStack.Cleanup()
 
 	config.SQSQueueURLs = localStack.EnsureQueues(config.SQSQueueURLs)
-	for _, queueURL := range config.SQSQueueURLs {
-		localStack.PurgeQueue(QueueNameFromURL(queueURL))
+	for _, queueConfig := range config.SQSQueueURLs {
+		localStack.PurgeQueue(QueueNameFromURL(queueConfig.EastRegionURL))
 	}
 
 	// Create separate handlers for cloud and enterprise
@@ -91,7 +91,7 @@ func TestComprehensive_MixedCloudAndEnterprise(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 10; i++ {
 				event := GitHubEvent{Type: "status", State: "success", Context: fmt.Sprintf("cloud-%d", i)}
-				sendSQSMessageWithHost(t, sqsClient, config.SQSQueueURLs[event.Type], event, "api.github.ghec.com")
+				sendSQSMessageWithHost(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event, "api.github.ghec.com")
 				time.Sleep(75 * time.Millisecond)
 			}
 		}()
@@ -102,7 +102,7 @@ func TestComprehensive_MixedCloudAndEnterprise(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 10; i++ {
 				event := GitHubEvent{Type: "status", State: "success", Context: fmt.Sprintf("enterprise-%d", i)}
-				sendSQSMessageWithHost(t, sqsClient, config.SQSQueueURLs[event.Type], event, "github.enterprise.com")
+				sendSQSMessageWithHost(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event, "github.enterprise.com")
 				time.Sleep(75 * time.Millisecond)
 			}
 		}()
@@ -198,8 +198,8 @@ func TestComprehensive_WebhookQueueSaturation(t *testing.T) {
 	defer localStack.Cleanup()
 
 	config.SQSQueueURLs = localStack.EnsureQueues(config.SQSQueueURLs)
-	for _, queueURL := range config.SQSQueueURLs {
-		localStack.PurgeQueue(QueueNameFromURL(queueURL))
+	for _, queueConfig := range config.SQSQueueURLs {
+		localStack.PurgeQueue(QueueNameFromURL(queueConfig.EastRegionURL))
 	}
 
 	// Create handler that tracks events and simulates slow processing for webhooks
@@ -248,7 +248,7 @@ func TestComprehensive_WebhookQueueSaturation(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 20; i++ {
 				event := GitHubEvent{Type: "status", State: "success", Context: fmt.Sprintf("sqs-%d", i)}
-				sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type], event)
+				sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event)
 			}
 		}()
 
@@ -327,14 +327,14 @@ func TestComprehensive_DLQProcessing(t *testing.T) {
 	config.SQSQueueURLs = localStack.EnsureQueues(config.SQSQueueURLs)
 
 	// Create DLQ for status queue
-	statusQueueName := QueueNameFromURL(config.SQSQueueURLs["status"])
+	statusQueueName := QueueNameFromURL(config.SQSQueueURLs["status"].EastRegionURL)
 	dlqName := statusQueueName + "-dlq"
 	dlqURL := localStack.EnsureQueue(dlqName)
 
 	t.Logf("Created DLQ: %s", dlqURL)
 
-	for _, queueURL := range config.SQSQueueURLs {
-		localStack.PurgeQueue(QueueNameFromURL(queueURL))
+	for _, queueConfig := range config.SQSQueueURLs {
+		localStack.PurgeQueue(QueueNameFromURL(queueConfig.EastRegionURL))
 	}
 	localStack.PurgeQueue(dlqName)
 
@@ -362,13 +362,13 @@ func TestComprehensive_DLQProcessing(t *testing.T) {
 		// Send successful messages
 		for i := 0; i < 3; i++ {
 			event := GitHubEvent{Type: "status", State: "success", Context: fmt.Sprintf("success-%d", i)}
-			sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type], event)
+			sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event)
 		}
 
 		// Send messages that will fail
 		for i := 0; i < 2; i++ {
 			event := GitHubEvent{Type: "status", State: "failure", Context: fmt.Sprintf("fail-me-%d", i)}
-			sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type], event)
+			sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event)
 		}
 
 		// Wait for processing

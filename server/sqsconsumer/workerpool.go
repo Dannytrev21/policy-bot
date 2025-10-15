@@ -232,6 +232,37 @@ func (p *WorkerPool) GetCapacity() int {
 	return p.capacity
 }
 
+// HasAvailableWorkers checks if the pool has available worker slots
+// This is a non-blocking check that returns immediately
+func (p *WorkerPool) HasAvailableWorkers() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.closed {
+		return false
+	}
+
+	// Check if we have available capacity
+	availableSlots := p.capacity - int(p.activeWorkers)
+	return availableSlots > 0
+}
+
+// GetAvailableCapacity returns the number of available worker slots
+func (p *WorkerPool) GetAvailableCapacity() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.closed {
+		return 0
+	}
+
+	availableSlots := p.capacity - int(p.activeWorkers)
+	if availableSlots < 0 {
+		return 0
+	}
+	return availableSlots
+}
+
 // WorkerPoolManager manages multiple worker pools
 type WorkerPoolManager struct {
 	pools    map[string]*WorkerPool
@@ -346,4 +377,32 @@ type PoolStats struct {
 	Capacity      int     `json:"capacity"`
 	ActiveWorkers int64   `json:"active_workers"`
 	Utilization   float64 `json:"utilization"`
+}
+
+// HasAvailableWorkersForEventType checks if a specific event type has available workers
+func (m *WorkerPoolManager) HasAvailableWorkersForEventType(eventType string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	pool, exists := m.pools[eventType]
+	if !exists {
+		// Pool doesn't exist yet, so it will be created with full capacity
+		return true
+	}
+
+	return pool.HasAvailableWorkers()
+}
+
+// GetAvailableCapacityForEventType returns available capacity for an event type
+func (m *WorkerPoolManager) GetAvailableCapacityForEventType(eventType string, defaultCapacity int) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	pool, exists := m.pools[eventType]
+	if !exists {
+		// Pool doesn't exist yet, return default capacity
+		return defaultCapacity
+	}
+
+	return pool.GetAvailableCapacity()
 }

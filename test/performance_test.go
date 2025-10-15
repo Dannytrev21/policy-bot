@@ -42,8 +42,8 @@ func TestIntegration_SQSBurstPerformance(t *testing.T) {
 	defer localStack.Cleanup()
 
 	config.SQSQueueURLs = localStack.EnsureQueues(config.SQSQueueURLs)
-	for _, queueURL := range config.SQSQueueURLs {
-		localStack.PurgeQueue(QueueNameFromURL(queueURL))
+	for _, queueConfig := range config.SQSQueueURLs {
+		localStack.PurgeQueue(QueueNameFromURL(queueConfig.EastRegionURL))
 	}
 
 	testHandler := NewTestEventHandler([]string{"pull_request", "pull_request_review", "issue_comment", "status"})
@@ -69,7 +69,7 @@ func TestIntegration_SQSBurstPerformance(t *testing.T) {
 	timer := StartRun(scenario)
 	for i := 0; i < scenario.TotalEvents; i++ {
 		event := GitHubEvent{Type: "pull_request", Action: "synchronize", Number: i + 1000}
-		sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type], event)
+		sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event)
 	}
 
 	waitForEvents(t, testHandler, scenario.TotalEvents, scenario.WaitTimeout)
@@ -128,8 +128,8 @@ func TestIntegration_SQSHighVolume(t *testing.T) {
 	defer localStack.Cleanup()
 
 	config.SQSQueueURLs = localStack.EnsureQueues(config.SQSQueueURLs)
-	for _, queueURL := range config.SQSQueueURLs {
-		localStack.PurgeQueue(QueueNameFromURL(queueURL))
+	for _, queueConfig := range config.SQSQueueURLs {
+		localStack.PurgeQueue(QueueNameFromURL(queueConfig.EastRegionURL))
 	}
 
 	testHandler := NewTestEventHandler([]string{"pull_request", "pull_request_review", "issue_comment", "status"})
@@ -145,7 +145,7 @@ func TestIntegration_SQSHighVolume(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	sqsClient := localStack.Client()
-	queueURL := config.SQSQueueURLs["pull_request"]
+	queueURL := config.SQSQueueURLs["pull_request"].EastRegionURL
 
 	timer := StartRun(scenario)
 	for i := 0; i < scenario.TotalEvents; i++ {
@@ -229,8 +229,8 @@ func TestIntegration_SQSWorkerScaling(t *testing.T) {
 			defer localStack.Cleanup()
 
 			config.SQSQueueURLs = localStack.EnsureQueues(config.SQSQueueURLs)
-			for _, queueURL := range config.SQSQueueURLs {
-				localStack.PurgeQueue(QueueNameFromURL(queueURL))
+			for _, queueConfig := range config.SQSQueueURLs {
+				localStack.PurgeQueue(QueueNameFromURL(queueConfig.EastRegionURL))
 			}
 
 			testHandler := NewTestEventHandler([]string{"pull_request", "pull_request_review", "issue_comment", "status"})
@@ -246,7 +246,7 @@ func TestIntegration_SQSWorkerScaling(t *testing.T) {
 			time.Sleep(2 * time.Second)
 
 			sqsClient := localStack.Client()
-			queueURL := config.SQSQueueURLs["pull_request"]
+			queueURL := config.SQSQueueURLs["pull_request"].EastRegionURL
 
 			scenario := ScenarioWithWorkers(baseScenario, workers)
 			sendStart := time.Now()

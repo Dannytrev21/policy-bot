@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/palantir/go-githubapp/githubapp"
@@ -98,19 +99,32 @@ func TestConsumer_EventRouting(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Create event queue config with routing strategy
+			eventRouting := ""
+			if len(tt.eventRouting) > 0 {
+				eventRouting = tt.eventRouting[tt.eventType]
+			}
+
 			config := &Config{
-				Enabled:      true,
-				Region:       "us-east-1",
-				Queues:       map[string]string{tt.eventType: "https://sqs.us-east-1.amazonaws.com/123456789012/test"},
-				EventRouting: tt.eventRouting,
+				Enabled: true,
+				Region:  "us-east-1",
+				Queues: map[string]EventQueueConfig{
+					tt.eventType: {
+						EastRegionURL: "https://sqs.us-east-1.amazonaws.com/123456789012/test",
+						EventRouting:  eventRouting,
+						GHECEnabled:   true,
+						GHESEnabled:   true,
+					},
+				},
 			}
 
 			logger := zerolog.New(nil)
 
 			// Create a test consumer using unexported struct
 			c := &consumer{
-				config: config,
-				logger: logger,
+				config:   config,
+				logger:   logger,
+				queueMap: map[string]string{tt.eventType: "https://sqs.us-east-1.amazonaws.com/123456789012/test"},
 			}
 
 			result := c.shouldProcessViaSQS(tt.eventType)
@@ -129,11 +143,12 @@ func TestConsumer_PerQueueWorkerAllocation(t *testing.T) {
 		{
 			name: "uses queue-specific worker count",
 			config: &Config{
-				WorkersPerQueue: 5,
-				QueueWorkers: map[string]int{
-					"status":       15,
-					"pull_request": 8,
+				Queues: map[string]EventQueueConfig{
+					"status": {
+						QueueWorkers: 15,
+					},
 				},
+				WorkersPerQueue: 5,
 			},
 			eventType:       "status",
 			expectedWorkers: 15,
@@ -142,9 +157,6 @@ func TestConsumer_PerQueueWorkerAllocation(t *testing.T) {
 			name: "falls back to default when queue not specified",
 			config: &Config{
 				WorkersPerQueue: 7,
-				QueueWorkers: map[string]int{
-					"status": 15,
-				},
 			},
 			eventType:       "pull_request",
 			expectedWorkers: 7,
@@ -153,19 +165,14 @@ func TestConsumer_PerQueueWorkerAllocation(t *testing.T) {
 			name: "ignores zero or negative queue-specific values",
 			config: &Config{
 				WorkersPerQueue: 5,
-				QueueWorkers: map[string]int{
-					"status":       0,
-					"pull_request": -1,
-				},
 			},
 			eventType:       "status",
 			expectedWorkers: 5,
 		},
 		{
-			name: "works when QueueWorkers is nil",
+			name: "works when QueueWorkers is not set",
 			config: &Config{
 				WorkersPerQueue: 6,
-				QueueWorkers:    nil,
 			},
 			eventType:       "status",
 			expectedWorkers: 6,
@@ -269,17 +276,21 @@ func TestConsumer_ConfigValidation(t *testing.T) {
 // TestConsumer_InitMetrics tests metric initialization
 func TestConsumer_InitMetrics(t *testing.T) {
 	registry := metrics.NewRegistry()
-	
+
 	config := &Config{
-		Queues: map[string]string{
-			"status":       "https://sqs/status",
-			"pull_request": "https://sqs/pr",
+		Queues: map[string]EventQueueConfig{
+			"status":       {EastRegionURL: "https://sqs/status"},
+			"pull_request": {EastRegionURL: "https://sqs/pr"},
 		},
 	}
 
 	c := &consumer{
 		config:   config,
 		registry: registry,
+		queueMap: map[string]string{
+			"status":       "https://sqs/status",
+			"pull_request": "https://sqs/pr",
+		},
 	}
 
 	c.initMetrics(registry)
@@ -300,8 +311,8 @@ func TestConsumer_InitMetrics(t *testing.T) {
 // TestConsumer_InitMetrics_NilRegistry tests metric initialization with nil registry
 func TestConsumer_InitMetrics_NilRegistry(t *testing.T) {
 	config := &Config{
-		Queues: map[string]string{
-			"status": "https://sqs/status",
+		Queues: map[string]EventQueueConfig{
+			"status": {EastRegionURL: "https://sqs/status"},
 		},
 	}
 
@@ -320,8 +331,8 @@ func TestConsumer_Health_Success(t *testing.T) {
 	queueURL := "https://sqs.us-east-1.amazonaws.com/123/test"
 
 	config := &Config{
-		Queues: map[string]string{
-			"pull_request": queueURL,
+		Queues: map[string]EventQueueConfig{
+			"pull_request": {EastRegionURL: queueURL},
 		},
 	}
 
@@ -329,6 +340,7 @@ func TestConsumer_Health_Success(t *testing.T) {
 		config:    config,
 		sqsClient: SQSClient(mockSQS),
 		logger:    zerolog.Nop(),
+		queueMap:  map[string]string{"pull_request": queueURL},
 	}
 
 	// Mock successful GetQueueAttributes
@@ -351,8 +363,8 @@ func TestConsumer_Health_Failure(t *testing.T) {
 	queueURL := "https://sqs.us-east-1.amazonaws.com/123/test"
 
 	config := &Config{
-		Queues: map[string]string{
-			"pull_request": queueURL,
+		Queues: map[string]EventQueueConfig{
+			"pull_request": {EastRegionURL: queueURL},
 		},
 	}
 
@@ -360,6 +372,7 @@ func TestConsumer_Health_Failure(t *testing.T) {
 		config:    config,
 		sqsClient: SQSClient(mockSQS),
 		logger:    zerolog.Nop(),
+		queueMap:  map[string]string{"pull_request": queueURL},
 	}
 
 	// Mock failed GetQueueAttributes
@@ -378,9 +391,9 @@ func TestConsumer_DetailedHealth(t *testing.T) {
 	prURL := "https://sqs.us-east-1.amazonaws.com/123/pr"
 
 	config := &Config{
-		Queues: map[string]string{
-			"status":       statusURL,
-			"pull_request": prURL,
+		Queues: map[string]EventQueueConfig{
+			"status":       {EastRegionURL: statusURL},
+			"pull_request": {EastRegionURL: prURL},
 		},
 	}
 
@@ -388,6 +401,10 @@ func TestConsumer_DetailedHealth(t *testing.T) {
 		config:    config,
 		sqsClient: SQSClient(mockSQS),
 		logger:    zerolog.Nop(),
+		queueMap: map[string]string{
+			"status":       statusURL,
+			"pull_request": prURL,
+		},
 	}
 
 	// Mock GetQueueAttributes for status queue
@@ -437,9 +454,8 @@ func TestConsumer_New_EnabledWithConfig(t *testing.T) {
 		Enabled:         true,
 		Region:          "us-east-1",
 		ProcessingMode:  "direct",
-		Queues:          map[string]string{"pull_request": "https://sqs/pr"},
+		Queues:          map[string]EventQueueConfig{"pull_request": {EastRegionURL: "https://sqs/pr"}},
 		WorkersPerQueue: 3,
-		QueueWorkers:    map[string]int{"pull_request": 5},
 		MaxMessages:     10,
 		EnableRetry:     true,
 		MaxRetries:      3,
@@ -479,7 +495,9 @@ func TestConsumer_New_DefaultProcessingMode(t *testing.T) {
 	config := &Config{
 		Enabled: true,
 		Region:  "us-east-1",
-		Queues:  map[string]string{"pull_request": "https://sqs/pr"},
+		Queues: map[string]EventQueueConfig{
+			"pull_request": {EastRegionURL: "https://sqs/pr"},
+		},
 		// ProcessingMode not set - should default to "scheduler"
 	}
 
@@ -513,9 +531,8 @@ func TestConsumer_Start_Success(t *testing.T) {
 	mockHandler.On("Handles").Return([]string{"pull_request"})
 
 	config := &Config{
-		Queues:          map[string]string{"pull_request": "https://sqs/pr"},
+		Queues:          map[string]EventQueueConfig{"pull_request": {EastRegionURL: "https://sqs/pr"}},
 		WorkersPerQueue: 1,
-		EventRouting:    map[string]string{"pull_request": "sqs"},
 	}
 
 	c := &consumer{
@@ -553,7 +570,9 @@ func TestConsumer_Start_Success(t *testing.T) {
 func TestConsumer_Start_AlreadyStarted(t *testing.T) {
 	mockSQS := &MockSQSClient{}
 	config := &Config{
-		Queues: map[string]string{"pull_request": "https://sqs/pr"},
+		Queues: map[string]EventQueueConfig{
+			"pull_request": {EastRegionURL: "https://sqs/pr"},
+		},
 	}
 
 	c := &consumer{
@@ -577,15 +596,11 @@ func TestConsumer_Start_SkipsHTTPOnlyEvents(t *testing.T) {
 	mockHandler.On("Handles").Return([]string{"pull_request", "status"})
 
 	config := &Config{
-		Queues: map[string]string{
-			"pull_request": "https://sqs/pr",
-			"status":       "https://sqs/status",
+		Queues: map[string]EventQueueConfig{
+			"pull_request": {EastRegionURL: "https://sqs/pr"},
+			"status":       {EastRegionURL: "https://sqs/status"},
 		},
 		WorkersPerQueue: 1,
-		EventRouting: map[string]string{
-			"pull_request": "http", // HTTP only - should skip
-			"status":       "sqs",  // SQS - should process
-		},
 	}
 
 	c := &consumer{
@@ -734,8 +749,8 @@ func TestConsumer_ConsumeQueue_ReceiveAndProcess(t *testing.T) {
 	mockSQS.On("ReceiveMessage", mock.Anything, mock.Anything).Return(&sqs.ReceiveMessageOutput{
 		Messages: []types.Message{
 			{
-				Body:      stringPtr(messageBody),
-				MessageId: stringPtr("msg-123"),
+				Body:      aws.String(messageBody),
+				MessageId: aws.String("msg-123"),
 			},
 		},
 	}, nil).Once()
@@ -833,8 +848,8 @@ func TestConsumer_MonitorDLQ(t *testing.T) {
 	dlqURL := queueURL + "-dlq"
 
 	config := &Config{
-		Queues: map[string]string{
-			"pull_request": queueURL,
+		Queues: map[string]EventQueueConfig{
+			"pull_request": {EastRegionURL: queueURL},
 		},
 		DLQ: DLQConfig{
 			Enabled:     true,
@@ -848,6 +863,7 @@ func TestConsumer_MonitorDLQ(t *testing.T) {
 		registry:  registry,
 		logger:    zerolog.Nop(),
 		stopChan:  make(chan struct{}),
+		queueMap:  map[string]string{"pull_request": queueURL},
 	}
 
 	var stopOnce sync.Once
@@ -904,9 +920,9 @@ func TestConsumer_CheckDLQs(t *testing.T) {
 	prURL := "https://sqs.us-east-1.amazonaws.com/123/pr"
 
 	config := &Config{
-		Queues: map[string]string{
-			"status":       statusURL,
-			"pull_request": prURL,
+		Queues: map[string]EventQueueConfig{
+			"status":       {EastRegionURL: statusURL},
+			"pull_request": {EastRegionURL: prURL},
 		},
 		DLQ: DLQConfig{
 			Enabled:     true,
@@ -919,6 +935,10 @@ func TestConsumer_CheckDLQs(t *testing.T) {
 		sqsClient: mockSQS,
 		registry:  registry,
 		logger:    zerolog.Nop(),
+		queueMap: map[string]string{
+			"status":       statusURL,
+			"pull_request": prURL,
+		},
 	}
 
 	// Mock GetQueueAttributes for status DLQ (has messages)
@@ -958,8 +978,8 @@ func TestConsumer_CheckDLQs_DefaultSuffix(t *testing.T) {
 	queueURL := "https://sqs.us-east-1.amazonaws.com/123/test"
 
 	config := &Config{
-		Queues: map[string]string{
-			"pull_request": queueURL,
+		Queues: map[string]EventQueueConfig{
+			"pull_request": {EastRegionURL: queueURL},
 		},
 		DLQ: DLQConfig{
 			Enabled: true,
@@ -971,6 +991,7 @@ func TestConsumer_CheckDLQs_DefaultSuffix(t *testing.T) {
 		config:    config,
 		sqsClient: mockSQS,
 		logger:    zerolog.Nop(),
+		queueMap:  map[string]string{"pull_request": queueURL},
 	}
 
 	// Mock GetQueueAttributes - verify default suffix is used

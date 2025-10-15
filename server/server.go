@@ -296,21 +296,39 @@ func New(c *Config) (*Server, error) {
 	)
 
 	// Create SQS consumer using the same scheduler and handlers
+	// Convert server EventQueueConfig to sqsconsumer EventQueueConfig
+	sqsQueues := make(map[string]sqsconsumer.EventQueueConfig)
+	for eventType, queueConfig := range c.SQS.Queues {
+		sqsQueues[eventType] = sqsconsumer.EventQueueConfig{
+			EastRegionURL:     queueConfig.EastRegionURL,
+			WestRegionURL:     queueConfig.WestRegionURL,
+			EventRouting:      queueConfig.EventRouting,
+			GHECEnabled:       queueConfig.GHECEnabled,
+			GHESEnabled:       queueConfig.GHESEnabled,
+			QueueWorkers:      queueConfig.QueueWorkers,
+			VisibilityTimeout: queueConfig.VisibilityTimeout,
+			MaxRetries:        queueConfig.MaxRetries,
+		}
+	}
+
 	sqsConfig := &sqsconsumer.Config{
 		Enabled:           c.SQS.Enabled,
 		Region:            c.SQS.Region,
 		EndpointURL:       c.SQS.EndpointURL,
 		ProcessingMode:    c.SQS.ProcessingMode,
-		Queues:            c.SQS.Queues,
-		EventRouting:      c.SQS.EventRouting,
+		Queues:            sqsQueues,
 		WorkersPerQueue:   c.SQS.WorkersPerQueue,
-		QueueWorkers:      c.SQS.QueueWorkers,
 		MaxMessages:       c.SQS.MaxMessages,
 		VisibilityTimeout: c.SQS.VisibilityTimeout,
 		WaitTimeSeconds:   c.SQS.WaitTimeSeconds,
 		ShutdownTimeout:   c.SQS.ShutdownTimeout,
 		EnableRetry:       c.SQS.EnableRetry,
 		MaxRetries:        c.SQS.MaxRetries,
+		DLQ: sqsconsumer.DLQConfig{
+			Enabled:         c.SQS.DLQ.Enabled,
+			MaxReceiveCount: c.SQS.DLQ.MaxReceiveCount,
+			QueueSuffix:     c.SQS.DLQ.QueueSuffix,
+		},
 	}
 
 	sqsConsumer, err := sqsconsumer.New(sqsConfig, cloudHandlers, enterpriseHandlers, cloudScheduler, enterpriseScheduler, logger, base.Registry())

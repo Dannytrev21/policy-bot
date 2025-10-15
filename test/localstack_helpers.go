@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/palantir/policy-bot/server"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -99,15 +100,18 @@ func (m *LocalStackManager) Client() *sqs.Client {
 }
 
 // EnsureQueues ensures that the provided event-to-queue mapping exists and returns updated URLs.
-func (m *LocalStackManager) EnsureQueues(eventQueueMap map[string]string) map[string]string {
-	result := make(map[string]string, len(eventQueueMap))
-	for eventType, queueRef := range eventQueueMap {
-		queueName := queueRef
-		if strings.HasPrefix(queueRef, "http") {
-			queueName = QueueNameFromURL(queueRef)
+func (m *LocalStackManager) EnsureQueues(eventQueueMap map[string]server.EventQueueConfig) map[string]server.EventQueueConfig {
+	result := make(map[string]server.EventQueueConfig, len(eventQueueMap))
+	for eventType, queueConfig := range eventQueueMap {
+		queueName := queueConfig.EastRegionURL
+		if strings.HasPrefix(queueConfig.EastRegionURL, "http") {
+			queueName = QueueNameFromURL(queueConfig.EastRegionURL)
 		}
 		queueURL := m.EnsureQueue(queueName)
-		result[eventType] = queueURL
+
+		// Update the EastRegionURL with the actual LocalStack URL
+		queueConfig.EastRegionURL = queueURL
+		result[eventType] = queueConfig
 	}
 	return result
 }

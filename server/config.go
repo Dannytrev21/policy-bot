@@ -17,6 +17,7 @@ package server
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/c2h5oh/datasize"
@@ -121,27 +122,11 @@ type SQSConfig struct {
 	// "direct" mode bypasses the internal scheduler and uses dedicated worker pools
 	ProcessingMode string `yaml:"processing_mode"`
 
-	// DEPRECATED: Use EventQueues for enhanced configuration
-	// Map of GitHub event type to SQS queue URL
-	Queues map[string]string `yaml:"queues"`
+	// Event-based queue configuration with region URLs and environment controls
+	Queues map[string]EventQueueConfig `yaml:"queues"`
 
-	// Enhanced event-to-queue mapping with per-queue configuration
-	EventQueues map[string]QueueConfig `yaml:"event_queues"`
-
-	// DEPRECATED: Use EnvironmentEventRouting for per-environment control
-	// Event routing: specify which events to process via SQS vs HTTP
-	// If not specified, all events configured in Queues are processed via SQS
-	EventRouting map[string]string `yaml:"event_routing"` // event_type -> "sqs" | "http" | "both"
-
-	// Per-environment and per-event-type routing
-	// This allows different routing strategies for cloud vs enterprise
-	EnvironmentEventRouting EnvironmentRouting `yaml:"environment_event_routing"`
-
-	// Number of workers per queue (defaults to 5)
+	// Number of workers per queue (defaults to 5 if not specified in EventQueueConfig)
 	WorkersPerQueue int `yaml:"workers_per_queue"`
-
-	// Per-queue worker allocation (overrides WorkersPerQueue for specific event types)
-	QueueWorkers map[string]int `yaml:"queue_workers"`
 
 	// Maximum number of messages to receive in a single request (1-10)
 	MaxMessages int `yaml:"max_messages"`
@@ -163,31 +148,30 @@ type SQSConfig struct {
 
 	// Dead Letter Queue configuration
 	DLQ DLQConfig `yaml:"dlq"`
+
+	// Adaptive polling configuration
+	AdaptivePolling AdaptivePollingConfig `yaml:"adaptive_polling"`
 }
 
-// QueueConfig provides per-queue configuration options
-type QueueConfig struct {
-	// Queue URL (required)
-	URL string `yaml:"url"`
+// EventQueueConfig provides event-specific queue configuration with regional URLs and environment controls
+type EventQueueConfig struct {
+	// Regional queue URLs
+	EastRegionURL string `yaml:"east_region_url"`
+	WestRegionURL string `yaml:"west_region_url"`
 
-	// Number of workers for this specific queue
-	Workers int `yaml:"workers"`
+	// Event routing strategy: "http", "sqs", or "both"
+	EventRouting string `yaml:"event_routing"`
 
-	// Maximum retries before sending to DLQ
-	MaxRetries int `yaml:"max_retries"`
+	// Environment-specific enablement
+	GHECEnabled bool `yaml:"ghec_enabled"`
+	GHESEnabled bool `yaml:"ghes_enabled"`
 
-	// Message visibility timeout in seconds
-	VisibilityTimeout int `yaml:"visibility_timeout"`
-}
+	// Number of workers for this event type
+	QueueWorkers int `yaml:"queue_workers"`
 
-// EnvironmentRouting provides per-environment routing configuration
-// This allows cloud and enterprise to have different routing strategies
-type EnvironmentRouting struct {
-	// Cloud GitHub (GHEC) event routing
-	Cloud map[string]string `yaml:"cloud"` // event_type -> "http" | "sqs" | "both"
-
-	// Enterprise GitHub (GHES) event routing
-	Enterprise map[string]string `yaml:"enterprise"` // event_type -> "http" | "sqs" | "both"
+	// Optional overrides
+	VisibilityTimeout int `yaml:"visibility_timeout,omitempty"`
+	MaxRetries        int `yaml:"max_retries,omitempty"`
 }
 
 // DLQConfig configures Dead Letter Queue behavior
@@ -202,45 +186,52 @@ type DLQConfig struct {
 	QueueSuffix string `yaml:"queue_suffix"`
 }
 
+// AdaptivePollingConfig configures adaptive SQS polling based on worker availability
+type AdaptivePollingConfig struct {
+	// Enable adaptive polling based on worker availability
+	Enabled bool `yaml:"enabled"`
+
+	// Base backoff duration when workers are saturated
+	BaseBackoff time.Duration `yaml:"base_backoff"`
+
+	// Maximum backoff duration
+	MaxBackoff time.Duration `yaml:"max_backoff"`
+
+	// Enable per-event-type configuration
+	EventTypeOverrides map[string]AdaptivePollingEventConfig `yaml:"event_overrides"`
+}
+
+// AdaptivePollingEventConfig configures adaptive polling for a specific event type
+type AdaptivePollingEventConfig struct {
+	Enabled     bool          `yaml:"enabled"`
+	BaseBackoff time.Duration `yaml:"base_backoff"`
+	MaxBackoff  time.Duration `yaml:"max_backoff"`
+}
+
 // Validate validates the SQS configuration
 func (c *SQSConfig) Validate() error {
 	if !c.Enabled {
 		return nil // SQS disabled, no validation needed
 	}
 
-	// Check that at least one queue configuration exists (legacy or new)
-	if len(c.Queues) == 0 && len(c.EventQueues) == 0 {
+	// Check that at least one queue configuration exists
+	if len(c.Queues) == 0 {
 		return errors.New("SQS enabled but no queues configured")
 	}
 
-	// Validate EventQueues configuration
-	for eventType, queueConfig := range c.EventQueues {
-		if queueConfig.URL == "" {
-			return errors.Errorf("queue URL missing for event type: %s", eventType)
-		}
-		// Workers will be set to defaults if not specified, so no validation needed
-	}
-
-	// Validate routing strategies
+	// Validate EventQueueConfig format
 	validStrategies := map[string]bool{"http": true, "sqs": true, "both": true}
-
-	// Validate environment-specific routing
-	for eventType, strategy := range c.EnvironmentEventRouting.Cloud {
-		if !validStrategies[strategy] {
-			return errors.Errorf("invalid routing strategy for cloud/%s: %s (must be 'http', 'sqs', or 'both')", eventType, strategy)
+	for eventType, queueConfig := range c.Queues {
+		// At least one region URL must be specified
+		if queueConfig.EastRegionURL == "" && queueConfig.WestRegionURL == "" {
+			return errors.Errorf("no region URLs specified for event type: %s", eventType)
 		}
-	}
 
-	for eventType, strategy := range c.EnvironmentEventRouting.Enterprise {
-		if !validStrategies[strategy] {
-			return errors.Errorf("invalid routing strategy for enterprise/%s: %s (must be 'http', 'sqs', or 'both')", eventType, strategy)
-		}
-	}
-
-	// Validate legacy EventRouting for backward compatibility
-	for eventType, strategy := range c.EventRouting {
-		if !validStrategies[strategy] {
-			return errors.Errorf("invalid routing strategy for %s: %s (must be 'http', 'sqs', or 'both')", eventType, strategy)
+		// Validate routing strategy if specified
+		if queueConfig.EventRouting != "" {
+			if !validStrategies[queueConfig.EventRouting] {
+				return errors.Errorf("invalid routing strategy for %s: %s (must be 'http', 'sqs', or 'both')", eventType, queueConfig.EventRouting)
+			}
 		}
 	}
 
@@ -260,74 +251,125 @@ func (c *SQSConfig) Validate() error {
 // GetRoutingStrategy determines the routing strategy for a specific event type and environment
 // Returns "http", "sqs", or "both"
 func (c *SQSConfig) GetRoutingStrategy(environment, eventType string) string {
-	// First, check environment-specific routing (new configuration)
-	if environment == "cloud" {
-		if strategy, exists := c.EnvironmentEventRouting.Cloud[eventType]; exists {
-			return strategy
-		}
-	} else if environment == "enterprise" {
-		if strategy, exists := c.EnvironmentEventRouting.Enterprise[eventType]; exists {
-			return strategy
-		}
+	// Check EventQueueConfig routing
+	if queueConfig, exists := c.Queues[eventType]; exists && queueConfig.EventRouting != "" {
+		return queueConfig.EventRouting
 	}
 
-	// Fall back to legacy EventRouting for backward compatibility
-	if strategy, exists := c.EventRouting[eventType]; exists {
-		return strategy
+	// Default behavior: if queue configured and enabled for environment, use SQS
+	if c.IsEventEnabledForEnvironment(eventType, environment) {
+		return "sqs"
 	}
 
-	// Default behavior based on environment
-	if environment == "enterprise" {
-		// Enterprise defaults to HTTP only (no SQS available yet)
-		return "http"
-	}
-
-	// Cloud defaults to HTTP for safety (explicit configuration required for SQS)
+	// Default to HTTP if not configured
 	return "http"
+}
+
+// GetQueueURLForEnvironment returns the queue URL for a specific event type and environment
+// considering the current AWS region
+func (c *SQSConfig) GetQueueURLForEnvironment(eventType, environment string) string {
+	queueConfig, exists := c.Queues[eventType]
+	if !exists {
+		return ""
+	}
+
+	// Check if this event is enabled for the environment
+	if !c.IsEventEnabledForEnvironment(eventType, environment) {
+		return ""
+	}
+
+	// Detect region and select appropriate URL
+	region := c.DetectRegion()
+	return c.SelectRegionURL(queueConfig, region)
 }
 
 // GetQueueURL returns the queue URL for a specific event type
 // Supports both legacy Queues and new EventQueues configuration
 func (c *SQSConfig) GetQueueURL(eventType string) string {
-	// Try new EventQueues first
-	if queueConfig, exists := c.EventQueues[eventType]; exists {
-		return queueConfig.URL
+	// For backward compatibility, default to cloud environment
+	return c.GetQueueURLForEnvironment(eventType, "cloud")
+}
+
+// DetectRegion determines the current AWS region from configuration or environment
+func (c *SQSConfig) DetectRegion() string {
+	// First check if Region is explicitly set in config
+	if c.Region != "" {
+		return c.Region
 	}
 
-	// Fall back to legacy Queues
-	if queueURL, exists := c.Queues[eventType]; exists {
-		return queueURL
+	// Check AWS_REGION environment variable
+	if region, ok := os.LookupEnv("AWS_REGION"); ok && region != "" {
+		return region
 	}
 
-	return ""
+	// Check AWS_DEFAULT_REGION environment variable
+	if region, ok := os.LookupEnv("AWS_DEFAULT_REGION"); ok && region != "" {
+		return region
+	}
+
+	// Default to us-east-1
+	return "us-east-1"
+}
+
+// SelectRegionURL selects the appropriate queue URL based on the region
+func (c *SQSConfig) SelectRegionURL(queueConfig EventQueueConfig, region string) string {
+	// If region contains "west", use west URL if available
+	if strings.Contains(strings.ToLower(region), "west") {
+		if queueConfig.WestRegionURL != "" {
+			return queueConfig.WestRegionURL
+		}
+		// Fall back to east URL if west not available
+		return queueConfig.EastRegionURL
+	}
+
+	// For east or any other region, prefer east URL
+	if queueConfig.EastRegionURL != "" {
+		return queueConfig.EastRegionURL
+	}
+
+	// Fall back to west URL if east not available
+	return queueConfig.WestRegionURL
+}
+
+// IsEventEnabledForEnvironment checks if an event is enabled for a specific environment
+func (c *SQSConfig) IsEventEnabledForEnvironment(eventType, environment string) bool {
+	queueConfig, exists := c.Queues[eventType]
+	if !exists {
+		// If not in new config, assume enabled for backward compatibility
+		return true
+	}
+
+	switch environment {
+	case "cloud", "ghec":
+		return queueConfig.GHECEnabled
+	case "enterprise", "ghes":
+		return queueConfig.GHESEnabled
+	default:
+		// Unknown environment, check both
+		return queueConfig.GHECEnabled || queueConfig.GHESEnabled
+	}
 }
 
 // GetQueueWorkers returns the number of workers for a specific event type
-// Considers EventQueues.Workers, QueueWorkers, and WorkersPerQueue in priority order
 func (c *SQSConfig) GetQueueWorkers(eventType string) int {
-	// 1. Check EventQueues.Workers (highest priority)
-	if queueConfig, exists := c.EventQueues[eventType]; exists && queueConfig.Workers > 0 {
-		return queueConfig.Workers
+	// Check EventQueueConfig.QueueWorkers
+	if queueConfig, exists := c.Queues[eventType]; exists && queueConfig.QueueWorkers > 0 {
+		return queueConfig.QueueWorkers
 	}
 
-	// 2. Check QueueWorkers map
-	if workers, exists := c.QueueWorkers[eventType]; exists && workers > 0 {
-		return workers
-	}
-
-	// 3. Use WorkersPerQueue default
+	// Use WorkersPerQueue default
 	if c.WorkersPerQueue > 0 {
 		return c.WorkersPerQueue
 	}
 
-	// 4. Final fallback default
+	// Final fallback default
 	return 5
 }
 
 // GetVisibilityTimeout returns the visibility timeout for a specific event type
 func (c *SQSConfig) GetVisibilityTimeout(eventType string) int {
-	// Check EventQueues.VisibilityTimeout
-	if queueConfig, exists := c.EventQueues[eventType]; exists && queueConfig.VisibilityTimeout > 0 {
+	// Check EventQueueConfig.VisibilityTimeout
+	if queueConfig, exists := c.Queues[eventType]; exists && queueConfig.VisibilityTimeout > 0 {
 		return queueConfig.VisibilityTimeout
 	}
 
@@ -342,8 +384,8 @@ func (c *SQSConfig) GetVisibilityTimeout(eventType string) int {
 
 // GetMaxRetries returns the max retries for a specific event type
 func (c *SQSConfig) GetMaxRetries(eventType string) int {
-	// Check EventQueues.MaxRetries
-	if queueConfig, exists := c.EventQueues[eventType]; exists && queueConfig.MaxRetries > 0 {
+	// Check EventQueueConfig.MaxRetries
+	if queueConfig, exists := c.Queues[eventType]; exists && queueConfig.MaxRetries > 0 {
 		return queueConfig.MaxRetries
 	}
 
@@ -354,6 +396,38 @@ func (c *SQSConfig) GetMaxRetries(eventType string) int {
 
 	// Default to 3 retries
 	return 3
+}
+
+// GetEventRouting returns the routing strategy for a specific event type
+func (c *SQSConfig) GetEventRouting(eventType string) string {
+	// Check EventQueueConfig.EventRouting
+	if queueConfig, exists := c.Queues[eventType]; exists && queueConfig.EventRouting != "" {
+		return queueConfig.EventRouting
+	}
+
+	// Default to "sqs" if queue is configured
+	if _, hasQueue := c.Queues[eventType]; hasQueue {
+		return "sqs"
+	}
+
+	return "http"
+}
+
+// GetEnabledQueuesForEnvironment returns all enabled queue configurations for a specific environment
+func (c *SQSConfig) GetEnabledQueuesForEnvironment(environment string) map[string]string {
+	result := make(map[string]string)
+
+	// Process EventQueueConfig format
+	for eventType := range c.Queues {
+		if c.IsEventEnabledForEnvironment(eventType, environment) {
+			url := c.GetQueueURLForEnvironment(eventType, environment)
+			if url != "" {
+				result[eventType] = url
+			}
+		}
+	}
+
+	return result
 }
 
 func ParseConfig(bytes []byte) (*Config, error) {

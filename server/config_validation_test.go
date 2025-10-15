@@ -34,8 +34,11 @@ func TestSQSConfig_Validation(t *testing.T) {
 			config: SQSConfig{
 				Enabled: true,
 				Region:  "us-east-1",
-				Queues: map[string]string{
-					"pull_request": "https://sqs.us-east-1.amazonaws.com/123/pr-queue",
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {
+						EastRegionURL: "https://sqs.us-east-1.amazonaws.com/123/pr-queue",
+						EventRouting:  "sqs",
+					},
 				},
 			},
 			wantErr: false,
@@ -45,13 +48,15 @@ func TestSQSConfig_Validation(t *testing.T) {
 			config: SQSConfig{
 				Enabled: true,
 				Region:  "us-east-1",
-				Queues: map[string]string{
-					"pull_request": "https://sqs.us-east-1.amazonaws.com/123/pr-queue",
-					"status":       "https://sqs.us-east-1.amazonaws.com/123/status-queue",
-				},
-				EventRouting: map[string]string{
-					"pull_request": "sqs",
-					"status":       "both",
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {
+						EastRegionURL: "https://sqs.us-east-1.amazonaws.com/123/pr-queue",
+						EventRouting:  "sqs",
+					},
+					"status": {
+						EastRegionURL: "https://sqs.us-east-1.amazonaws.com/123/status-queue",
+						EventRouting:  "both",
+					},
 				},
 			},
 			wantErr: false,
@@ -62,12 +67,15 @@ func TestSQSConfig_Validation(t *testing.T) {
 				Enabled:         true,
 				Region:          "us-east-1",
 				WorkersPerQueue: 10,
-				QueueWorkers: map[string]int{
-					"pull_request": 15,
-					"status":       20,
-				},
-				Queues: map[string]string{
-					"pull_request": "https://sqs.us-east-1.amazonaws.com/123/pr-queue",
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {
+						EastRegionURL: "https://sqs.us-east-1.amazonaws.com/123/pr-queue",
+						QueueWorkers:  15,
+					},
+					"status": {
+						EastRegionURL: "https://sqs.us-east-1.amazonaws.com/123/status-queue",
+						QueueWorkers:  20,
+					},
 				},
 			},
 			wantErr: false,
@@ -78,8 +86,10 @@ func TestSQSConfig_Validation(t *testing.T) {
 				Enabled:     true,
 				Region:      "us-east-1",
 				EndpointURL: "http://localhost:4566",
-				Queues: map[string]string{
-					"pull_request": "http://localhost:4566/000000000000/test-queue",
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {
+						EastRegionURL: "http://localhost:4566/000000000000/test-queue",
+					},
 				},
 			},
 			wantErr: false,
@@ -91,14 +101,43 @@ func TestSQSConfig_Validation(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "missing_region_urls",
+			config: SQSConfig{
+				Enabled: true,
+				Region:  "us-east-1",
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {
+						EventRouting: "sqs",
+						// Missing both EastRegionURL and WestRegionURL
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid_routing_strategy",
+			config: SQSConfig{
+				Enabled: true,
+				Region:  "us-east-1",
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {
+						EastRegionURL: "https://sqs.us-east-1.amazonaws.com/123/pr-queue",
+						EventRouting:  "invalid",
+					},
+				},
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// For now, just validate structure
-			// When ValidateConfig method is added, use it here
-			if tt.config.Enabled {
-				assert.NotEmpty(t, tt.config.Region, "Region should not be empty when enabled")
+			err := tt.config.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
 			}
 		})
 	}
@@ -193,14 +232,20 @@ sqs:
   enabled: true
   region: "us-east-1"
   queues:
-    pull_request: "https://sqs.us-east-1.amazonaws.com/123/pr"
-    status: "https://sqs.us-east-1.amazonaws.com/123/status"
+    pull_request:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123/pr"
+      event_routing: "sqs"
+    status:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123/status"
+      event_routing: "both"
 `,
 			expectErr: false,
 			validate: func(t *testing.T, config *Config) {
 				assert.True(t, config.SQS.Enabled)
 				assert.Equal(t, "us-east-1", config.SQS.Region)
 				assert.Len(t, config.SQS.Queues, 2)
+				assert.Equal(t, "sqs", config.SQS.Queues["pull_request"].EventRouting)
+				assert.Equal(t, "both", config.SQS.Queues["status"].EventRouting)
 			},
 		},
 		{
@@ -214,14 +259,14 @@ sqs:
   enabled: true
   region: "us-west-2"
   queues:
-    pull_request: "https://sqs.us-west-2.amazonaws.com/123/pr"
-  event_routing:
-    pull_request: "sqs"
+    pull_request:
+      east_region_url: "https://sqs.us-west-2.amazonaws.com/123/pr"
+      event_routing: "sqs"
 `,
 			expectErr: false,
 			validate: func(t *testing.T, config *Config) {
 				assert.True(t, config.SQS.Enabled)
-				assert.Equal(t, "sqs", config.SQS.EventRouting["pull_request"])
+				assert.Equal(t, "sqs", config.SQS.Queues["pull_request"].EventRouting)
 			},
 		},
 		{
@@ -235,17 +280,19 @@ sqs:
   enabled: true
   region: "us-east-1"
   workers_per_queue: 10
-  queue_workers:
-    pull_request: 15
-    status: 20
   queues:
-    pull_request: "https://sqs.us-east-1.amazonaws.com/123/pr"
+    pull_request:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123/pr"
+      queue_workers: 15
+    status:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123/status"
+      queue_workers: 20
 `,
 			expectErr: false,
 			validate: func(t *testing.T, config *Config) {
 				assert.Equal(t, 10, config.SQS.WorkersPerQueue)
-				assert.Equal(t, 15, config.SQS.QueueWorkers["pull_request"])
-				assert.Equal(t, 20, config.SQS.QueueWorkers["status"])
+				assert.Equal(t, 15, config.SQS.Queues["pull_request"].QueueWorkers)
+				assert.Equal(t, 20, config.SQS.Queues["status"].QueueWorkers)
 			},
 		},
 		{
@@ -260,7 +307,8 @@ sqs:
   region: "us-east-1"
   endpoint_url: "http://localhost:4566"
   queues:
-    pull_request: "http://localhost:4566/000000000000/test-pr"
+    pull_request:
+      east_region_url: "http://localhost:4566/000000000000/test-pr"
 `,
 			expectErr: false,
 			validate: func(t *testing.T, config *Config) {
@@ -306,8 +354,10 @@ func TestSQSConfig_Defaults(t *testing.T) {
 	config := SQSConfig{
 		Enabled: true,
 		Region:  "us-east-1",
-		Queues: map[string]string{
-			"pull_request": "https://sqs.us-east-1.amazonaws.com/123/pr",
+		Queues: map[string]EventQueueConfig{
+			"pull_request": {
+				EastRegionURL: "https://sqs.us-east-1.amazonaws.com/123/pr",
+			},
 		},
 	}
 
@@ -337,8 +387,8 @@ func TestSQSConfig_Defaults(t *testing.T) {
 	})
 }
 
-// TestSQSConfig_Phase2_EnhancedConfiguration tests Phase 2 enhanced configuration
-func TestSQSConfig_Phase2_EnhancedConfiguration(t *testing.T) {
+// TestSQSConfig_EnhancedConfiguration tests enhanced configuration features
+func TestSQSConfig_EnhancedConfiguration(t *testing.T) {
 	tests := []struct {
 		name      string
 		yaml      string
@@ -346,37 +396,7 @@ func TestSQSConfig_Phase2_EnhancedConfiguration(t *testing.T) {
 		validate  func(t *testing.T, config *Config)
 	}{
 		{
-			name: "event_queues_with_per_queue_config",
-			yaml: `
-server:
-  address: "0.0.0.0"
-  port: 8080
-
-sqs:
-  enabled: true
-  region: "us-east-1"
-  event_queues:
-    pull_request:
-      url: "https://sqs.us-east-1.amazonaws.com/123/pr"
-      workers: 10
-      max_retries: 3
-      visibility_timeout: 60
-    status:
-      url: "https://sqs.us-east-1.amazonaws.com/123/status"
-      workers: 15
-      max_retries: 2
-      visibility_timeout: 30
-`,
-			expectErr: false,
-			validate: func(t *testing.T, config *Config) {
-				assert.True(t, config.SQS.Enabled)
-				assert.Len(t, config.SQS.EventQueues, 2)
-				assert.Equal(t, 10, config.SQS.EventQueues["pull_request"].Workers)
-				assert.Equal(t, 15, config.SQS.EventQueues["status"].Workers)
-			},
-		},
-		{
-			name: "environment_event_routing",
+			name: "per_queue_config_with_overrides",
 			yaml: `
 server:
   address: "0.0.0.0"
@@ -386,20 +406,54 @@ sqs:
   enabled: true
   region: "us-east-1"
   queues:
-    pull_request: "https://sqs.us-east-1.amazonaws.com/123/pr"
-  environment_event_routing:
-    cloud:
-      pull_request: "sqs"
-      status: "both"
-    enterprise:
-      pull_request: "http"
-      status: "http"
+    pull_request:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123/pr"
+      queue_workers: 10
+      max_retries: 3
+      visibility_timeout: 60
+    status:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123/status"
+      queue_workers: 15
+      max_retries: 2
+      visibility_timeout: 30
 `,
 			expectErr: false,
 			validate: func(t *testing.T, config *Config) {
-				assert.Equal(t, "sqs", config.SQS.EnvironmentEventRouting.Cloud["pull_request"])
-				assert.Equal(t, "both", config.SQS.EnvironmentEventRouting.Cloud["status"])
-				assert.Equal(t, "http", config.SQS.EnvironmentEventRouting.Enterprise["pull_request"])
+				assert.True(t, config.SQS.Enabled)
+				assert.Len(t, config.SQS.Queues, 2)
+				assert.Equal(t, 10, config.SQS.Queues["pull_request"].QueueWorkers)
+				assert.Equal(t, 15, config.SQS.Queues["status"].QueueWorkers)
+				assert.Equal(t, 60, config.SQS.Queues["pull_request"].VisibilityTimeout)
+			},
+		},
+		{
+			name: "environment_specific_config",
+			yaml: `
+server:
+  address: "0.0.0.0"
+  port: 8080
+
+sqs:
+  enabled: true
+  region: "us-east-1"
+  queues:
+    pull_request:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123/pr"
+      event_routing: "sqs"
+      ghec_enabled: true
+      ghes_enabled: false
+    status:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123/status"
+      event_routing: "both"
+      ghec_enabled: true
+      ghes_enabled: true
+`,
+			expectErr: false,
+			validate: func(t *testing.T, config *Config) {
+				assert.True(t, config.SQS.Queues["pull_request"].GHECEnabled)
+				assert.False(t, config.SQS.Queues["pull_request"].GHESEnabled)
+				assert.True(t, config.SQS.Queues["status"].GHECEnabled)
+				assert.True(t, config.SQS.Queues["status"].GHESEnabled)
 			},
 		},
 		{
@@ -413,7 +467,8 @@ sqs:
   enabled: true
   region: "us-east-1"
   queues:
-    pull_request: "https://sqs.us-east-1.amazonaws.com/123/pr"
+    pull_request:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123/pr"
   dlq:
     enabled: true
     max_receive_count: 3
@@ -427,7 +482,7 @@ sqs:
 			},
 		},
 		{
-			name: "backward_compatible_with_legacy_config",
+			name: "multi_region_configuration",
 			yaml: `
 server:
   address: "0.0.0.0"
@@ -437,15 +492,19 @@ sqs:
   enabled: true
   region: "us-east-1"
   queues:
-    pull_request: "https://sqs.us-east-1.amazonaws.com/123/pr"
-  event_routing:
-    pull_request: "sqs"
+    pull_request:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123/pr"
+      west_region_url: "https://sqs.us-west-2.amazonaws.com/456/pr"
+      event_routing: "sqs"
   workers_per_queue: 5
 `,
 			expectErr: false,
 			validate: func(t *testing.T, config *Config) {
 				assert.True(t, config.SQS.Enabled)
-				assert.Equal(t, "sqs", config.SQS.EventRouting["pull_request"])
+				assert.Equal(t, "https://sqs.us-east-1.amazonaws.com/123/pr",
+					config.SQS.Queues["pull_request"].EastRegionURL)
+				assert.Equal(t, "https://sqs.us-west-2.amazonaws.com/456/pr",
+					config.SQS.Queues["pull_request"].WestRegionURL)
 				assert.Equal(t, 5, config.SQS.WorkersPerQueue)
 			},
 		},
@@ -478,11 +537,13 @@ func TestSQSConfig_GetRoutingStrategy(t *testing.T) {
 		expected    string
 	}{
 		{
-			name: "cloud_sqs_routing",
+			name: "explicit_sqs_routing",
 			config: SQSConfig{
-				EnvironmentEventRouting: EnvironmentRouting{
-					Cloud: map[string]string{
-						"pull_request": "sqs",
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {
+						EastRegionURL: "url",
+						EventRouting:  "sqs",
+						GHECEnabled:   true,
 					},
 				},
 			},
@@ -491,11 +552,13 @@ func TestSQSConfig_GetRoutingStrategy(t *testing.T) {
 			expected:    "sqs",
 		},
 		{
-			name: "cloud_both_routing",
+			name: "explicit_both_routing",
 			config: SQSConfig{
-				EnvironmentEventRouting: EnvironmentRouting{
-					Cloud: map[string]string{
-						"status": "both",
+				Queues: map[string]EventQueueConfig{
+					"status": {
+						EastRegionURL: "url",
+						EventRouting:  "both",
+						GHECEnabled:   true,
 					},
 				},
 			},
@@ -504,11 +567,13 @@ func TestSQSConfig_GetRoutingStrategy(t *testing.T) {
 			expected:    "both",
 		},
 		{
-			name: "enterprise_http_routing",
+			name: "explicit_http_routing",
 			config: SQSConfig{
-				EnvironmentEventRouting: EnvironmentRouting{
-					Enterprise: map[string]string{
-						"pull_request": "http",
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {
+						EastRegionURL: "url",
+						EventRouting:  "http",
+						GHESEnabled:   true,
 					},
 				},
 			},
@@ -517,10 +582,13 @@ func TestSQSConfig_GetRoutingStrategy(t *testing.T) {
 			expected:    "http",
 		},
 		{
-			name: "fallback_to_legacy_routing",
+			name: "default_sqs_when_enabled_for_env",
 			config: SQSConfig{
-				EventRouting: map[string]string{
-					"pull_request": "sqs",
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {
+						EastRegionURL: "url",
+						GHECEnabled:   true,
+					},
 				},
 			},
 			environment: "cloud",
@@ -528,18 +596,25 @@ func TestSQSConfig_GetRoutingStrategy(t *testing.T) {
 			expected:    "sqs",
 		},
 		{
-			name:        "default_enterprise_to_http",
-			config:      SQSConfig{},
-			environment: "enterprise",
+			name: "default_http_when_not_enabled",
+			config: SQSConfig{
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {
+						EastRegionURL: "url",
+						GHECEnabled:   false,
+					},
+				},
+			},
+			environment: "cloud",
 			eventType:   "pull_request",
 			expected:    "http",
 		},
 		{
-			name:        "default_cloud_to_http",
-			config:      SQSConfig{},
+			name:        "default_sqs_when_not_configured",
+			config:      SQSConfig{}, // For backward compatibility, assumes enabled
 			environment: "cloud",
 			eventType:   "pull_request",
-			expected:    "http",
+			expected:    "sqs", // Returns "sqs" for backward compatibility
 		},
 	}
 
@@ -560,28 +635,29 @@ func TestSQSConfig_GetQueueWorkers(t *testing.T) {
 		expected  int
 	}{
 		{
-			name: "event_queues_workers_priority",
+			name: "queue_workers_highest_priority",
 			config: SQSConfig{
-				EventQueues: map[string]QueueConfig{
-					"pull_request": {Workers: 10},
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {QueueWorkers: 10},
 				},
-				QueueWorkers:    map[string]int{"pull_request": 8},
 				WorkersPerQueue: 5,
 			},
 			eventType: "pull_request",
-			expected:  10, // EventQueues.Workers has highest priority
+			expected:  10, // EventQueueConfig.QueueWorkers has highest priority
 		},
 		{
-			name: "queue_workers_second_priority",
+			name: "workers_per_queue_second_priority",
 			config: SQSConfig{
-				QueueWorkers:    map[string]int{"status": 15},
-				WorkersPerQueue: 5,
+				Queues: map[string]EventQueueConfig{
+					"status": {QueueWorkers: 0}, // Not set
+				},
+				WorkersPerQueue: 15,
 			},
 			eventType: "status",
 			expected:  15,
 		},
 		{
-			name: "workers_per_queue_third_priority",
+			name: "workers_per_queue_fallback",
 			config: SQSConfig{
 				WorkersPerQueue: 7,
 			},
@@ -604,8 +680,8 @@ func TestSQSConfig_GetQueueWorkers(t *testing.T) {
 	}
 }
 
-// TestSQSConfig_Validate_Phase2 tests Phase 2 validation
-func TestSQSConfig_Validate_Phase2(t *testing.T) {
+// TestSQSConfig_Validate_Enhanced tests enhanced validation
+func TestSQSConfig_Validate_Enhanced(t *testing.T) {
 	tests := []struct {
 		name      string
 		config    SQSConfig
@@ -613,46 +689,39 @@ func TestSQSConfig_Validate_Phase2(t *testing.T) {
 		errSubstr string
 	}{
 		{
-			name: "valid_environment_routing",
+			name: "valid_event_routing",
 			config: SQSConfig{
 				Enabled: true,
-				Queues:  map[string]string{"pull_request": "url"},
-				EnvironmentEventRouting: EnvironmentRouting{
-					Cloud:      map[string]string{"pull_request": "sqs"},
-					Enterprise: map[string]string{"pull_request": "http"},
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {
+						EastRegionURL: "url",
+						EventRouting:  "sqs",
+					},
 				},
 			},
 			wantErr: false,
 		},
 		{
-			name: "invalid_cloud_routing_strategy",
+			name: "invalid_routing_strategy",
 			config: SQSConfig{
 				Enabled: true,
-				Queues:  map[string]string{"pull_request": "url"},
-				EnvironmentEventRouting: EnvironmentRouting{
-					Cloud: map[string]string{"pull_request": "invalid"},
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {
+						EastRegionURL: "url",
+						EventRouting:  "invalid",
+					},
 				},
 			},
 			wantErr:   true,
-			errSubstr: "invalid routing strategy for cloud/pull_request",
-		},
-		{
-			name: "invalid_enterprise_routing_strategy",
-			config: SQSConfig{
-				Enabled: true,
-				Queues:  map[string]string{"pull_request": "url"},
-				EnvironmentEventRouting: EnvironmentRouting{
-					Enterprise: map[string]string{"status": "bad_value"},
-				},
-			},
-			wantErr:   true,
-			errSubstr: "invalid routing strategy for enterprise/status",
+			errSubstr: "invalid routing strategy",
 		},
 		{
 			name: "valid_dlq_config",
 			config: SQSConfig{
 				Enabled: true,
-				Queues:  map[string]string{"pull_request": "url"},
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {EastRegionURL: "url"},
+				},
 				DLQ: DLQConfig{
 					Enabled:         true,
 					MaxReceiveCount: 3,
@@ -665,7 +734,9 @@ func TestSQSConfig_Validate_Phase2(t *testing.T) {
 			name: "invalid_dlq_max_receive_count",
 			config: SQSConfig{
 				Enabled: true,
-				Queues:  map[string]string{"pull_request": "url"},
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {EastRegionURL: "url"},
+				},
 				DLQ: DLQConfig{
 					Enabled:         true,
 					MaxReceiveCount: 0,
@@ -675,15 +746,30 @@ func TestSQSConfig_Validate_Phase2(t *testing.T) {
 			errSubstr: "DLQ max_receive_count must be at least 1",
 		},
 		{
-			name: "event_queues_missing_url",
+			name: "missing_region_urls",
 			config: SQSConfig{
 				Enabled: true,
-				EventQueues: map[string]QueueConfig{
-					"pull_request": {Workers: 5},
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {
+						EventRouting: "sqs",
+						// Both EastRegionURL and WestRegionURL missing
+					},
 				},
 			},
 			wantErr:   true,
-			errSubstr: "queue URL missing for event type: pull_request",
+			errSubstr: "no region URLs specified for event type",
+		},
+		{
+			name: "at_least_one_region_url",
+			config: SQSConfig{
+				Enabled: true,
+				Queues: map[string]EventQueueConfig{
+					"pull_request": {
+						WestRegionURL: "url", // Only west, that's fine
+					},
+				},
+			},
+			wantErr: false,
 		},
 	}
 
