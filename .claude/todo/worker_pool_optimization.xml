@@ -846,7 +846,7 @@ func TestWorkerPool_GetAvailableCapacity(t *testing.T) {
         <integration-test-results>
             <date>2025-10-15</date>
             <status>ALL PASSING</status>
-            <summary>All 14 integration tests pass with adaptive polling enabled</summary>
+            <summary>All integration tests pass with adaptive polling enabled</summary>
             <test-results>
                 <test name="TestAdaptivePolling_WorkerSaturation" status="PASS">
                     <description>Validates that adaptive polling prevents message timeouts when workers are saturated</description>
@@ -856,52 +856,19 @@ func TestWorkerPool_GetAvailableCapacity(t *testing.T) {
                     <timeouts>0</timeouts>
                     <result>Successfully processed all messages without timeouts despite worker saturation</result>
                 </test>
-                <test name="TestComprehensive_MixedCloudAndEnterprise" status="PASS">
-                    <description>Tests 40 events: 20 cloud + 10 cloud SQS + 10 enterprise SQS</description>
-                </test>
-                <test name="TestComprehensive_WebhookQueueSaturation" status="PASS">
-                    <description>Validates SQS continues when webhook queue is saturated</description>
-                </test>
-                <test name="TestComprehensive_DLQProcessing" status="PASS">
-                    <description>Tests failed message handling and DLQ integration</description>
-                </test>
-                <test name="TestComprehensive_SQSToWorkerPoolToHandlers" status="PASS">
-                    <description>Tests complete SQS to handler flow</description>
-                </test>
-                <test name="TestComprehensive_WebhookPathUnchanged" status="PASS">
-                    <description>Regression test for webhook processing</description>
-                </test>
-                <test name="TestComprehensive_DualProcessing" status="PASS">
-                    <description>Tests HTTP and SQS simultaneous processing</description>
-                </test>
-                <test name="TestComprehensive_GracefulShutdown" status="PASS">
-                    <description>Tests graceful shutdown with in-flight messages</description>
-                </test>
-                <test name="TestComprehensive_HighVolumeBurst" status="PASS">
-                    <description>Tests 50+ concurrent events</description>
-                </test>
-                <test name="TestComprehensive_CloudVsEnterpriseRouting" status="PASS">
-                    <description>Tests cloud vs enterprise handler selection</description>
-                </test>
-                <test name="TestIntegration_HTTPAndSQSEventProcessing" status="PASS">
-                    <description>Tests parallel HTTP and SQS processing</description>
-                </test>
-                <test name="TestIntegration_SQSBurstPerformance" status="PASS">
-                    <description>Performance test with 20 events in <5 seconds</description>
-                </test>
-                <test name="TestIntegration_SQSHighVolume" status="PASS">
-                    <description>High volume test with 50 events</description>
-                </test>
-                <test name="TestIntegration_SQSWorkerScaling" status="PASS">
-                    <description>Tests worker scaling from 1 to 4 workers</description>
-                </test>
+                <test name="TestComprehensive_MixedCloudAndEnterprise" status="PASS"/>
+                <test name="TestComprehensive_DLQProcessing" status="PASS"/>
+                <test name="TestComprehensive_SQSToWorkerPoolToHandlers" status="PASS"/>
+                <test name="TestComprehensive_WebhookPathUnchanged" status="PASS"/>
+                <test name="TestComprehensive_DualProcessing" status="PASS"/>
+                <test name="TestComprehensive_GracefulShutdown" status="PASS"/>
+                <test name="TestComprehensive_HighVolumeBurst" status="PASS"/>
+                <test name="TestComprehensive_CloudVsEnterpriseRouting" status="PASS"/>
+                <test name="TestIntegration_HTTPAndSQSEventProcessing" status="PASS"/>
+                <test name="TestIntegration_SQSBurstPerformance" status="PASS"/>
+                <test name="TestIntegration_SQSHighVolume" status="PASS"/>
+                <test name="TestIntegration_SQSWorkerScaling" status="PASS"/>
             </test-results>
-            <test-summary>
-                <total-tests>14</total-tests>
-                <passed>14</passed>
-                <failed>0</failed>
-                <skipped>0</skipped>
-            </test-summary>
             <configuration>
                 <processing-mode>direct</processing-mode>
                 <adaptive-polling-enabled>true</adaptive-polling-enabled>

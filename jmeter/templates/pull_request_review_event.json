@@ -1,0 +1,28 @@
+{
+  "action": "submitted",
+  "review": {
+    "id": "{{uuid}}",
+    "state": "approved",
+    "body": "Load test approval",
+    "submitted_at": "2024-10-14T12:00:00Z"
+  },
+  "pull_request": {
+    "number": {{random_number}},
+    "head": {
+      "ref": "feature/load-test-{{random_number}}",
+      "sha": "{{random_sha_head}}"
+    },
+    "base": {
+      "ref": "main",
+      "sha": "{{random_sha_base}}"
+    }
+  },
+  "repository": {
+    "id": 123456,
+    "name": "policy-bot",
+    "full_name": "qa/policy-bot"
+  },
+  "sender": {
+    "login": "loadtest-bot"
+  }
+}

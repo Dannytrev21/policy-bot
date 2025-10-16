@@ -1,0 +1,23 @@
+{
+  "state": "pending",
+  "description": "Load test status update",
+  "context": "policy-bot/load-test",
+  "sha": "{{random_sha_head}}",
+  "target_url": "https://qa.policybot.example.com/build/{{random_number}}",
+  "branches": [
+    {
+      "name": "feature/load-test-{{random_number}}",
+      "commit": {
+        "sha": "{{random_sha_base}}"
+      }
+    }
+  ],
+  "repository": {
+    "id": 123456,
+    "name": "policy-bot",
+    "full_name": "qa/policy-bot"
+  },
+  "sender": {
+    "login": "loadtest-bot"
+  }
+}

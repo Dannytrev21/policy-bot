@@ -1,0 +1,462 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.2">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="Policy Bot Webhook Load Tests" enabled="true">
+      <stringProp name="TestPlan.comments">Load test scenarios for Policy Bot webhook scheduling pipeline.</stringProp>
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">false</boolProp>
+      <elementProp name="TestPlan.user_defined_properties" elementType="Arguments">
+        <collectionProp name="Arguments.arguments"/>
+      </elementProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments">
+        <collectionProp name="Arguments.arguments"/>
+      </elementProp>
+      <stringProp name="TestPlan.user_define_classpath"/>
+    </TestPlan>
+    <hashTree>
+      <Arguments guiclass="ArgumentsPanel" testclass="Arguments" testname="Default Variables" enabled="true">
+        <collectionProp name="Arguments.arguments">
+          <elementProp name="target_protocol" elementType="Argument">
+            <stringProp name="Argument.name">target_protocol</stringProp>
+            <stringProp name="Argument.value">${__P(target.protocol,https)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="target_host" elementType="Argument">
+            <stringProp name="Argument.name">target_host</stringProp>
+            <stringProp name="Argument.value">${__P(target.host,localhost)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="target_port" elementType="Argument">
+            <stringProp name="Argument.name">target_port</stringProp>
+            <stringProp name="Argument.value">${__P(target.port,8080)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="target_path" elementType="Argument">
+            <stringProp name="Argument.name">target_path</stringProp>
+            <stringProp name="Argument.value">${__P(target.path,/api/github/hook)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="webhook_secret" elementType="Argument">
+            <stringProp name="Argument.name">webhook_secret</stringProp>
+            <stringProp name="Argument.value">${__P(webhook.secret,test-webhook-secret-123)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="github_enterprise_host" elementType="Argument">
+            <stringProp name="Argument.name">github_enterprise_host</stringProp>
+            <stringProp name="Argument.value">${__P(github.enterprise.host,)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="hook_id" elementType="Argument">
+            <stringProp name="Argument.name">hook_id</stringProp>
+            <stringProp name="Argument.value">${__P(github.hook.id,123456)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="installation_target_id" elementType="Argument">
+            <stringProp name="Argument.name">installation_target_id</stringProp>
+            <stringProp name="Argument.value">${__P(github.installation.id,987654)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="installation_target_type" elementType="Argument">
+            <stringProp name="Argument.name">installation_target_type</stringProp>
+            <stringProp name="Argument.value">${__P(github.installation.type,integration)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="user_agent" elementType="Argument">
+            <stringProp name="Argument.name">user_agent</stringProp>
+            <stringProp name="Argument.value">${__P(github.user.agent,PolicyBot-LoadTest/1.0)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="x_github_headers" elementType="Argument">
+            <stringProp name="Argument.name">x_github_headers</stringProp>
+            <stringProp name="Argument.value">${__P(github.headers,X-GitHub-Event,X-GitHub-Delivery)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="payload_csv" elementType="Argument">
+            <stringProp name="Argument.name">payload_csv</stringProp>
+            <stringProp name="Argument.value">${__P(payload.csv,jmeter/data/webhook_events.csv)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="think_time_ms" elementType="Argument">
+            <stringProp name="Argument.name">think_time_ms</stringProp>
+            <stringProp name="Argument.value">${__P(think.time.ms,100)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="baseline_threads" elementType="Argument">
+            <stringProp name="Argument.name">baseline_threads</stringProp>
+            <stringProp name="Argument.value">${__P(baseline.threads,10)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="baseline_loops" elementType="Argument">
+            <stringProp name="Argument.name">baseline_loops</stringProp>
+            <stringProp name="Argument.value">${__P(baseline.loops,10)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="baseline_ramp" elementType="Argument">
+            <stringProp name="Argument.name">baseline_ramp</stringProp>
+            <stringProp name="Argument.value">${__P(baseline.ramp.seconds,30)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="burst_threads" elementType="Argument">
+            <stringProp name="Argument.name">burst_threads</stringProp>
+            <stringProp name="Argument.value">${__P(burst.threads,40)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="burst_loops" elementType="Argument">
+            <stringProp name="Argument.name">burst_loops</stringProp>
+            <stringProp name="Argument.value">${__P(burst.loops,15)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="burst_ramp" elementType="Argument">
+            <stringProp name="Argument.name">burst_ramp</stringProp>
+            <stringProp name="Argument.value">${__P(burst.ramp.seconds,10)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="sustained_threads" elementType="Argument">
+            <stringProp name="Argument.name">sustained_threads</stringProp>
+            <stringProp name="Argument.value">${__P(sustained.threads,75)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="sustained_loops" elementType="Argument">
+            <stringProp name="Argument.name">sustained_loops</stringProp>
+            <stringProp name="Argument.value">${__P(sustained.loops,25)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="sustained_ramp" elementType="Argument">
+            <stringProp name="Argument.name">sustained_ramp</stringProp>
+            <stringProp name="Argument.value">${__P(sustained.ramp.seconds,20)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="overflow_threads" elementType="Argument">
+            <stringProp name="Argument.name">overflow_threads</stringProp>
+            <stringProp name="Argument.value">${__P(overflow.threads,120)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="overflow_loops" elementType="Argument">
+            <stringProp name="Argument.name">overflow_loops</stringProp>
+            <stringProp name="Argument.value">${__P(overflow.loops,40)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="overflow_ramp" elementType="Argument">
+            <stringProp name="Argument.name">overflow_ramp</stringProp>
+            <stringProp name="Argument.value">${__P(overflow.ramp.seconds,15)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="results_file" elementType="Argument">
+            <stringProp name="Argument.name">results_file</stringProp>
+            <stringProp name="Argument.value">${__P(results.file,jmeter/results/webhook-results.jtl)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+        </collectionProp>
+      </Arguments>
+      <hashTree/>
+      <CSVDataSet guiclass="TestBeanGUI" testclass="CSVDataSet" testname="Webhook Payloads" enabled="true">
+        <stringProp name="delimiter">,</stringProp>
+        <stringProp name="fileEncoding">UTF-8</stringProp>
+        <stringProp name="filename">${payload_csv}</stringProp>
+        <boolProp name="ignoreFirstLine">true</boolProp>
+        <boolProp name="quotedData">false</boolProp>
+        <boolProp name="recycle">true</boolProp>
+        <stringProp name="shareMode">shareMode.all</stringProp>
+        <boolProp name="stopThread">false</boolProp>
+        <stringProp name="variableNames">eventType,payloadFile</stringProp>
+      </CSVDataSet>
+      <hashTree/>
+      <ConfigTestElement guiclass="HttpDefaultsGui" testclass="ConfigTestElement" testname="HTTP Request Defaults" enabled="true">
+        <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+          <collectionProp name="Arguments.arguments"/>
+        </elementProp>
+        <stringProp name="HTTPSampler.domain">${target_host}</stringProp>
+        <stringProp name="HTTPSampler.port">${target_port}</stringProp>
+        <stringProp name="HTTPSampler.protocol">${target_protocol}</stringProp>
+        <stringProp name="HTTPSampler.path">${target_path}</stringProp>
+        <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
+        <stringProp name="HTTPSampler.concurrentPool">6</stringProp>
+        <stringProp name="HTTPSampler.connect_timeout">${__P(connection.timeout.ms,5000)}</stringProp>
+        <stringProp name="HTTPSampler.response_timeout">${__P(response.timeout.ms,10000)}</stringProp>
+      </ConfigTestElement>
+      <hashTree/>
+      <TestFragmentController guiclass="TestFragmentControllerGui" testclass="TestFragmentController" testname="Webhook Request Fragment" enabled="true"/>
+      <hashTree>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="Webhook Request" enabled="true">
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.name"/>
+                <stringProp name="Argument.value">${request_body}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+                <boolProp name="HTTPArgument.use_equals">true</boolProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+          <stringProp name="HTTPSampler.domain">${target_host}</stringProp>
+          <stringProp name="HTTPSampler.port">${target_port}</stringProp>
+          <stringProp name="HTTPSampler.protocol">${target_protocol}</stringProp>
+          <stringProp name="HTTPSampler.path">${target_path}</stringProp>
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+          <stringProp name="HTTPSampler.embedded_url_re"></stringProp>
+          <stringProp name="HTTPSampler.connect_timeout">${__P(connection.timeout.ms,5000)}</stringProp>
+          <stringProp name="HTTPSampler.response_timeout">${__P(response.timeout.ms,10000)}</stringProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <stringProp name="HTTPSampler.implementation">HttpClient4</stringProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="GitHub Headers" enabled="true">
+            <collectionProp name="HeaderManager.headers">
+              <elementProp name="Content-Type" elementType="Header">
+                <stringProp name="Header.name">Content-Type</stringProp>
+                <stringProp name="Header.value">application/json</stringProp>
+              </elementProp>
+              <elementProp name="User-Agent" elementType="Header">
+                <stringProp name="Header.name">User-Agent</stringProp>
+                <stringProp name="Header.value">${user_agent}</stringProp>
+              </elementProp>
+              <elementProp name="X-GitHub-Event" elementType="Header">
+                <stringProp name="Header.name">X-GitHub-Event</stringProp>
+                <stringProp name="Header.value">${eventType}</stringProp>
+              </elementProp>
+              <elementProp name="X-GitHub-Delivery" elementType="Header">
+                <stringProp name="Header.name">X-GitHub-Delivery</stringProp>
+                <stringProp name="Header.value">load-${__UUID()}</stringProp>
+              </elementProp>
+              <elementProp name="X-GitHub-Hook-ID" elementType="Header">
+                <stringProp name="Header.name">X-GitHub-Hook-ID</stringProp>
+                <stringProp name="Header.value">${hook_id}</stringProp>
+              </elementProp>
+              <elementProp name="X-GitHub-Enterprise-Host" elementType="Header">
+                <stringProp name="Header.name">X-GitHub-Enterprise-Host</stringProp>
+                <stringProp name="Header.value">${github_enterprise_host}</stringProp>
+              </elementProp>
+              <elementProp name="X-GitHub-Hook-Installation-Target-ID" elementType="Header">
+                <stringProp name="Header.name">X-GitHub-Hook-Installation-Target-ID</stringProp>
+                <stringProp name="Header.value">${installation_target_id}</stringProp>
+              </elementProp>
+              <elementProp name="X-GitHub-Hook-Installation-Target-Type" elementType="Header">
+                <stringProp name="Header.name">X-GitHub-Hook-Installation-Target-Type</stringProp>
+                <stringProp name="Header.value">${installation_target_type}</stringProp>
+              </elementProp>
+              <elementProp name="X-GitHub-Headers" elementType="Header">
+                <stringProp name="Header.name">X-GitHub-Headers</stringProp>
+                <stringProp name="Header.value">${x_github_headers}</stringProp>
+              </elementProp>
+              <elementProp name="X-Hub-Signature-256" elementType="Header">
+                <stringProp name="Header.name">X-Hub-Signature-256</stringProp>
+                <stringProp name="Header.value">${computed_signature}</stringProp>
+              </elementProp>
+            </collectionProp>
+          </HeaderManager>
+          <hashTree/>
+          <JSR223PreProcessor guiclass="TestBeanGUI" testclass="JSR223PreProcessor" testname="Load Payload &amp; Signature" enabled="true">
+            <stringProp name="cacheKey"/>
+            <stringProp name="filename"/>
+            <stringProp name="parameters"/>
+            <stringProp name="script">import org.apache.commons.io.FileUtils
+import org.apache.jmeter.services.FileServer
+import java.nio.charset.StandardCharsets
+import java.security.SecureRandom
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
+
+def payloadPath = vars.get("payloadFile")
+if (payloadPath == null || payloadPath.isEmpty()) {
+    throw new IllegalStateException("No payload file provided from CSV")
+}
+
+File payload = new File(payloadPath)
+if (!payload.isAbsolute()) {
+    payload = new File(FileServer.getFileServer().getBaseDir(), payloadPath)
+}
+
+def body = FileUtils.readFileToString(payload, StandardCharsets.UTF_8)
+def random = new SecureRandom()
+def randomNumber = 100000 + random.nextInt(900000)
+def threadNum = ctx.getThreadNum()
+
+def randomHex = { int length -&gt;
+    byte[] bytes = new byte[(length + 1) / 2]
+    random.nextBytes(bytes)
+    def sb = new StringBuilder()
+    bytes.each { b -&gt; sb.append(String.format("%02x", b)) }
+    sb.toString().substring(0, length)
+}
+
+def replacements = [
+        "{{random_number}}": String.valueOf(randomNumber),
+        "{{thread_num}}": String.valueOf(threadNum),
+        "{{uuid}}": java.util.UUID.randomUUID().toString(),
+        "{{random_sha_head}}": randomHex(40),
+        "{{random_sha_base}}": randomHex(40)
+]
+replacements.each { token, value -&gt;
+    body = body.replace(token, value)
+}
+
+vars.put("request_body", body)
+
+def secret = vars.get("webhook_secret")
+if (secret != null &amp;&amp; !secret.isEmpty()) {
+    Mac mac = Mac.getInstance("HmacSHA256")
+    mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"))
+    byte[] digest = mac.doFinal(body.getBytes(StandardCharsets.UTF_8))
+    def hex = digest.collect { String.format("%02x", it) }.join()
+    vars.put("computed_signature", "sha256=" + hex)
+} else {
+    vars.put("computed_signature", "")
+}
+</stringProp>
+            <stringProp name="scriptLanguage">groovy</stringProp>
+          </JSR223PreProcessor>
+          <hashTree/>
+          <JSR223Assertion guiclass="TestBeanGUI" testclass="JSR223Assertion" testname="Allowed Status Codes" enabled="true">
+            <stringProp name="parameters"/>
+            <stringProp name="filename"/>
+            <stringProp name="script">def allowed = ['200', '202', '429', '503']
+def code = prev.getResponseCode()
+if (!allowed.contains(code)) {
+    AssertionResult.setFailure(true)
+    AssertionResult.setFailureMessage("Unexpected status code: ${code}")
+}</stringProp>
+            <stringProp name="scriptLanguage">groovy</stringProp>
+          </JSR223Assertion>
+          <hashTree/>
+          <DurationAssertion guiclass="DurationAssertionGui" testclass="DurationAssertion" testname="Latency Budget" enabled="true">
+            <stringProp name="DurationAssertion.duration">${__P(duration.threshold.ms,1000)}</stringProp>
+          </DurationAssertion>
+          <hashTree/>
+        </hashTree>
+      </hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Baseline Load" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">${baseline_loops}</stringProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">${baseline_threads}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${baseline_ramp}</stringProp>
+        <longProp name="ThreadGroup.delay">0</longProp>
+        <longProp name="ThreadGroup.duration">0</longProp>
+        <boolProp name="ThreadGroup.scheduler">false</boolProp>
+        <stringProp name="ThreadGroup.same_user_on_next_iteration">true</stringProp>
+      </ThreadGroup>
+      <hashTree>
+        <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="Think Time" enabled="true">
+          <stringProp name="ConstantTimer.delay">${think_time_ms}</stringProp>
+        </ConstantTimer>
+        <hashTree/>
+        <ModuleController guiclass="ModuleControllerGui" testclass="ModuleController" testname="Execute Webhook Request" enabled="true">
+          <stringProp name="ModuleController.node_path">Test Plan&gt;Webhook Request Fragment</stringProp>
+        </ModuleController>
+        <hashTree/>
+      </hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Burst Load" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">${burst_loops}</stringProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">${burst_threads}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${burst_ramp}</stringProp>
+        <longProp name="ThreadGroup.delay">0</longProp>
+        <longProp name="ThreadGroup.duration">0</longProp>
+        <boolProp name="ThreadGroup.scheduler">false</boolProp>
+        <stringProp name="ThreadGroup.same_user_on_next_iteration">true</stringProp>
+      </ThreadGroup>
+      <hashTree>
+        <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="Think Time" enabled="true">
+          <stringProp name="ConstantTimer.delay">${think_time_ms}</stringProp>
+        </ConstantTimer>
+        <hashTree/>
+        <ModuleController guiclass="ModuleControllerGui" testclass="ModuleController" testname="Execute Webhook Request" enabled="true">
+          <stringProp name="ModuleController.node_path">Test Plan&gt;Webhook Request Fragment</stringProp>
+        </ModuleController>
+        <hashTree/>
+      </hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Sustained High Load" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">${sustained_loops}</stringProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">${sustained_threads}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${sustained_ramp}</stringProp>
+        <longProp name="ThreadGroup.delay">0</longProp>
+        <longProp name="ThreadGroup.duration">0</longProp>
+        <boolProp name="ThreadGroup.scheduler">false</boolProp>
+        <stringProp name="ThreadGroup.same_user_on_next_iteration">true</stringProp>
+      </ThreadGroup>
+      <hashTree>
+        <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="Think Time" enabled="true">
+          <stringProp name="ConstantTimer.delay">${think_time_ms}</stringProp>
+        </ConstantTimer>
+        <hashTree/>
+        <ModuleController guiclass="ModuleControllerGui" testclass="ModuleController" testname="Execute Webhook Request" enabled="true">
+          <stringProp name="ModuleController.node_path">Test Plan&gt;Webhook Request Fragment</stringProp>
+        </ModuleController>
+        <hashTree/>
+      </hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Queue Overflow" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">${overflow_loops}</stringProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">${overflow_threads}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${overflow_ramp}</stringProp>
+        <longProp name="ThreadGroup.delay">0</longProp>
+        <longProp name="ThreadGroup.duration">0</longProp>
+        <boolProp name="ThreadGroup.scheduler">false</boolProp>
+        <stringProp name="ThreadGroup.same_user_on_next_iteration">true</stringProp>
+      </ThreadGroup>
+      <hashTree>
+        <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="Think Time" enabled="true">
+          <stringProp name="ConstantTimer.delay">${think_time_ms}</stringProp>
+        </ConstantTimer>
+        <hashTree/>
+        <ModuleController guiclass="ModuleControllerGui" testclass="ModuleController" testname="Execute Webhook Request" enabled="true">
+          <stringProp name="ModuleController.node_path">Test Plan&gt;Webhook Request Fragment</stringProp>
+        </ModuleController>
+        <hashTree/>
+      </hashTree>
+      <ResultCollector guiclass="SimpleDataWriter" testclass="ResultCollector" testname="Results Writer" enabled="true">
+        <boolProp name="ResultCollector.error_logging">false</boolProp>
+        <objProp>
+          <name>saveConfig</name>
+          <value class="SampleSaveConfiguration">
+            <time>true</time>
+            <latency>true</latency>
+            <timestamp>true</timestamp>
+            <success>true</success>
+            <label>true</label>
+            <code>true</code>
+            <message>true</message>
+            <threadName>true</threadName>
+            <dataType>true</dataType>
+            <encoding>false</encoding>
+            <assertions>true</assertions>
+            <subresults>false</subresults>
+            <responseData>false</responseData>
+            <samplerData>false</samplerData>
+            <xml>false</xml>
+            <fieldNames>true</fieldNames>
+            <responseHeaders>false</responseHeaders>
+            <requestHeaders>false</requestHeaders>
+            <responseDataOnError>false</responseDataOnError>
+            <saveAssertionResultsFailureMessage>true</saveAssertionResultsFailureMessage>
+            <assertionsResultsToSave>0</assertionsResultsToSave>
+            <bytes>true</bytes>
+            <sentBytes>true</sentBytes>
+            <threadCounts>true</threadCounts>
+            <idleTime>true</idleTime>
+            <connectTime>true</connectTime>
+          </value>
+        </objProp>
+        <stringProp name="filename">${results_file}</stringProp>
+      </ResultCollector>
+      <hashTree/>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>

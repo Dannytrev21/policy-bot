@@ -1,0 +1,23 @@
+{
+  "action": "created",
+  "issue": {
+    "number": {{random_number}},
+    "title": "Load test issue {{thread_num}}",
+    "state": "open"
+  },
+  "comment": {
+    "id": "{{uuid}}",
+    "body": "Load test comment from JMeter",
+    "user": {
+      "login": "loadtest-bot"
+    }
+  },
+  "repository": {
+    "id": 123456,
+    "name": "policy-bot",
+    "full_name": "qa/policy-bot"
+  },
+  "sender": {
+    "login": "loadtest-bot"
+  }
+}

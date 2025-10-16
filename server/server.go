@@ -34,11 +34,13 @@ import (
 	"github.com/palantir/go-githubapp/githubapp"
 	"github.com/palantir/go-githubapp/oauth2"
 	"github.com/palantir/policy-bot/server/handler"
+	otelmetrics "github.com/palantir/policy-bot/server/metrics"
 	"github.com/palantir/policy-bot/server/middleware"
 	"github.com/palantir/policy-bot/server/sqsconsumer"
 	"github.com/palantir/policy-bot/version"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel"
 	"goji.io"
 	"goji.io/pat"
 )
@@ -56,9 +58,10 @@ const (
 )
 
 type Server struct {
-	config      *Config
-	base        *baseapp.Server
-	sqsConsumer sqsconsumer.Consumer
+	config       *Config
+	base         *baseapp.Server
+	sqsConsumer  sqsconsumer.Consumer
+	metricBridge *otelmetrics.Bridge
 }
 
 // New instantiates a new Server.
@@ -95,6 +98,12 @@ func New(c *Config) (*Server, error) {
 	base, err := baseapp.NewServer(c.Server, baseapp.DefaultParams(logger, "policybot.")...)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to initialize base server")
+	}
+
+	meter := otel.GetMeterProvider().Meter("github.com/palantir/policy-bot/server/metrics")
+	schedulerBridge, err := otelmetrics.NewBridge(meter, base.Registry())
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to initialize scheduler metrics bridge")
 	}
 
 	maxSize := int64(DefaultHTTPCacheSize)
@@ -487,9 +496,10 @@ func New(c *Config) (*Server, error) {
 	mux.Handle(pat.New("/details/*"), details)
 
 	return &Server{
-		config:      c,
-		base:        base,
-		sqsConsumer: sqsConsumer,
+		config:       c,
+		base:         base,
+		sqsConsumer:  sqsConsumer,
+		metricBridge: schedulerBridge,
 	}, nil
 }
 
@@ -497,6 +507,10 @@ func New(c *Config) (*Server, error) {
 func (s *Server) Start() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	if s.metricBridge != nil {
+		defer s.metricBridge.Shutdown(context.Background())
+	}
 
 	if s.config.Datadog.Address != "" {
 		if err := datadog.StartEmitter(s.base, s.config.Datadog); err != nil {

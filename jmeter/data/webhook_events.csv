@@ -1,0 +1,5 @@
+event_type,payload_file
+pull_request,jmeter/templates/pull_request_event.json
+status,jmeter/templates/status_event.json
+issue_comment,jmeter/templates/issue_comment_event.json
+pull_request_review,jmeter/templates/pull_request_review_event.json

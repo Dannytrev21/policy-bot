@@ -2,23 +2,6 @@
 
 This comprehensive guide explains how to test both HTTP webhook and SQS event processing in policy-bot, including LocalStack setup, server management, and running all integration tests.
 
-## Current Testing Status (Updated: October 15, 2025)
-
-### ✅ All Acceptance Criteria Met
-
-1. **Adaptive Polling**: Application only polls queues when workers are available ✅
-2. **Integration Tests**: All 14 tests passing, 0 skipped ✅
-3. **Unit Test Coverage**: 86.1% for server/sqsconsumer (exceeds 75% target) ✅
-
-### Test Summary
-
-| Category | Count | Status |
-|----------|-------|--------|
-| Integration Tests | 14 | ✅ All Passing |
-| Unit Tests (sqsconsumer) | 95 | ✅ All Passing |
-| Coverage | 86.1% | ✅ Exceeds Target |
-| Skipped Tests | 0 | ✅ None |
-
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
@@ -224,6 +207,14 @@ go test ./server/sqsconsumer -v
 go test ./... -short
 ```
 
+#### OTEL Metrics Bridge
+
+The OTEL adapter that exports scheduler metrics lives in `server/metrics`. Run its unit tests in module mode (the vendored tree is out of date until `go mod vendor` is refreshed):
+
+```bash
+go test -mod=mod ./server/metrics
+```
+
 ### Manual Interactive Testing
 
 Use the interactive test script:
@@ -301,6 +292,39 @@ go test ./test -run TestIntegration_SQSBurstPerformance -v
 # Monitor performance
 go test ./test -run TestIntegration_SQSBurstPerformance -v -count=5
 ```
+
+### JMeter Webhook Queue Saturation (QA)
+
+The JMeter plan under `jmeter/scripts/policy_bot_webhook_load_test.jmx` simulates baseline, burst, sustained, and overflow phases against the webhook scheduler while emitting realistic GitHub headers. Update the target endpoint and authentication secrets through properties:
+
+```bash
+jmeter -n -t jmeter/scripts/policy_bot_webhook_load_test.jmx \
+  -Jtarget.protocol=https \
+  -Jtarget.host=qa.policybot.example.com \
+  -Jtarget.port=443 \
+  -Jtarget.path=/api/github/hook \
+  -Jwebhook.secret="${QA_WEBHOOK_SECRET}" \
+  -Jgithub.hook.id=987654 \
+  -Jgithub.installation.id=123456 \
+  -Jresults.file=jmeter/results/qa-webhook.jtl
+```
+
+Key properties you can override:
+
+- `payload_csv` – path to the CSV that rotates event types (`jmeter/data/webhook_events.csv` by default)
+- `github.enterprise.host` – populate to route through the enterprise dispatcher
+- `user_agent`, `x_github_headers`, `hook_id`, `installation_target_type` – customize headers without editing the plan
+
+Each payload template in `jmeter/templates/` uses tokens (e.g. `{{random_sha_head}}`) that the Groovy pre-processor replaces with randomized values and an HMAC signature derived from `webhook.secret`, ensuring the server validates each request.
+
+During the run, watch the OTEL metrics exported by `server/metrics/otel_bridge.go`:
+
+- `github.event.queued` – queue depth gauge
+- `github.event.workers` – active worker gauge
+- `github.event.dropped` – dropped-event counter (should rise when overflow threads saturate the queue)
+- `github.event.age.*` – histogram-derived gauges for event age
+
+If you observe HTTP `429` responses, they originate from upstream infrastructure (load balancer/WAF) before Policy Bot enqueues the event. Adjust the burst parameters or coordinate with the platform team to lift external throttles so queue saturation can be observed internally (look for `github.event.dropped` increments).
 
 ### Manual Load Testing
 
@@ -522,42 +546,6 @@ go tool pprof mem.prof
 - **Latency**: <500ms average processing time
 - **Memory**: <100MB with 10 workers under load
 - **Reliability**: >99% message processing success rate
-
-## Complete Integration Test Coverage (VERIFIED)
-
-### Comprehensive Test Suite
-
-The integration test suite thoroughly validates all aspects of the SQS consumer/worker system:
-
-#### Core Functionality Tests
-- **TestAdaptivePolling_WorkerSaturation**: Validates adaptive polling prevents message timeouts
-- **TestComprehensive_SQSToWorkerPoolToHandlers**: Tests complete flow from SQS to handlers
-- **TestComprehensive_DualProcessing**: Validates HTTP and SQS can process simultaneously
-- **TestComprehensive_CloudVsEnterpriseRouting**: Tests correct handler selection based on source
-
-#### Reliability Tests
-- **TestComprehensive_GracefulShutdown**: Validates clean shutdown with in-flight messages
-- **TestComprehensive_DLQProcessing**: Tests failed message handling and DLQ integration
-- **TestComprehensive_WebhookQueueSaturation**: Validates SQS resilience when webhook queue saturates
-
-#### Performance Tests
-- **TestIntegration_SQSBurstPerformance**: Validates 20 events processed in <5 seconds
-- **TestIntegration_SQSHighVolume**: Tests handling 50 concurrent events
-- **TestIntegration_SQSWorkerScaling**: Tests scaling from 1 to 4 workers
-- **TestComprehensive_HighVolumeBurst**: Tests burst of 50+ events
-
-#### Regression Tests
-- **TestComprehensive_WebhookPathUnchanged**: Ensures webhook processing remains functional
-- **TestIntegration_HTTPAndSQSEventProcessing**: Tests parallel HTTP and SQS processing
-- **TestComprehensive_MixedCloudAndEnterprise**: Tests 40 mixed events across environments
-
-### Thread Safety
-
-The system has been validated for thread safety through:
-- Concurrent message processing tests (50-100 concurrent messages)
-- Worker pool saturation and recovery tests
-- Multiple concurrent goroutines sending messages
-- No race conditions detected in production code
 
 ## Phase 1 Validation Results (COMPLETED)
 
