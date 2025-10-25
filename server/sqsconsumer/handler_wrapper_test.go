@@ -17,6 +17,7 @@ package sqsconsumer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -525,11 +526,12 @@ func TestProcessMessage_NoHandlerForEventType(t *testing.T) {
 func TestProcessMessage_HandlerError(t *testing.T) {
 	cloudHandler := &MockEventHandler{}
 	cloudHandler.On("Handles").Return([]string{"status"})
-	handlerErr := assert.AnError
+	// Use a retryable error (503) to test that message is NOT deleted
+	handlerErr := errors.New("503 Service Unavailable")
 	cloudHandler.On("Handle", mock.Anything, "status", "test-delivery-123", []byte(`{"state":"error"}`)).Return(handlerErr)
 
 	sqsClient := &MockSQSClient{}
-	// Message should NOT be deleted when handler fails
+	// Message should NOT be deleted when handler returns retryable error (with retry disabled)
 
 	registry := metrics.NewRegistry()
 	workerPoolMgr := NewWorkerPoolManager(zerolog.Nop(), registry)
@@ -573,18 +575,81 @@ func TestProcessMessage_HandlerError(t *testing.T) {
 		message,
 	)
 
-	// Should return error from handler
+	// Should return error from handler for retryable errors when retry is disabled
 	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "503")
 	cloudHandler.AssertExpectations(t)
-	// sqsClient should NOT have DeleteMessage called
+	// sqsClient should NOT have DeleteMessage called for retryable errors
 	sqsClient.AssertNotCalled(t, "DeleteMessage")
+}
+
+// TestProcessMessage_NonRetryableError tests that non-retryable errors are deleted
+func TestProcessMessage_NonRetryableError(t *testing.T) {
+	cloudHandler := &MockEventHandler{}
+	cloudHandler.On("Handles").Return([]string{"status"})
+	// Use a non-retryable error (404) to test that message IS deleted
+	handlerErr := errors.New("404 Not Found: Resource does not exist")
+	cloudHandler.On("Handle", mock.Anything, "status", "test-delivery-404", []byte(`{"state":"notfound"}`)).Return(handlerErr)
+
+	sqsClient := &MockSQSClient{}
+	// Message SHOULD be deleted for non-retryable errors
+	sqsClient.On("DeleteMessage", mock.Anything, mock.Anything).Return(&sqs.DeleteMessageOutput{}, nil)
+
+	registry := metrics.NewRegistry()
+	workerPoolMgr := NewWorkerPoolManager(zerolog.Nop(), registry)
+
+	processor := NewProcessor(
+		&ProcessorConfig{
+			ProcessingMode: "direct",
+			EnableRetry:    false, // Disable retry for this test
+		},
+		sqsClient,
+		[]githubapp.EventHandler{},
+		[]githubapp.EventHandler{cloudHandler},
+		&MockScheduler{},
+		&MockScheduler{},
+		&MockScheduler{},
+		workerPoolMgr,
+		zerolog.Nop(),
+		registry,
+	)
+
+	sqsMessage := SQSMessage{
+		EventType:  "status",
+		DeliveryID: "test-delivery-404",
+		Payload:    json.RawMessage(`{"state":"notfound"}`),
+	}
+
+	messageBody, _ := json.Marshal(sqsMessage)
+	messageID := "msg-404"
+	receiptHandle := "receipt-404"
+
+	message := types.Message{
+		Body:          aws.String(string(messageBody)),
+		MessageId:     &messageID,
+		ReceiptHandle: &receiptHandle,
+	}
+
+	err := processor.ProcessMessage(
+		context.Background(),
+		"status",
+		"https://sqs.us-east-1.amazonaws.com/123/status",
+		message,
+	)
+
+	// Should NOT return error when non-retryable error is handled (message is deleted)
+	assert.NoError(t, err)
+	cloudHandler.AssertExpectations(t)
+	// sqsClient SHOULD have DeleteMessage called for non-retryable errors
+	sqsClient.AssertExpectations(t)
 }
 
 // TestProcessMessage_RetryLogic tests retry with exponential backoff
 func TestProcessMessage_RetryLogic(t *testing.T) {
 	cloudHandler := &MockEventHandler{}
 	cloudHandler.On("Handles").Return([]string{"status"})
-	cloudHandler.On("Handle", mock.Anything, "status", "test-delivery-123", []byte(`{}`)).Return(assert.AnError)
+	// Use a retryable error (503) to test retry logic
+	cloudHandler.On("Handle", mock.Anything, "status", "test-delivery-123", []byte(`{}`)).Return(errors.New("503 Service Unavailable"))
 
 	sqsClient := &MockSQSClient{}
 
@@ -654,7 +719,8 @@ func TestProcessMessage_RetryLogic(t *testing.T) {
 func TestProcessMessage_MaxRetriesExceeded(t *testing.T) {
 	cloudHandler := &MockEventHandler{}
 	cloudHandler.On("Handles").Return([]string{"status"})
-	cloudHandler.On("Handle", mock.Anything, "status", "test-delivery-123", []byte(`{}`)).Return(assert.AnError)
+	// Use a retryable error to test max retries behavior
+	cloudHandler.On("Handle", mock.Anything, "status", "test-delivery-123", []byte(`{}`)).Return(errors.New("503 Service Unavailable"))
 
 	sqsClient := &MockSQSClient{}
 
@@ -702,8 +768,9 @@ func TestProcessMessage_MaxRetriesExceeded(t *testing.T) {
 		message,
 	)
 
-	// Should return error (no more retries)
+	// Should return error (no more retries for retryable errors)
 	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "503")
 	cloudHandler.AssertExpectations(t)
 	// Message should NOT be deleted (will go to DLQ via SQS)
 	sqsClient.AssertNotCalled(t, "DeleteMessage")

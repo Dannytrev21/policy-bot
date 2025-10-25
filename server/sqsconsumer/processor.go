@@ -25,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/palantir/go-githubapp/githubapp"
+	policyhandler "github.com/palantir/policy-bot/server/handler"
 	"github.com/pkg/errors"
 	"github.com/rcrowley/go-metrics"
 	"github.com/rs/zerolog"
@@ -201,14 +202,51 @@ func (p *Processor) ProcessMessage(ctx context.Context, eventType, queueURL stri
 	p.recordMetrics(sqsMsg.EventType, detectedSource, start, err)
 
 	if err != nil {
-		msgLogger.Error().Err(err).Msg("Failed to process GitHub event from SQS")
+		// Use smart error classification from handler package
+		// This reuses the same logic as InstallationManager for consistency
+		isRetryable := policyhandler.IsRetryableError(err)
+		isNotFound := policyhandler.IsInstallationNotFoundError(err)
+		isAuth := policyhandler.IsAuthenticationError(err)
 
-		// Handle retries if enabled
-		if p.config.EnableRetry && sqsMsg.RetryCount < p.config.MaxRetries {
+		// Log with appropriate level based on error type
+		if isNotFound {
+			msgLogger.Info().
+				Err(err).
+				Bool("retryable", false).
+				Msg("GitHub App not installed on repository - will not retry")
+		} else if isAuth {
+			msgLogger.Warn().
+				Err(err).
+				Bool("retryable", false).
+				Msg("Authentication/authorization error - will not retry")
+		} else if isRetryable {
+			msgLogger.Warn().
+				Err(err).
+				Bool("retryable", true).
+				Int("retry_count", sqsMsg.RetryCount).
+				Msg("Transient error processing GitHub event - will retry")
+		} else {
+			msgLogger.Error().
+				Err(err).
+				Bool("retryable", false).
+				Msg("Permanent error processing GitHub event - will not retry")
+		}
+
+		// Only retry if the error is retryable and we haven't exceeded retry limit
+		if isRetryable && p.config.EnableRetry && sqsMsg.RetryCount < p.config.MaxRetries {
 			return p.handleRetry(ctx, queueURL, message, sqsMsg, msgLogger)
 		}
 
-		// Don't delete the message so it will be retried by SQS
+		// For non-retryable errors (404s, auth errors), delete the message
+		// so it doesn't keep getting retried unnecessarily
+		if !isRetryable {
+			msgLogger.Info().
+				Msg("Deleting message with non-retryable error")
+			return p.deleteMessage(ctx, queueURL, message.ReceiptHandle, msgLogger)
+		}
+
+		// For retryable errors that exceeded retry limit, return error
+		// so message goes to DLQ if configured
 		return err
 	}
 
