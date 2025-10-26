@@ -43,6 +43,33 @@ Synchronous webhook processing with limited internal queues (100 events max) cre
 
 ![Architecture Comparison](./diagrams/transformation-comparison.mmd)
 
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#2E86AB', 'primaryBorderColor':'#1E5A7D', 'errorBkgColor':'#D62828', 'errorTextColor':'#fff', 'warningBkgColor':'#F77F00', 'successBkgColor':'#52B788', 'successTextColor':'#fff'}}}%%
+
+graph TB
+    subgraph "BEFORE: Synchronous Webhook Architecture"
+        GH1[GitHub Enterprise] -->|Webhook| LB1[Load Balancer]
+        LB1 --> PB1[Policy Bot Instance 1]
+        LB1 --> PB2[Policy Bot Instance 2]
+
+        PB1 --> Queue1[Internal Queue<br/>⚠️ Limited: 100 events]
+        PB2 --> Queue2[Internal Queue<br/>⚠️ Limited: 100 events]
+
+        Queue1 --> Worker1[Worker Pool<br/>10 workers]
+        Queue2 --> Worker2[Worker Pool<br/>10 workers]
+
+        Worker1 -->|Direct API Calls| GHAPI1[GitHub API]
+        Worker2 -->|Direct API Calls| GHAPI1
+
+        style Queue1 fill:#F77F00,stroke:#333,stroke-width:2px
+        style Queue2 fill:#F77F00,stroke:#333,stroke-width:2px
+
+        Issues1[❌ 5-10% Event Loss During Peaks<br/>❌ No Retry on Failures<br/>❌ Limited Observability<br/>❌ Direct API Pressure]
+
+        style Issues1 fill:#D62828,stroke:#333,stroke-width:2px,color:#fff
+    end
+```
+
 We decoupled webhook reception from processing using AWS managed services:
 
 **Before**: `GitHub → Policy Bot → Internal Queue (Limited) → Workers`
