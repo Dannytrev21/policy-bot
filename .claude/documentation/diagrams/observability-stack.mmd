@@ -1,0 +1,74 @@
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#2E86AB', 'primaryBorderColor':'#1E5A7D'}}}%%
+
+graph TB
+    subgraph "Application Layer"
+        PB[Policy Bot]
+        IM[Installation Manager]
+        SQS[SQS Consumer]
+        Cache[Registry Cache]
+
+        PB --> Metrics[go-metrics Registry]
+        IM --> Metrics
+        SQS --> Metrics
+        Cache --> Metrics
+
+        PB --> Trace[OpenTelemetry Tracer]
+        IM --> Trace
+    end
+
+    subgraph "Instrumentation Layer"
+        Metrics --> Bridge[OTEL Metrics Bridge<br/>Phase 2.5 Implementation]
+
+        Bridge --> |Export| Collector[OTEL Collector]
+        Trace --> |Export| Collector
+
+        Bridge -.-> |Converts| M1[installation.client.success/failure]
+        Bridge -.-> |Converts| M2[circuit_breaker.state/opened/closed]
+        Bridge -.-> |Converts| M3[installation.registry.cache_*]
+        Bridge -.-> |Converts| M4[sqs.messages.processed/failed]
+        Bridge -.-> |Converts| M5[github.event.queued/workers/age]
+
+        style Bridge fill:#52B788,stroke:#333,stroke-width:2px
+    end
+
+    subgraph "Export Layer"
+        Collector --> OTLP[OTLP Exporter]
+        OTLP --> |Metrics & Traces| NR[New Relic]
+    end
+
+    subgraph "Visualization Layer (New Relic)"
+        NR --> Dashboard[Operational Dashboard<br/>5 Pages, 23 Panels]
+
+        Dashboard --> P1[System Health<br/>• Health Score<br/>• Circuit Breaker<br/>• Success Rate]
+        Dashboard --> P2[Performance<br/>• Latency (p50/p95/p99)<br/>• Throughput<br/>• Trace Duration]
+        Dashboard --> P3[Capacity<br/>• Queue Depth<br/>• Worker Utilization<br/>• Cache Hit Rate]
+        Dashboard --> P4[Errors<br/>• Auth Failures<br/>• Dropped Events<br/>• DLQ Messages]
+        Dashboard --> P5[Tracing<br/>• Request Flow<br/>• Error Traces<br/>• Bottlenecks]
+
+        style Dashboard fill:#2E86AB,stroke:#333,stroke-width:2px,color:#fff
+    end
+
+    subgraph "Alerting"
+        NR --> Alerts[Alert Conditions]
+
+        Alerts --> A1[🔴 Circuit Open]
+        Alerts --> A2[🔴 Success < 95%]
+        Alerts --> A3[🔴 Dropped Events > 0]
+        Alerts --> A4[🟡 Queue > 50]
+        Alerts --> A5[🟡 DLQ > 10]
+        Alerts --> A6[🟡 Cache Hit < 80%]
+    end
+
+    subgraph "Key Metrics"
+        KM[30+ Custom Metrics<br/>━━━━━━━━━━━<br/>• Authentication: 4 metrics<br/>• Circuit Breaker: 3 metrics<br/>• Cache: 6 metrics<br/>• SQS Processing: 9 metrics<br/>• Worker Pools: 5 metrics<br/>• Event Processing: 4 metrics]
+
+        style KM fill:#f9f9f9,stroke:#333,stroke-width:1px
+    end
+
+    subgraph "Distributed Tracing"
+        DT[Trace Spans<br/>━━━━━━━━━━━<br/>• Base.NewEvalContext<br/>• InstallationManager.GetClients<br/><br/>Attributes:<br/>• installation.id<br/>• repository<br/>• pull_request.number<br/>• circuit_breaker.state<br/><br/>Events:<br/>• circuit_breaker_opened<br/>• circuit_breaker_closed<br/>• clients_created]
+
+        style DT fill:#f9f9f9,stroke:#333,stroke-width:1px
+    end
+```

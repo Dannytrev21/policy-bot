@@ -152,10 +152,11 @@ func NewWithTestHandlers(c *Config, testHandlers []githubapp.EventHandler) (*Ser
 		}
 
 		basePolicyHandler := handler.Base{
-			ClientCreator: cc,
-			BaseConfig:    &c.Server,
-			Installations: githubapp.NewInstallationsService(appClient),
-			PullOpts:      &c.CloudOptions,
+			ClientCreator:   cc,
+			BaseConfig:      &c.Server,
+			Installations:   githubapp.NewInstallationsService(appClient),
+			MetricsRegistry: base.Registry(),
+			PullOpts:        &c.CloudOptions,
 			ConfigFetcher: &handler.ConfigFetcher{
 				Loader: appconfig.NewLoader(
 					policyPaths,

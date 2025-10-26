@@ -64,14 +64,33 @@ func (h *Installation) Handle(ctx context.Context, eventType, deliveryID string,
 		repositories = event.RepositoriesAdded
 	}
 
+	logger := zerolog.Ctx(ctx)
+
 	switch action {
 	case "created", "added":
+		// Pre-populate cache with positive result for this installation
+		if h.InstallationRegistry != nil {
+			h.InstallationRegistry.MarkInstalled(installationID)
+			logger.Debug().
+				Int64("installation_id", installationID).
+				Msg("Pre-populated installation cache (created/added)")
+		}
+
 		client, err := h.NewInstallationClient(installationID)
 		if err != nil {
 			return err
 		}
 		for _, repo := range repositories {
 			h.postRepoInstallationStatus(ctx, client, repo)
+		}
+
+	case "deleted", "removed":
+		// Clear cache entry when installation is deleted or repositories removed
+		if h.InstallationRegistry != nil {
+			h.InstallationRegistry.Remove(installationID)
+			logger.Info().
+				Int64("installation_id", installationID).
+				Msg("Removed installation from cache (deleted/removed)")
 		}
 	}
 

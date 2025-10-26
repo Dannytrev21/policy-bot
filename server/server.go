@@ -215,6 +215,7 @@ func New(c *Config) (*Server, error) {
 		BaseConfig:        &c.Server,
 		Installations:     githubapp.NewInstallationsService(enterpriseAppClient),
 		InstallationIdMap: make(map[int64]int64),
+		MetricsRegistry:   base.Registry(),
 
 		PullOpts: &c.EnterpriseOptions,
 		ConfigFetcher: &handler.ConfigFetcher{
@@ -228,9 +229,10 @@ func New(c *Config) (*Server, error) {
 	}
 
 	cloudBasePolicyHandler := handler.Base{
-		ClientCreator: cloudClientCreator,
-		BaseConfig:    &c.Server,
-		Installations: githubapp.NewInstallationsService(cloudAppClient),
+		ClientCreator:   cloudClientCreator,
+		BaseConfig:      &c.Server,
+		Installations:   githubapp.NewInstallationsService(cloudAppClient),
+		MetricsRegistry: base.Registry(),
 
 		PullOpts: &c.CloudOptions,
 		ConfigFetcher: &handler.ConfigFetcher{
@@ -253,7 +255,12 @@ func New(c *Config) (*Server, error) {
 		workers = DefaultWebhookWorkers
 	}
 
-	enterpriseHandlers := []githubapp.EventHandler{
+	// Initialize base handlers to set up InstallationRegistry
+	enterpriseBasePolicyHandler.Initialize()
+	cloudBasePolicyHandler.Initialize()
+
+	// Create raw handlers without filtering
+	rawEnterpriseHandlers := []githubapp.EventHandler{
 		&handler.Installation{Base: enterpriseBasePolicyHandler},
 		&handler.MergeGroup{Base: enterpriseBasePolicyHandler},
 		&handler.PullRequest{Base: enterpriseBasePolicyHandler},
@@ -264,7 +271,7 @@ func New(c *Config) (*Server, error) {
 		&handler.WorkflowRun{Base: enterpriseBasePolicyHandler},
 	}
 
-	cloudHandlers := []githubapp.EventHandler{
+	rawCloudHandlers := []githubapp.EventHandler{
 		&handler.Installation{Base: cloudBasePolicyHandler},
 		&handler.MergeGroup{Base: cloudBasePolicyHandler},
 		&handler.PullRequest{Base: cloudBasePolicyHandler},
@@ -273,6 +280,31 @@ func New(c *Config) (*Server, error) {
 		&handler.Status{Base: cloudBasePolicyHandler},
 		&handler.CheckRun{Base: cloudBasePolicyHandler},
 		&handler.WorkflowRun{Base: cloudBasePolicyHandler},
+	}
+
+	// Wrap handlers with installation filter (except Installation handler which manages the cache)
+	enterpriseHandlers := make([]githubapp.EventHandler, 0, len(rawEnterpriseHandlers))
+	for i, h := range rawEnterpriseHandlers {
+		if i == 0 {
+			// Don't filter Installation events - they manage the cache
+			enterpriseHandlers = append(enterpriseHandlers, h)
+		} else {
+			// Wrap with filter for early rejection of non-installed repo events
+			// Pass metrics registry for OTEL export
+			enterpriseHandlers = append(enterpriseHandlers, handler.NewInstallationFilterHandler(h, enterpriseBasePolicyHandler.InstallationRegistry, base.Registry()))
+		}
+	}
+
+	cloudHandlers := make([]githubapp.EventHandler, 0, len(rawCloudHandlers))
+	for i, h := range rawCloudHandlers {
+		if i == 0 {
+			// Don't filter Installation events - they manage the cache
+			cloudHandlers = append(cloudHandlers, h)
+		} else {
+			// Wrap with filter for early rejection of non-installed repo events
+			// Pass metrics registry for OTEL export
+			cloudHandlers = append(cloudHandlers, handler.NewInstallationFilterHandler(h, cloudBasePolicyHandler.InstallationRegistry, base.Registry()))
+		}
 	}
 
 	// Create the scheduler that both HTTP and SQS will use

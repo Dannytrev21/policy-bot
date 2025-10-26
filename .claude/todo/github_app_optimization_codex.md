@@ -1,0 +1,17 @@
+# GitHub App Optimization Plan
+- [ ] Phase 1 – Diagnose installation 404 and harden environment routing
+  - [ ] Instrument QA logs to capture installation lookup responses for GHES vs GHEC
+  - [ ] Normalize SQS headers into explicit environment metadata and update routing logic
+  - [ ] Replay representative SQS and webhook events to confirm correct handler selection
+- [ ] Phase 2 – Resilient installation client creation
+  - [ ] Centralize installation ID resolution with cache and fallback queries
+  - [ ] Implement retry/backoff and error classification for installation token requests
+  - [ ] Gate new resolver behind a feature flag and document rollback path
+- [ ] Phase 3 – Event ingestion controls
+  - [ ] Extend configuration to toggle SQS vs webhook delivery per event/environment
+  - [ ] Wire runtime switch to pause cloud status webhooks when SQS processing is active
+  - [ ] Update operator runbooks with new toggles and failure workflows
+- [ ] Phase 4 – Observability and optimization
+  - [ ] Emit structured logs and metrics for routing decisions and installation lookups
+  - [ ] Add dashboards/alerts for SQS worker saturation, DLQ growth, and token failures
+  - [ ] Review caching and timeout strategy against GitHub API rate limits

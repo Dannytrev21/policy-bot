@@ -27,6 +27,10 @@ import (
 	gometrics "github.com/rcrowley/go-metrics"
 	"github.com/rs/zerolog"
 	"github.com/shurcooL/githubv4"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -226,6 +230,16 @@ func NewInstallationManager(
 // The circuit breaker prevents cascading failures by blocking requests when GitHub API
 // is consistently unavailable, implementing a fail-fast strategy.
 func (m *InstallationManager) GetClients(ctx context.Context, installationID int64, repoFullName string) (*InstallationClients, error) {
+	// Start tracing span for the entire GetClients operation
+	tracer := otel.Tracer("github.com/palantir/policy-bot/handler")
+	ctx, span := tracer.Start(ctx, "InstallationManager.GetClients",
+		trace.WithAttributes(
+			attribute.Int64("installation.id", installationID),
+			attribute.String("repository", repoFullName),
+		),
+	)
+	defer span.End()
+
 	logger := zerolog.Ctx(ctx)
 
 	// Step 0: Check circuit breaker - fail fast if circuit is open
@@ -236,13 +250,19 @@ func (m *InstallationManager) GetClients(ctx context.Context, installationID int
 			Str("repository", repoFullName).
 			Str("circuit_breaker_state", cbState.String()).
 			Msg("Circuit breaker is open, rejecting request")
+
+		span.SetStatus(codes.Error, "circuit breaker is open")
+		span.SetAttributes(attribute.String("circuit_breaker.state", cbState.String()))
 		return nil, fmt.Errorf("circuit breaker is open (state: %s), GitHub API may be unavailable", cbState.String())
 	}
 
 	// Step 1: Verify installation exists before attempting to create clients
 	if !m.verifyInstallation(ctx, installationID, repoFullName) {
+		span.SetStatus(codes.Error, "installation not found")
+		span.SetAttributes(attribute.Bool("installation.verified", false))
 		return nil, fmt.Errorf("installation %d not found or not accessible - app may not be installed on repository %s", installationID, repoFullName)
 	}
+	span.SetAttributes(attribute.Bool("installation.verified", true))
 
 	// Step 2: Create v3 REST API client
 	v3Client, err := m.createV3Client(ctx, installationID, repoFullName)
@@ -256,6 +276,11 @@ func (m *InstallationManager) GetClients(ctx context.Context, installationID int
 
 		m.recordMetric(MetricsKeyInstallationClientFailure)
 
+		// Record error in span
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to create v3 client")
+		span.SetAttributes(attribute.String("error.type", "v3_client_creation"))
+
 		// Record failure with circuit breaker (only for retryable errors that might indicate service issues)
 		if isRetryableError(err) {
 			previousState := m.circuitBreaker.RecordFailure()
@@ -268,6 +293,7 @@ func (m *InstallationManager) GetClients(ctx context.Context, installationID int
 					Msg("Circuit breaker opened due to consecutive failures")
 				m.recordMetric(MetricsKeyCircuitBreakerOpened)
 				m.recordCircuitBreakerState()
+				span.AddEvent("circuit_breaker_opened")
 			}
 		}
 
@@ -275,6 +301,7 @@ func (m *InstallationManager) GetClients(ctx context.Context, installationID int
 	}
 
 	m.recordMetric(MetricsKeyInstallationClientSuccess)
+	span.SetAttributes(attribute.Bool("v3_client.created", true))
 
 	// Step 3: Create v4 GraphQL API client
 	v4Client, err := m.createV4Client(ctx, installationID, repoFullName)
@@ -288,6 +315,11 @@ func (m *InstallationManager) GetClients(ctx context.Context, installationID int
 
 		m.recordMetric(MetricsKeyInstallationV4ClientFailure)
 
+		// Record error in span
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to create v4 client")
+		span.SetAttributes(attribute.String("error.type", "v4_client_creation"))
+
 		// Record failure with circuit breaker (only for retryable errors that might indicate service issues)
 		if isRetryableError(err) {
 			previousState := m.circuitBreaker.RecordFailure()
@@ -300,6 +332,7 @@ func (m *InstallationManager) GetClients(ctx context.Context, installationID int
 					Msg("Circuit breaker opened due to consecutive failures")
 				m.recordMetric(MetricsKeyCircuitBreakerOpened)
 				m.recordCircuitBreakerState()
+				span.AddEvent("circuit_breaker_opened")
 			}
 		}
 
@@ -307,6 +340,7 @@ func (m *InstallationManager) GetClients(ctx context.Context, installationID int
 	}
 
 	m.recordMetric(MetricsKeyInstallationV4ClientSuccess)
+	span.SetAttributes(attribute.Bool("v4_client.created", true))
 
 	// Step 4: Record success with circuit breaker
 	previousState := m.circuitBreaker.RecordSuccess()
@@ -318,7 +352,11 @@ func (m *InstallationManager) GetClients(ctx context.Context, installationID int
 			Msg("Circuit breaker closed after successful recovery")
 		m.recordMetric(MetricsKeyCircuitBreakerClosed)
 		m.recordCircuitBreakerState()
+		span.AddEvent("circuit_breaker_closed")
 	}
+
+	// Mark span as successful
+	span.SetStatus(codes.Ok, "successfully created installation clients")
 
 	return &InstallationClients{
 		V3Client: v3Client,

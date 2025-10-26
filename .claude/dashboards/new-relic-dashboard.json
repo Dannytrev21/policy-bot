@@ -1,0 +1,507 @@
+{
+  "name": "Policy Bot - Operational Dashboard",
+  "description": "Comprehensive operational monitoring for Policy Bot webhook and SQS event processing",
+  "permissions": "PUBLIC_READ_WRITE",
+  "pages": [
+    {
+      "name": "System Health",
+      "description": "Overall system health and performance",
+      "widgets": [
+        {
+          "title": "Health Score",
+          "layout": {
+            "column": 1,
+            "row": 1,
+            "width": 3,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.billboard"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT (((sum(installation.client.success) + sum(installation.v4client.success)) / (sum(installation.client.success) + sum(installation.v4client.success) + sum(installation.client.failure) + sum(installation.v4client.failure))) * 40 + (1 - latest(installation.circuit_breaker.state) / 2) * 30 + (1 - min(1, sum(github.event.dropped) / 100)) * 20 + (sum(installation.registry.cache_hits_total) / (sum(installation.registry.cache_hits_total) + sum(installation.registry.cache_misses_total))) * 10) AS 'Health Score' FROM Metric WHERE appName = 'policy-bot' SINCE 5 minutes ago"
+              }
+            ],
+            "thresholds": [
+              {
+                "alertSeverity": "CRITICAL",
+                "value": 75
+              },
+              {
+                "alertSeverity": "WARNING",
+                "value": 90
+              }
+            ]
+          }
+        },
+        {
+          "title": "Circuit Breaker Status",
+          "layout": {
+            "column": 4,
+            "row": 1,
+            "width": 2,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.billboard"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT latest(installation.circuit_breaker.state) AS 'State' FROM Metric WHERE appName = 'policy-bot' SINCE 5 minutes ago"
+              }
+            ],
+            "thresholds": [
+              {
+                "alertSeverity": "CRITICAL",
+                "value": 1
+              },
+              {
+                "alertSeverity": "WARNING",
+                "value": 2
+              }
+            ]
+          }
+        },
+        {
+          "title": "Overall Success Rate",
+          "layout": {
+            "column": 6,
+            "row": 1,
+            "width": 7,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT (sum(installation.client.success) + sum(installation.v4client.success)) / (sum(installation.client.success) + sum(installation.v4client.success) + sum(installation.client.failure) + sum(installation.v4client.failure)) * 100 AS 'Success Rate %' FROM Metric WHERE appName = 'policy-bot' SINCE 1 hour ago TIMESERIES AUTO"
+              }
+            ],
+            "yAxisLeft": {
+              "zero": false
+            }
+          }
+        },
+        {
+          "title": "Events Processed Per Minute",
+          "layout": {
+            "column": 1,
+            "row": 4,
+            "width": 6,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.area"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT rate(sum(installation.client.success) + sum(installation.v4client.success), 1 minute) AS 'Events/min' FROM Metric WHERE appName = 'policy-bot' SINCE 1 hour ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Throughput: Webhooks vs SQS",
+          "layout": {
+            "column": 7,
+            "row": 4,
+            "width": 6,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT rate(sum(github.event.queued), 1 minute) AS 'Webhook Events/min', rate(sum(sqs.messages.processed), 1 minute) AS 'SQS Messages/min' FROM Metric WHERE appName = 'policy-bot' SINCE 1 hour ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Performance",
+      "description": "Latency and processing time metrics",
+      "widgets": [
+        {
+          "title": "Webhook Event Age (Latency)",
+          "layout": {
+            "column": 1,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT average(github.event.age.mean_ms) AS 'Mean (ms)', percentile(github.event.age, 95) AS 'P95 (ms)', max(github.event.age.max_ms) AS 'Max (ms)' FROM Metric WHERE appName = 'policy-bot' SINCE 1 hour ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        },
+        {
+          "title": "SQS Processing Time by Event Type",
+          "layout": {
+            "column": 7,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT average(sqs.processing.time.mean_ms) AS 'Mean (ms)', average(sqs.processing.time.p95_ms) AS 'P95 (ms)' FROM Metric WHERE appName = 'policy-bot' FACET event_type SINCE 1 hour ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        },
+        {
+          "title": "End-to-End Trace Latency",
+          "layout": {
+            "column": 1,
+            "row": 4,
+            "width": 12,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT average(duration.ms) AS 'Mean', percentile(duration.ms, 95) AS 'P95', percentile(duration.ms, 99) AS 'P99' FROM Span WHERE appName = 'policy-bot' AND name = 'Base.NewEvalContext' SINCE 1 hour ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Capacity",
+      "description": "Resource utilization and capacity metrics",
+      "widgets": [
+        {
+          "title": "Webhook Queue Depth",
+          "layout": {
+            "column": 1,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.area"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT latest(github.event.queued) AS 'Queue Length', latest(github.event.workers) AS 'Active Workers' FROM Metric WHERE appName = 'policy-bot' SINCE 15 minutes ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        },
+        {
+          "title": "SQS Worker Pool Utilization",
+          "layout": {
+            "column": 7,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT latest(sqs.worker_pool.active_workers) AS 'Active', latest(sqs.worker_pool.capacity) AS 'Capacity', latest(sqs.worker_pool.utilization) AS 'Utilization %' FROM Metric WHERE appName = 'policy-bot' FACET event_type SINCE 15 minutes ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Installation Cache Hit Rate",
+          "layout": {
+            "column": 1,
+            "row": 4,
+            "width": 6,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT sum(installation.registry.cache_hits_total) / (sum(installation.registry.cache_hits_total) + sum(installation.registry.cache_misses_total)) * 100 AS 'Hit Rate %' FROM Metric WHERE appName = 'policy-bot' SINCE 1 hour ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Cache Size and Composition",
+          "layout": {
+            "column": 7,
+            "row": 4,
+            "width": 6,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.area"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT latest(installation.registry.cache_size) AS 'Total', latest(installation.registry.positive_entries) AS 'Installed', latest(installation.registry.negative_entries) AS 'Not Installed' FROM Metric WHERE appName = 'policy-bot' SINCE 15 minutes ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Errors & Failures",
+      "description": "Error tracking and failure analysis",
+      "widgets": [
+        {
+          "title": "Authentication Failures",
+          "layout": {
+            "column": 1,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT sum(installation.client.failure) AS 'v3 (REST) Failures', sum(installation.v4client.failure) AS 'v4 (GraphQL) Failures' FROM Metric WHERE appName = 'policy-bot' SINCE 1 hour ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Circuit Breaker Events",
+          "layout": {
+            "column": 7,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT sum(installation.circuit_breaker.opened_total) AS 'Opened', sum(installation.circuit_breaker.closed_total) AS 'Closed' FROM Metric WHERE appName = 'policy-bot' SINCE 4 hours ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Webhook Dropped Events",
+          "layout": {
+            "column": 1,
+            "row": 4,
+            "width": 4,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.area"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT sum(github.event.dropped) AS 'Dropped Events' FROM Metric WHERE appName = 'policy-bot' SINCE 1 hour ago TIMESERIES AUTO"
+              }
+            ],
+            "thresholds": [
+              {
+                "alertSeverity": "CRITICAL",
+                "value": 1
+              }
+            ]
+          }
+        },
+        {
+          "title": "SQS Failed Messages and DLQ",
+          "layout": {
+            "column": 5,
+            "row": 4,
+            "width": 4,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT sum(sqs.messages.failed) AS 'Failed Messages', latest(sqs.dlq.messages) AS 'DLQ Count' FROM Metric WHERE appName = 'policy-bot' FACET event_type SINCE 1 hour ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        },
+        {
+          "title": "SQS Worker Pool Issues",
+          "layout": {
+            "column": 9,
+            "row": 4,
+            "width": 4,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT sum(sqs.worker_pool.rejected_total) AS 'Rejections', sum(sqs.worker_pool.panics_total) AS 'Panics' FROM Metric WHERE appName = 'policy-bot' FACET event_type SINCE 1 hour ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Cache API Call Rate",
+          "layout": {
+            "column": 1,
+            "row": 7,
+            "width": 12,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.area"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT rate(sum(installation.registry.api_calls_total), 1 minute) AS 'API Calls/min' FROM Metric WHERE appName = 'policy-bot' SINCE 1 hour ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Distributed Tracing",
+      "description": "End-to-end request tracing and error analysis",
+      "widgets": [
+        {
+          "title": "Trace Success vs Errors",
+          "layout": {
+            "column": 1,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.area"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT count(*) FROM Span WHERE appName = 'policy-bot' AND name = 'Base.NewEvalContext' FACET otel.status_code SINCE 1 hour ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Slowest Operations",
+          "layout": {
+            "column": 7,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.bar"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT percentile(duration.ms, 95) AS 'P95 Duration' FROM Span WHERE appName = 'policy-bot' FACET name SINCE 1 hour ago"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Error Traces",
+          "layout": {
+            "column": 1,
+            "row": 4,
+            "width": 12,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.table"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT trace.id, error.message, repository, installation.id FROM Span WHERE appName = 'policy-bot' AND otel.status_code = 'ERROR' AND name IN ('InstallationManager.GetClients', 'Base.NewEvalContext') SINCE 1 hour ago LIMIT 100"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Circuit Breaker Correlation",
+          "layout": {
+            "column": 1,
+            "row": 7,
+            "width": 12,
+            "height": 3
+          },
+          "visualization": {
+            "id": "viz.area"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": 0,
+                "query": "SELECT count(*) FROM Span WHERE appName = 'policy-bot' AND circuit_breaker.state IS NOT NULL FACET circuit_breaker.state SINCE 4 hours ago TIMESERIES AUTO"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "variables": []
+}
