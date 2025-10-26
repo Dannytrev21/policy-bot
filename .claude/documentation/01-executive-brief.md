@@ -73,6 +73,7 @@ graph TB
 We decoupled webhook reception from processing using AWS managed services:
 
 **Before**: `GitHub → Policy Bot → Internal Queue (Limited) → Workers`
+
 **After**: `GitHub → SNS → Lambda → SQS (Unlimited) → Policy Bot → Smart Processing`
 
 ### Key Innovations Implemented
