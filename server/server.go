@@ -290,8 +290,14 @@ func New(c *Config) (*Server, error) {
 			enterpriseHandlers = append(enterpriseHandlers, h)
 		} else {
 			// Wrap with filter for early rejection of non-installed repo events
+			// Pass InstallationsService for repository-based fallback lookup
 			// Pass metrics registry for OTEL export
-			enterpriseHandlers = append(enterpriseHandlers, handler.NewInstallationFilterHandler(h, enterpriseBasePolicyHandler.InstallationRegistry, base.Registry()))
+			enterpriseHandlers = append(enterpriseHandlers, handler.NewInstallationFilterHandler(
+				h,
+				enterpriseBasePolicyHandler.InstallationRegistry,
+				enterpriseBasePolicyHandler.Installations,
+				base.Registry(),
+			))
 		}
 	}
 
@@ -302,8 +308,14 @@ func New(c *Config) (*Server, error) {
 			cloudHandlers = append(cloudHandlers, h)
 		} else {
 			// Wrap with filter for early rejection of non-installed repo events
+			// Pass InstallationsService for repository-based fallback lookup
 			// Pass metrics registry for OTEL export
-			cloudHandlers = append(cloudHandlers, handler.NewInstallationFilterHandler(h, cloudBasePolicyHandler.InstallationRegistry, base.Registry()))
+			cloudHandlers = append(cloudHandlers, handler.NewInstallationFilterHandler(
+				h,
+				cloudBasePolicyHandler.InstallationRegistry,
+				cloudBasePolicyHandler.Installations,
+				base.Registry(),
+			))
 		}
 	}
 

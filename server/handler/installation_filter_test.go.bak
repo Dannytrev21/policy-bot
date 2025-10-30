@@ -20,7 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/palantir/go-githubapp/githubapp"
 	"github.com/pkg/errors"
 	gometrics "github.com/rcrowley/go-metrics"
 	"github.com/rs/zerolog"
@@ -71,7 +70,7 @@ func TestNewInstallationFilterHandler(t *testing.T) {
 	mockHandler := &MockEventHandler{eventTypes: []string{"pull_request"}}
 	metricsRegistry := gometrics.NewRegistry()
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry)
+	filter := NewInstallationFilterHandler(mockHandler, registry, metricsRegistry)
 
 	require.NotNil(t, filter)
 	assert.Equal(t, mockHandler, filter.wrapped)
@@ -355,7 +354,7 @@ func TestInstallationFilterHandler_GoMetrics_FilteredEvents(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry)
+	filter := NewInstallationFilterHandler(mockHandler, registry, metricsRegistry)
 
 	payload := createTestPayload(installationID)
 	err := filter.Handle(ctx, "pull_request", "test-delivery-1", payload)
@@ -390,7 +389,7 @@ func TestInstallationFilterHandler_GoMetrics_PassedEvents(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry)
+	filter := NewInstallationFilterHandler(mockHandler, registry, metricsRegistry)
 
 	payload := createTestPayload(installationID)
 	err := filter.Handle(ctx, "pull_request", "test-delivery-2", payload)
@@ -476,264 +475,4 @@ func TestInstallationFilterHandler_ZeroInstallationID(t *testing.T) {
 	filtered, passed := filter.GetMetrics()
 	assert.Equal(t, int64(0), filtered)
 	assert.Equal(t, int64(1), passed)
-}
-
-// ========== Phase 2 Tests: Repository-Based Fallback ==========
-
-// MockInstallationsService is a mock implementation for testing repository-based lookup
-type MockInstallationsService struct {
-	installations map[string]int64 // key is "owner/repo", value is installation ID
-	getByRepoFunc func(ctx context.Context, owner, repo string) (githubapp.Installation, error)
-}
-
-func (m *MockInstallationsService) ListAll(ctx context.Context) ([]githubapp.Installation, error) {
-	return nil, errors.New("not implemented in mock")
-}
-
-func (m *MockInstallationsService) GetByOwner(ctx context.Context, owner string) (githubapp.Installation, error) {
-	return githubapp.Installation{}, errors.New("not implemented in mock")
-}
-
-func (m *MockInstallationsService) GetByRepository(ctx context.Context, owner, repo string) (githubapp.Installation, error) {
-	if m.getByRepoFunc != nil {
-		return m.getByRepoFunc(ctx, owner, repo)
-	}
-
-	key := owner + "/" + repo
-	if installationID, exists := m.installations[key]; exists {
-		return githubapp.Installation{ID: installationID}, nil
-	}
-
-	return githubapp.Installation{}, errors.New("404 Not Found: No installation found for repository")
-}
-
-// Helper to create payload with repository information
-func createTestPayloadWithRepository(installationID int64, owner, repo string) []byte {
-	payload := map[string]interface{}{
-		"installation": map[string]interface{}{
-			"id": installationID,
-		},
-		"repository": map[string]interface{}{
-			"name": repo,
-			"owner": map[string]interface{}{
-				"login": owner,
-			},
-		},
-		"action": "opened",
-	}
-	data, _ := json.Marshal(payload)
-	return data
-}
-
-// Helper to create payload with only repository (no installation)
-func createTestPayloadRepositoryOnly(owner, repo string) []byte {
-	payload := map[string]interface{}{
-		"repository": map[string]interface{}{
-			"name": repo,
-			"owner": map[string]interface{}{
-				"login": owner,
-			},
-		},
-		"action": "opened",
-	}
-	data, _ := json.Marshal(payload)
-	return data
-}
-
-// Test extractRepository() function
-func TestExtractRepository_ValidRepository(t *testing.T) {
-	payload := createTestPayloadWithRepository(12345, "octocat", "Hello-World")
-	owner, repo, err := extractRepository(payload)
-
-	assert.NoError(t, err)
-	assert.Equal(t, "octocat", owner)
-	assert.Equal(t, "Hello-World", repo)
-}
-
-func TestExtractRepository_NoRepository(t *testing.T) {
-	payload := createTestPayload(12345)
-	owner, repo, err := extractRepository(payload)
-
-	assert.Error(t, err)
-	assert.Equal(t, "", owner)
-	assert.Equal(t, "", repo)
-	assert.Contains(t, err.Error(), "no repository")
-}
-
-func TestExtractRepository_NoOwner(t *testing.T) {
-	payload := []byte(`{"repository": {"name": "test-repo"}, "action": "opened"}`)
-	owner, repo, err := extractRepository(payload)
-
-	assert.Error(t, err)
-	assert.Equal(t, "", owner)
-	assert.Equal(t, "", repo)
-	assert.Contains(t, err.Error(), "owner")
-}
-
-func TestExtractRepository_NoName(t *testing.T) {
-	payload := []byte(`{"repository": {"owner": {"login": "octocat"}}, "action": "opened"}`)
-	owner, repo, err := extractRepository(payload)
-
-	assert.Error(t, err)
-	assert.Equal(t, "", owner)
-	assert.Equal(t, "", repo)
-	assert.Contains(t, err.Error(), "name")
-}
-
-func TestExtractRepository_InvalidJSON(t *testing.T) {
-	payload := []byte(`{invalid json}`)
-	owner, repo, err := extractRepository(payload)
-
-	assert.Error(t, err)
-	assert.Equal(t, "", owner)
-	assert.Equal(t, "", repo)
-	assert.Contains(t, err.Error(), "unmarshal")
-}
-
-// Test repository-based fallback integration
-func TestInstallationFilterHandler_RepositoryFallback_Success(t *testing.T) {
-	ctx := zerolog.New(nil).WithContext(context.Background())
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
-
-	// Mock InstallationsService that returns installation for "octocat/Hello-World"
-	mockService := &MockInstallationsService{
-		installations: map[string]int64{
-			"octocat/Hello-World": 99999,
-		},
-	}
-
-	handlerCalled := false
-	mockHandler := &MockEventHandler{
-		eventTypes: []string{"pull_request"},
-		handlerFunc: func(ctx context.Context, eventType, deliveryID string, payload []byte) error {
-			handlerCalled = true
-			return nil
-		},
-	}
-
-	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil)
-
-	// Create payload with NO installation ID, but with repository
-	payload := createTestPayloadRepositoryOnly("octocat", "Hello-World")
-	err := filter.Handle(ctx, "pull_request", "test-fallback-1", payload)
-
-	assert.NoError(t, err)
-	assert.True(t, handlerCalled, "Handler should be called after fallback lookup succeeds")
-
-	// Verify installation was cached
-	status, cacheHit := registry.Check(99999)
-	assert.True(t, cacheHit, "Installation should be cached after fallback lookup")
-	assert.Equal(t, InstallationExists, status)
-
-	filtered, passed := filter.GetMetrics()
-	assert.Equal(t, int64(0), filtered)
-	assert.Equal(t, int64(1), passed)
-}
-
-func TestInstallationFilterHandler_RepositoryFallback_NotFound(t *testing.T) {
-	ctx := zerolog.New(nil).WithContext(context.Background())
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
-
-	// Mock InstallationsService that returns 404 for unknown repos
-	mockService := &MockInstallationsService{
-		getByRepoFunc: func(ctx context.Context, owner, repo string) (githubapp.Installation, error) {
-			return githubapp.Installation{}, errors.New("404 Not Found: No installation found for repository")
-		},
-	}
-
-	handlerCalled := false
-	mockHandler := &MockEventHandler{
-		eventTypes: []string{"pull_request"},
-		handlerFunc: func(ctx context.Context, eventType, deliveryID string, payload []byte) error {
-			handlerCalled = true
-			return nil
-		},
-	}
-
-	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil)
-
-	// Create payload with NO installation ID, but with repository
-	payload := createTestPayloadRepositoryOnly("unknown", "unknown-repo")
-	err := filter.Handle(ctx, "pull_request", "test-fallback-2", payload)
-
-	assert.NoError(t, err)
-	assert.True(t, handlerCalled, "Handler should be called when fallback lookup fails (pass through)")
-
-	filtered, passed := filter.GetMetrics()
-	assert.Equal(t, int64(0), filtered)
-	assert.Equal(t, int64(1), passed)
-}
-
-func TestInstallationFilterHandler_RepositoryFallback_NilService(t *testing.T) {
-	ctx := zerolog.New(nil).WithContext(context.Background())
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
-
-	handlerCalled := false
-	mockHandler := &MockEventHandler{
-		eventTypes: []string{"pull_request"},
-		handlerFunc: func(ctx context.Context, eventType, deliveryID string, payload []byte) error {
-			handlerCalled = true
-			return nil
-		},
-	}
-
-	// No InstallationsService provided
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil)
-
-	// Create payload with NO installation ID, but with repository
-	payload := createTestPayloadRepositoryOnly("octocat", "Hello-World")
-	err := filter.Handle(ctx, "pull_request", "test-fallback-3", payload)
-
-	assert.NoError(t, err)
-	assert.True(t, handlerCalled, "Handler should be called when service is nil (pass through)")
-
-	filtered, passed := filter.GetMetrics()
-	assert.Equal(t, int64(0), filtered)
-	assert.Equal(t, int64(1), passed)
-}
-
-func TestInstallationFilterHandler_Layer1_ThenLayer2(t *testing.T) {
-	ctx := zerolog.New(nil).WithContext(context.Background())
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
-
-	// Mock InstallationsService
-	mockService := &MockInstallationsService{
-		installations: map[string]int64{
-			"octocat/Hello-World": 88888,
-		},
-	}
-
-	handlerCalled := 0
-	mockHandler := &MockEventHandler{
-		eventTypes: []string{"pull_request"},
-		handlerFunc: func(ctx context.Context, eventType, deliveryID string, payload []byte) error {
-			handlerCalled++
-			return nil
-		},
-	}
-
-	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil)
-
-	// Event 1: Has installation ID (Layer 1 - direct extraction)
-	// The filter extracts the ID but doesn't cache it (handler is responsible for caching)
-	payload1 := createTestPayloadWithRepository(77777, "octocat", "Hello-World")
-	err := filter.Handle(ctx, "pull_request", "test-layer1", payload1)
-	assert.NoError(t, err)
-
-	// Event 2: No installation ID, use repository (Layer 2 - fallback)
-	// This DOES cache the installation ID because repository lookup caches the result
-	payload2 := createTestPayloadRepositoryOnly("octocat", "Hello-World")
-	err = filter.Handle(ctx, "pull_request", "test-layer2", payload2)
-	assert.NoError(t, err)
-
-	assert.Equal(t, 2, handlerCalled, "Both events should reach handler")
-
-	// Verify Layer 2 installation was cached
-	status2, hit2 := registry.Check(88888)
-	assert.True(t, hit2, "Layer 2 (repository lookup) should cache the installation")
-	assert.Equal(t, InstallationExists, status2)
-
-	// Layer 1 doesn't cache (handler is responsible for that), so check will be a cache miss
-	_, hit1 := registry.Check(77777)
-	assert.False(t, hit1, "Layer 1 (direct extraction) does not cache - handler is responsible")
 }
