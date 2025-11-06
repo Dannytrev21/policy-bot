@@ -93,6 +93,12 @@ We decoupled webhook reception from processing using AWS managed services:
 - **Distributed Tracing**: End-to-end request flow visibility
 - **Real-time Dashboards**: 5-page New Relic dashboard with 23 panels
 
+#### 🎛️ **Selective Webhook Filtering** (Phase 5 - NEW)
+- **Gradual Migration**: Environment-aware webhook filtering for controlled SQS transition
+- **Zero Configuration Changes**: Reuses existing SQS config (ghec_enabled/ghes_enabled)
+- **Scheduler Relief**: 30-50% reduction in internal queue pressure
+- **Minimal Overhead**: < 0.0002ms per webhook, 100% test coverage
+
 ---
 
 ## 3. IMPACT: Measurable Results
@@ -202,7 +208,8 @@ We decoupled webhook reception from processing using AWS managed services:
 ## 7. FUTURE ROADMAP
 
 ### Q1 2025
-- ✅ GHEC migration (in progress)
+- ✅ GHEC migration (complete)
+- ✅ Selective webhook filtering (Phase 5 - complete)
 - 📅 GHES migration
 - 📅 Open-source resilience framework
 

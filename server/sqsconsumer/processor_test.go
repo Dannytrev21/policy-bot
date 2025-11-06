@@ -166,7 +166,9 @@ func TestProcessor_ParseMessage_StructuredFormat(t *testing.T) {
 	}`
 
 	message := createSQSMessage("msg-123", messageBody)
-	sqsMsg, err := processor.parseMessage("pull_request", message)
+	sqsMsg := getSQSMessageFromPool()
+	defer returnSQSMessageToPool(sqsMsg)
+	err := processor.parseMessage("pull_request", message, sqsMsg)
 
 	assert.NoError(t, err)
 	assert.Equal(t, "pull_request", sqsMsg.EventType)
@@ -188,7 +190,9 @@ func TestProcessor_ParseMessage_WebhookFormat(t *testing.T) {
 	}`
 
 	message := createSQSMessage("msg-456", messageBody)
-	sqsMsg, err := processor.parseMessage("pull_request", message)
+	sqsMsg := getSQSMessageFromPool()
+	defer returnSQSMessageToPool(sqsMsg)
+	err := processor.parseMessage("pull_request", message, sqsMsg)
 
 	assert.NoError(t, err)
 	assert.Equal(t, "pull_request", sqsMsg.EventType)
@@ -205,7 +209,9 @@ func TestProcessor_ParseMessage_RawPayload(t *testing.T) {
 	messageBody := `{"action": "opened", "number": 42}`
 
 	message := createSQSMessage("msg-789", messageBody)
-	sqsMsg, err := processor.parseMessage("status", message)
+	sqsMsg := getSQSMessageFromPool()
+	defer returnSQSMessageToPool(sqsMsg)
+	err := processor.parseMessage("status", message, sqsMsg)
 
 	assert.NoError(t, err)
 	assert.Equal(t, "status", sqsMsg.EventType)
@@ -232,7 +238,9 @@ func TestProcessor_ParseMessage_WebhookWithSeparatePayload(t *testing.T) {
 	}`
 
 	message := createSQSMessage("msg-webhook-payload", messageBody)
-	sqsMsg, err := processor.parseMessage("issues", message)
+	sqsMsg := getSQSMessageFromPool()
+	defer returnSQSMessageToPool(sqsMsg)
+	err := processor.parseMessage("issues", message, sqsMsg)
 
 	assert.NoError(t, err)
 	assert.Equal(t, "issues", sqsMsg.EventType)
@@ -249,7 +257,9 @@ func TestProcessor_ParseMessage_MalformedJSON(t *testing.T) {
 	messageBody := `{invalid json here`
 
 	message := createSQSMessage("msg-bad", messageBody)
-	sqsMsg, err := processor.parseMessage("pull_request", message)
+	sqsMsg := getSQSMessageFromPool()
+	defer returnSQSMessageToPool(sqsMsg)
+	err := processor.parseMessage("pull_request", message, sqsMsg)
 
 	// Should still succeed - treats as raw payload
 	assert.NoError(t, err)
@@ -265,7 +275,9 @@ func TestProcessor_ParseMessage_EmptyBody(t *testing.T) {
 	messageBody := ``
 
 	message := createSQSMessage("msg-empty", messageBody)
-	sqsMsg, err := processor.parseMessage("issue_comment", message)
+	sqsMsg := getSQSMessageFromPool()
+	defer returnSQSMessageToPool(sqsMsg)
+	err := processor.parseMessage("issue_comment", message, sqsMsg)
 
 	assert.NoError(t, err)
 	assert.Equal(t, "issue_comment", sqsMsg.EventType)
@@ -282,7 +294,9 @@ func TestProcessor_ParseMessage_NilPayload(t *testing.T) {
 	}`
 
 	message := createSQSMessage("msg-nil", messageBody)
-	sqsMsg, err := processor.parseMessage("pull_request", message)
+	sqsMsg := getSQSMessageFromPool()
+	defer returnSQSMessageToPool(sqsMsg)
+	err := processor.parseMessage("pull_request", message, sqsMsg)
 
 	assert.NoError(t, err)
 	assert.NotNil(t, sqsMsg.Payload)
@@ -362,7 +376,7 @@ func TestProcessor_HandleRetry_Success(t *testing.T) {
 	mockSQS.On("DeleteMessage", mock.Anything, mock.Anything).
 		Return(&sqs.DeleteMessageOutput{}, nil)
 
-	err := processor.handleRetry(context.Background(), queueURL, message, sqsMsg, zerolog.Nop())
+	err := processor.handleRetry(context.Background(), queueURL, message, &sqsMsg, zerolog.Nop())
 
 	assert.NoError(t, err)
 	mockSQS.AssertExpectations(t)
@@ -403,7 +417,7 @@ func TestProcessor_HandleRetry_SendFails(t *testing.T) {
 	mockSQS.On("SendMessage", mock.Anything, mock.Anything).
 		Return(&sqs.SendMessageOutput{}, assert.AnError)
 
-	err := processor.handleRetry(context.Background(), queueURL, message, sqsMsg, zerolog.Nop())
+	err := processor.handleRetry(context.Background(), queueURL, message, &sqsMsg, zerolog.Nop())
 
 	assert.Error(t, err)
 	mockSQS.AssertExpectations(t)
@@ -440,7 +454,7 @@ func TestProcessor_ProcessViaScheduler_Success(t *testing.T) {
 
 	err := processor.processViaScheduler(
 		context.Background(),
-		sqsMsg,
+		&sqsMsg,
 		mockHandler,
 		mockScheduler,
 		sqsMsg.Payload,
@@ -481,7 +495,7 @@ func TestProcessor_ProcessViaScheduler_Failure(t *testing.T) {
 
 	err := processor.processViaScheduler(
 		context.Background(),
-		sqsMsg,
+		&sqsMsg,
 		mockHandler,
 		mockScheduler,
 		sqsMsg.Payload,

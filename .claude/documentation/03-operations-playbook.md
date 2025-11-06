@@ -118,6 +118,250 @@ for pct in 75 50 25 10 0; do
 done
 ```
 
+### 1.4 Selective Webhook Filtering Configuration (Phase 5)
+
+**Purpose**: Gradually disable high-volume webhook events for GHEC during transition to full event-driven architecture, reducing scheduler queue pressure while maintaining SQS event processing.
+
+#### Configuration Management
+
+**Enable Filtering for Status Events (GHEC Only)**:
+```yaml
+# config/production.yml
+sqs:
+  enabled: true
+  queues:
+    status:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123/status"
+      ghec_enabled: false  # ← Disables status webhooks for GHEC
+      ghes_enabled: true   # ← GHES webhooks continue to work
+```
+
+**Expand Filtering to Additional Events**:
+```yaml
+sqs:
+  enabled: true
+  queues:
+    status:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123/status"
+      ghec_enabled: false
+      ghes_enabled: true
+
+    check_suite:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123/check-suite"
+      ghec_enabled: false  # ← Disable check_suite webhooks for GHEC
+      ghes_enabled: true
+
+    check_run:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123/check-run"
+      ghec_enabled: false  # ← Disable check_run webhooks for GHEC
+      ghes_enabled: true
+```
+
+#### Rollout Process
+
+**Phase A: Status Events Only**
+1. Update config to disable status webhooks for GHEC
+2. Deploy config change (no code changes needed)
+3. Monitor metrics for 24-48 hours:
+   ```bash
+   # Check skipped webhook metrics
+   curl https://policy-bot.company.com/api/metrics | grep webhook.events.skipped
+
+   # Expected output:
+   # github.webhook.events.skipped.status.cloud: 1500-2000/hour
+   # github.webhook.events.passed.status.enterprise: 50-100/hour
+   ```
+4. Verify scheduler queue depth reduced by 20-30%
+
+**Phase B: Expand to Check Events**
+1. Add check_suite and check_run to filtered events
+2. Deploy config change
+3. Monitor metrics for 48 hours
+4. Verify scheduler queue depth reduced by 40-50%
+
+**Phase C: All High-Volume Events**
+1. Identify remaining high-volume events from metrics
+2. Add to filtered events list
+3. Monitor until only critical webhook events remain
+
+#### Monitoring & Validation
+
+**Key Metrics to Monitor**:
+```bash
+# Skipped webhook events (should increase)
+github.webhook.events.skipped
+github.webhook.events.skipped.status.cloud
+
+# Passed webhook events (should decrease for GHEC)
+github.webhook.events.passed
+github.webhook.events.passed.status.cloud
+
+# SQS processing (should remain stable)
+sqs.messages.processed
+sqs.processing.latency.p95
+
+# Scheduler queue depth (should decrease)
+github.event.queue.depth
+```
+
+**Health Checks**:
+1. **Webhook Response Time**: Should remain < 50ms for skipped events
+2. **SQS Processing**: Should show no change in throughput or latency
+3. **GHES Webhooks**: Should continue processing normally
+4. **Event Loss**: Should remain at zero
+
+**New Relic Queries**:
+```sql
+-- Webhook filtering effectiveness
+SELECT rate(count(*), 1 minute)
+FROM Metric
+WHERE metricName LIKE 'github.webhook.events.%'
+FACET metricName
+TIMESERIES
+
+-- Scheduler queue relief
+SELECT average(github.event.queue.depth)
+FROM Metric
+WHERE appName = 'policy-bot'
+TIMESERIES AUTO
+
+-- SQS stability validation
+SELECT percentile(sqs.processing.latency, 95, 99)
+FROM Metric
+TIMESERIES AUTO
+```
+
+#### Rollback Procedure
+
+**Immediate Rollback** (restore all webhook processing):
+```yaml
+# Set all events to enabled for both environments
+sqs:
+  queues:
+    status:
+      ghec_enabled: true  # ← Re-enable status webhooks
+      ghes_enabled: true
+
+    check_suite:
+      ghec_enabled: true  # ← Re-enable check_suite webhooks
+      ghes_enabled: true
+```
+
+Deploy config and verify within 5 minutes:
+```bash
+# Verify webhooks are being processed
+curl https://policy-bot.company.com/api/metrics | grep webhook.events.passed
+
+# Should show increase in passed events
+```
+
+**Partial Rollback** (re-enable specific events):
+```yaml
+# Re-enable only status events, keep others filtered
+sqs:
+  queues:
+    status:
+      ghec_enabled: true  # ← Re-enabled
+      ghes_enabled: true
+
+    check_suite:
+      ghec_enabled: false # ← Still filtered
+      ghes_enabled: true
+```
+
+#### Troubleshooting
+
+**Issue**: Webhooks not being filtered despite config changes
+```bash
+# Check if SQS is enabled in config
+grep "sqs:" config/production.yml
+
+# Verify middleware is active
+curl https://policy-bot.company.com/api/health | jq '.middleware.event_filter'
+
+# Check logs for filter decisions
+kubectl logs -f deployment/policy-bot | grep "webhook event skipped"
+```
+
+**Issue**: GHES webhooks accidentally filtered
+```bash
+# Verify environment detection is working
+kubectl logs -f deployment/policy-bot | grep "environment detected"
+
+# Should show "enterprise" for GHES webhooks
+# If showing "cloud", check X-GitHub-Enterprise-Host header routing
+```
+
+**Issue**: Metrics not recording skipped events
+```bash
+# Verify metrics registry is configured
+curl https://policy-bot.company.com/api/metrics | grep webhook.events
+
+# Check for metric registration errors in logs
+kubectl logs deployment/policy-bot | grep "metric registration"
+```
+
+#### Best Practices
+
+1. **Gradual Rollout**: Start with one event type, monitor for 48 hours before expanding
+2. **Monitor GHES Impact**: Ensure GHES webhooks are never filtered
+3. **SQS Validation**: Verify SQS processing remains stable throughout rollout
+4. **Preserve Critical Events**: Never filter critical events like pull_request, installation
+5. **Metrics First**: Confirm metrics are flowing before relying on them for decisions
+6. **Rollback Plan**: Test rollback procedure in staging before production rollout
+
+#### Configuration Examples
+
+**Conservative (Status Only)**:
+```yaml
+sqs:
+  queues:
+    status:
+      ghec_enabled: false
+      ghes_enabled: true
+    # All other events implicitly enabled
+```
+
+**Aggressive (Multiple Events)**:
+```yaml
+sqs:
+  queues:
+    status:
+      ghec_enabled: false
+      ghes_enabled: true
+    check_suite:
+      ghec_enabled: false
+      ghes_enabled: true
+    check_run:
+      ghec_enabled: false
+      ghes_enabled: true
+    workflow_run:
+      ghec_enabled: false
+      ghes_enabled: true
+```
+
+**Full SQS Migration (Disable All Webhooks)**:
+```yaml
+sqs:
+  queues:
+    # Only keep critical events as webhooks
+    pull_request:
+      ghec_enabled: true   # Keep as webhook
+      ghes_enabled: true
+    installation:
+      ghec_enabled: true   # Keep as webhook
+      ghes_enabled: true
+
+    # Route everything else through SQS only
+    status:
+      ghec_enabled: false  # SQS only
+      ghes_enabled: true
+    check_suite:
+      ghec_enabled: false  # SQS only
+      ghes_enabled: true
+    # ... etc
+```
+
 ---
 
 ## 2. OBSERVABILITY STACK

@@ -112,7 +112,7 @@ func TestProcessor_DetectSourceFromHeaders(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := processor.detectSourceFromHeaders(tt.message)
+			result := processor.detectSourceFromHeaders(&tt.message)
 			assert.Equal(t, tt.expectedSource, result, tt.description)
 		})
 	}
@@ -191,7 +191,9 @@ func TestProcessor_ParseMessage_WithHeaders(t *testing.T) {
 				MessageId: aws.String("test-message-id"),
 			}
 
-			result, err := processor.parseMessage(tt.eventType, message)
+			result := getSQSMessageFromPool()
+			defer returnSQSMessageToPool(result)
+			err := processor.parseMessage(tt.eventType, message, result)
 
 			assert.NoError(t, err)
 			assert.Equal(t, tt.eventType, result.EventType)
@@ -261,7 +263,9 @@ func TestProcessor_RealGitHubWebhookFormat(t *testing.T) {
 	}
 
 	// Parse the message
-	sqsMsg, err := processor.parseMessage("pull_request", message)
+	sqsMsg := getSQSMessageFromPool()
+	defer returnSQSMessageToPool(sqsMsg)
+	err := processor.parseMessage("pull_request", message, sqsMsg)
 	assert.NoError(t, err)
 
 	// Verify headers were extracted

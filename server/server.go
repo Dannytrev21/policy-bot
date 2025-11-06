@@ -292,11 +292,14 @@ func New(c *Config) (*Server, error) {
 			// Wrap with filter for early rejection of non-installed repo events
 			// Pass InstallationsService for repository-based fallback lookup
 			// Pass metrics registry for OTEL export
+			// Pass shared mapping caches from Base for cache lifecycle management
 			enterpriseHandlers = append(enterpriseHandlers, handler.NewInstallationFilterHandler(
 				h,
 				enterpriseBasePolicyHandler.InstallationRegistry,
 				enterpriseBasePolicyHandler.Installations,
 				base.Registry(),
+				enterpriseBasePolicyHandler.RepoMappingCache,
+				enterpriseBasePolicyHandler.OrgMappingCache,
 			))
 		}
 	}
@@ -310,11 +313,14 @@ func New(c *Config) (*Server, error) {
 			// Wrap with filter for early rejection of non-installed repo events
 			// Pass InstallationsService for repository-based fallback lookup
 			// Pass metrics registry for OTEL export
+			// Pass shared mapping caches from Base for cache lifecycle management
 			cloudHandlers = append(cloudHandlers, handler.NewInstallationFilterHandler(
 				h,
 				cloudBasePolicyHandler.InstallationRegistry,
 				cloudBasePolicyHandler.Installations,
 				base.Registry(),
+				cloudBasePolicyHandler.RepoMappingCache,
+				cloudBasePolicyHandler.OrgMappingCache,
 			))
 		}
 	}
@@ -441,8 +447,24 @@ func New(c *Config) (*Server, error) {
 	// - X-GitHub-Enterprise-Host header -> enterprise dispatcher
 	// - x-dcp-destination-host header -> cloud dispatcher
 	// - No header -> defaults to cloud dispatcher
-	mux.Handle(pat.Post(githubapp.DefaultWebhookRoute),
-		middleware.SelectWebhookDispatcher(enterpriseDispatcher, cloudDispatcher))
+	// Wrapped with event filtering middleware for selective event routing (Phase 5)
+	webhookHandler := middleware.SelectWebhookDispatcher(enterpriseDispatcher, cloudDispatcher)
+
+	// Apply event filtering middleware if SQS is enabled
+	// This enables selective webhook filtering for GHEC while maintaining SQS event processing
+	if c.SQS.Enabled {
+		// Use cloud config for environment detection (most webhooks are from cloud)
+		// Enterprise webhooks will be correctly detected by the X-GitHub-Enterprise-Host header
+		cloudFilterConfig := middleware.EventFilterConfig{
+			SQSConfig:       &c.SQS,
+			GithubConfig:    &c.GithubCloud.Config,
+			MetricsRegistry: base.Registry(),
+			Logger:          logger,
+		}
+		webhookHandler = middleware.FilterWebhookEvents(cloudFilterConfig)(webhookHandler)
+	}
+
+	mux.Handle(pat.Post(githubapp.DefaultWebhookRoute), webhookHandler)
 
 	enterpriseSimulateHandler := &handler.Simulate{
 		Base: enterpriseBasePolicyHandler,

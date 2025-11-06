@@ -53,9 +53,11 @@ type Base struct {
 	AutorRemediateConfigFetcher *ConfigFetcher
 	BaseConfig                  *baseapp.HTTPConfig
 	PullOpts                    *PullEvaluationOptions
-	InstallationIdMap           map[int64]int64 // Legacy cache, kept for backwards compatibility
+	InstallationIdMap           map[int64]int64      // Legacy cache, kept for backwards compatibility
 	InstallationRegistry        *InstallationRegistry
 	InstallationManager         *InstallationManager // Centralized manager for installation client creation
+	RepoMappingCache            *MappingCache        // Phase 3: Repository → Installation ID mapping cache
+	OrgMappingCache             *MappingCache        // Phase 3: Organization → Installation ID mapping cache
 	MetricsRegistry             gometrics.Registry   // Registry for recording metrics
 	GithubCloud                 bool
 	mu                          *sync.RWMutex
@@ -94,6 +96,15 @@ func (base *Base) Initialize() {
 			base.InstallationRegistry,
 			base.MetricsRegistry,
 		)
+	}
+
+	// Initialize mapping caches for Phase 3 cache lifecycle management
+	// These caches map repository/organization keys to installation IDs
+	if base.RepoMappingCache == nil {
+		base.RepoMappingCache = NewMappingCache(1*time.Hour, 5*time.Minute)
+	}
+	if base.OrgMappingCache == nil {
+		base.OrgMappingCache = NewMappingCache(1*time.Hour, 5*time.Minute)
 	}
 
 }
@@ -277,4 +288,126 @@ func (b *Base) Evaluate(ctx context.Context, installationID int64, trigger commo
 		return errors.Wrap(err, "failed to create evaluation context")
 	}
 	return evalCtx.Evaluate(ctx, trigger)
+}
+
+// InvalidateInstallationCaches removes all cache entries associated with an installation.
+// This should be called when the GitHub App is uninstalled.
+func (b *Base) InvalidateInstallationCaches(installationID int64, owner string, repos []string) {
+	logger := zerolog.Logger{}
+
+	// Remove organization mapping if provided
+	if owner != "" && b.OrgMappingCache != nil {
+		orgKey := "org:" + owner
+		b.OrgMappingCache.Remove(orgKey)
+		logger.Debug().
+			Str("org_key", orgKey).
+			Int64("installation_id", installationID).
+			Msg("Removed organization mapping from cache")
+	}
+
+	// Remove repository mappings if provided
+	if b.RepoMappingCache != nil {
+		for _, repo := range repos {
+			if owner != "" && repo != "" {
+				repoKey := owner + "/" + repo
+				b.RepoMappingCache.Remove(repoKey)
+				logger.Debug().
+					Str("repo_key", repoKey).
+					Int64("installation_id", installationID).
+					Msg("Removed repository mapping from cache")
+			}
+		}
+	}
+
+	logger.Info().
+		Int64("installation_id", installationID).
+		Str("owner", owner).
+		Int("repos_count", len(repos)).
+		Msg("Invalidated installation caches")
+}
+
+// PopulateInstallationCaches adds cache entries when an installation is created or repositories are added.
+func (b *Base) PopulateInstallationCaches(installationID int64, owner string, repos []string) {
+	logger := zerolog.Logger{}
+
+	// Add organization mapping if provided
+	if owner != "" && b.OrgMappingCache != nil {
+		orgKey := "org:" + owner
+		b.OrgMappingCache.Set(orgKey, installationID)
+		logger.Debug().
+			Str("org_key", orgKey).
+			Int64("installation_id", installationID).
+			Msg("Populated organization mapping in cache")
+	}
+
+	// Add repository mappings if provided
+	if b.RepoMappingCache != nil {
+		for _, repo := range repos {
+			if owner != "" && repo != "" {
+				repoKey := owner + "/" + repo
+				b.RepoMappingCache.Set(repoKey, installationID)
+				logger.Debug().
+					Str("repo_key", repoKey).
+					Int64("installation_id", installationID).
+					Msg("Populated repository mapping in cache")
+			}
+		}
+	}
+
+	// Also mark the installation as existing in the registry
+	if b.InstallationRegistry != nil {
+		b.InstallationRegistry.MarkInstalled(installationID)
+	}
+
+	logger.Info().
+		Int64("installation_id", installationID).
+		Str("owner", owner).
+		Int("repos_count", len(repos)).
+		Msg("Populated installation caches")
+}
+
+// RemoveRepositoriesFromCache removes specific repositories from the cache.
+func (b *Base) RemoveRepositoriesFromCache(owner string, repos []string) {
+	logger := zerolog.Logger{}
+
+	if b.RepoMappingCache != nil {
+		for _, repo := range repos {
+			if owner != "" && repo != "" {
+				repoKey := owner + "/" + repo
+				b.RepoMappingCache.Remove(repoKey)
+				logger.Debug().
+					Str("repo_key", repoKey).
+					Msg("Removed repository from cache")
+			}
+		}
+	}
+
+	logger.Info().
+		Str("owner", owner).
+		Int("repos_count", len(repos)).
+		Msg("Removed repositories from cache")
+}
+
+// AddRepositoriesToCache adds specific repositories to the cache.
+func (b *Base) AddRepositoriesToCache(installationID int64, owner string, repos []string) {
+	logger := zerolog.Logger{}
+
+	if b.RepoMappingCache != nil {
+		for _, repo := range repos {
+			if owner != "" && repo != "" {
+				repoKey := owner + "/" + repo
+				b.RepoMappingCache.Set(repoKey, installationID)
+				logger.Debug().
+					Str("repo_key", repoKey).
+					Int64("installation_id", installationID).
+					Msg("Added repository to cache")
+			}
+		}
+	}
+
+	logger.Info().
+		Str("owner", owner).
+		Int("repos_count", len(repos)).
+		Int64("installation_id", installationID).
+		Msg("Added repositories to cache")
 }

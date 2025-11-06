@@ -305,10 +305,12 @@ func NewWithEnvironment(
 
 	// Create processor
 	processorConfig := &ProcessorConfig{
-		EnableRetry:       cfg.EnableRetry,
-		MaxRetries:        cfg.MaxRetries,
-		VisibilityTimeout: cfg.VisibilityTimeout,
-		ProcessingMode:    cfg.ProcessingMode,
+		EnableRetry:          cfg.EnableRetry,
+		MaxRetries:           cfg.MaxRetries,
+		VisibilityTimeout:    cfg.VisibilityTimeout,
+		ProcessingMode:       cfg.ProcessingMode,
+		EnableCircuitBreaker: true, // Enable circuit breaker for production resilience
+		CircuitBreakerConfig: nil,  // Use default config
 	}
 
 	processor := NewProcessor(

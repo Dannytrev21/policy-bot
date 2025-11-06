@@ -115,7 +115,7 @@ func TestSelectHandler_CloudDetection(t *testing.T) {
 				Source:     tt.source,
 			}
 
-			handler, scheduler := processor.selectHandler(sqsMsg)
+			handler, scheduler := processor.selectHandler(&sqsMsg)
 
 			// Verify handler and scheduler are selected (may be nil if no handler for event type)
 			if tt.expectEnterprise {
@@ -197,7 +197,7 @@ func TestDetectSourceFromHeaders(t *testing.T) {
 				Source:  tt.source,
 			}
 
-			detectedSource := processor.detectSourceFromHeaders(sqsMsg)
+			detectedSource := processor.detectSourceFromHeaders(&sqsMsg)
 			assert.Equal(t, tt.expectedSource, detectedSource)
 		})
 	}
@@ -838,7 +838,7 @@ func TestProcessViaDirect_WorkerPoolError(t *testing.T) {
 
 	err := processor.processViaDirect(
 		context.Background(),
-		sqsMessage,
+		&sqsMessage,
 		cloudHandler,
 		[]byte(`{}`),
 		zerolog.Nop(),
@@ -909,7 +909,9 @@ func TestParseMessage(t *testing.T) {
 				MessageId: &messageID,
 			}
 
-			sqsMsg, err := processor.parseMessage("status", message)
+			sqsMsg := getSQSMessageFromPool()
+			defer returnSQSMessageToPool(sqsMsg)
+			err := processor.parseMessage("status", message, sqsMsg)
 
 			if tt.expectError {
 				assert.Error(t, err)

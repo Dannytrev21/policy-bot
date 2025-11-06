@@ -16,6 +16,7 @@ package handler
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gometrics "github.com/rcrowley/go-metrics"
@@ -52,6 +53,9 @@ type installationCacheEntry struct {
 // InstallationRegistry manages a cache of installation verification results
 // to reduce API calls to GitHub. It caches both positive (installed) and
 // negative (not installed) results with different TTLs.
+//
+// Thread Safety: Uses RWMutex for cache access and atomic operations for counters
+// to minimize lock contention under high load (200 events/sec target).
 type InstallationRegistry struct {
 	mu sync.RWMutex
 
@@ -64,10 +68,10 @@ type InstallationRegistry struct {
 	// TTL for negative results (app is not installed)
 	negativeTTL time.Duration
 
-	// Metrics (local counters for backwards compatibility)
-	cacheHits   int64
-	cacheMisses int64
-	apiCalls    int64
+	// Metrics - using atomics to avoid lock contention on counter updates
+	cacheHits   atomic.Int64
+	cacheMisses atomic.Int64
+	apiCalls    atomic.Int64
 
 	// Metrics registry for OTEL export
 	metricsRegistry gometrics.Registry
@@ -99,16 +103,18 @@ func NewInstallationRegistry(positiveTTL, negativeTTL time.Duration, metricsRegi
 
 // Check returns the cached status of an installation.
 // Returns (status, cacheHit) where cacheHit is true if result came from cache.
+//
+// Performance: Uses atomic operations for counter updates to avoid lock contention.
+// Only takes write lock when modifying cache entries (expired cleanup).
 func (r *InstallationRegistry) Check(installationID int64) (InstallationStatus, bool) {
 	r.mu.RLock()
 	entry, exists := r.cache[installationID]
 	r.mu.RUnlock()
 
 	if !exists {
-		r.mu.Lock()
-		r.cacheMisses++
+		// Use atomic increment to avoid lock contention
+		r.cacheMisses.Add(1)
 		r.recordCacheMiss()
-		r.mu.Unlock()
 		return InstallationUnknown, false
 	}
 
@@ -117,18 +123,18 @@ func (r *InstallationRegistry) Check(installationID int64) (InstallationStatus, 
 		// Entry expired, remove it
 		r.mu.Lock()
 		delete(r.cache, installationID)
-		r.cacheMisses++
-		r.recordCacheMiss()
 		r.updateCacheGauges()
 		r.mu.Unlock()
+
+		// Record miss with atomic operation (no lock needed)
+		r.cacheMisses.Add(1)
+		r.recordCacheMiss()
 		return InstallationUnknown, false
 	}
 
-	// Valid cache hit
-	r.mu.Lock()
-	r.cacheHits++
+	// Valid cache hit - use atomic increment
+	r.cacheHits.Add(1)
 	r.recordCacheHit()
-	r.mu.Unlock()
 	return entry.status, true
 }
 
@@ -169,11 +175,10 @@ func (r *InstallationRegistry) Remove(installationID int64) {
 }
 
 // RecordAPICall increments the API call counter
+// Performance: Uses atomic operation - no lock needed
 func (r *InstallationRegistry) RecordAPICall() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.apiCalls++
+	// Use atomic increment - no lock contention
+	r.apiCalls.Add(1)
 
 	// Record in go-metrics registry if available
 	if r.metricsRegistry != nil {
@@ -186,11 +191,10 @@ func (r *InstallationRegistry) RecordAPICall() {
 }
 
 // GetMetrics returns current cache metrics
+// Performance: Uses atomic loads - no lock needed
 func (r *InstallationRegistry) GetMetrics() (cacheHits, cacheMisses, apiCalls int64) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	return r.cacheHits, r.cacheMisses, r.apiCalls
+	// Use atomic loads - no lock needed
+	return r.cacheHits.Load(), r.cacheMisses.Load(), r.apiCalls.Load()
 }
 
 // GetCacheSize returns the current number of entries in the cache
@@ -211,7 +215,7 @@ func (r *InstallationRegistry) Clear() {
 }
 
 // recordCacheHit increments the cache hit counter in the metrics registry
-// NOTE: This method assumes the mutex is already held by the caller
+// Thread-safe: Can be called without holding the mutex (uses go-metrics internal thread safety)
 func (r *InstallationRegistry) recordCacheHit() {
 	if r.metricsRegistry != nil {
 		if counter := r.metricsRegistry.Get(MetricsKeyRegistryCacheHits); counter != nil {
@@ -223,7 +227,7 @@ func (r *InstallationRegistry) recordCacheHit() {
 }
 
 // recordCacheMiss increments the cache miss counter in the metrics registry
-// NOTE: This method assumes the mutex is already held by the caller
+// Thread-safe: Can be called without holding the mutex (uses go-metrics internal thread safety)
 func (r *InstallationRegistry) recordCacheMiss() {
 	if r.metricsRegistry != nil {
 		if counter := r.metricsRegistry.Get(MetricsKeyRegistryCacheMisses); counter != nil {
