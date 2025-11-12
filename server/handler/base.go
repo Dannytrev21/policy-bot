@@ -17,6 +17,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -53,20 +54,26 @@ type Base struct {
 	AutorRemediateConfigFetcher *ConfigFetcher
 	BaseConfig                  *baseapp.HTTPConfig
 	PullOpts                    *PullEvaluationOptions
-	InstallationIdMap           map[int64]int64      // Legacy cache, kept for backwards compatibility
+	InstallationIdMap           map[int64]int64 // Legacy cache, kept for backwards compatibility
 	InstallationRegistry        *InstallationRegistry
 	InstallationManager         *InstallationManager // Centralized manager for installation client creation
+	InstallationLocator         *InstallationLocator // Installation locator shared by filters and caches
 	RepoMappingCache            *MappingCache        // Phase 3: Repository → Installation ID mapping cache
 	OrgMappingCache             *MappingCache        // Phase 3: Organization → Installation ID mapping cache
 	MetricsRegistry             gometrics.Registry   // Registry for recording metrics
 	GithubCloud                 bool
 	mu                          *sync.RWMutex
+	Logger                      zerolog.Logger
 
 	AppName              string
 	DefaultFetchedConfig *FetchedConfig
 }
 
 func (base *Base) Initialize() {
+
+	if reflect.ValueOf(base.Logger).IsZero() {
+		base.Logger = zerolog.Nop()
+	}
 
 	if base.InstallationIdMap == nil {
 		base.InstallationIdMap = make(map[int64]int64)
@@ -105,6 +112,17 @@ func (base *Base) Initialize() {
 	}
 	if base.OrgMappingCache == nil {
 		base.OrgMappingCache = NewMappingCache(1*time.Hour, 5*time.Minute)
+	}
+
+	// Initialize installation locator for cache-aware lookups shared by HTTP + SQS paths
+	if base.InstallationLocator == nil && base.InstallationRegistry != nil && base.ClientCreator != nil {
+		base.InstallationLocator = NewInstallationLocator(
+			base.InstallationRegistry,
+			base.Logger.With().Str("component", "installation_locator").Logger(),
+			func(ctx context.Context) (*github.Client, error) {
+				return base.ClientCreator.NewAppClient()
+			},
+		)
 	}
 
 }

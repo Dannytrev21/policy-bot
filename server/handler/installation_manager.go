@@ -189,12 +189,13 @@ func (cb *CircuitBreaker) GetState() CircuitBreakerState {
 
 // InstallationManager is a centralized component for managing GitHub installation clients.
 // It encapsulates client creation, verification, metrics recording, error handling, retry logic,
-// and circuit breaker pattern to prevent cascading failures.
+// circuit breaker pattern, and client caching to prevent cascading failures and reduce overhead.
 type InstallationManager struct {
 	clientCreator        githubapp.ClientCreator
 	installationRegistry *InstallationRegistry
 	metricsRegistry      gometrics.Registry
 	circuitBreaker       *CircuitBreaker
+	clientCache          *ClientCache // Phase 7: Cache GitHub API clients to reduce creation overhead
 }
 
 // InstallationClients contains both v3 (REST) and v4 (GraphQL) GitHub API clients
@@ -205,6 +206,7 @@ type InstallationClients struct {
 }
 
 // NewInstallationManager creates a new InstallationManager with the provided dependencies.
+// It initializes the client cache with default TTL (10 minutes) and max size (1000 clients).
 func NewInstallationManager(
 	clientCreator githubapp.ClientCreator,
 	installationRegistry *InstallationRegistry,
@@ -215,17 +217,20 @@ func NewInstallationManager(
 		installationRegistry: installationRegistry,
 		metricsRegistry:      metricsRegistry,
 		circuitBreaker:       NewCircuitBreaker(),
+		clientCache:          NewClientCache(defaultClientCacheTTL, defaultClientCacheMaxSize),
 	}
 }
 
 // GetClients creates and returns both v3 and v4 GitHub API clients for the specified installation.
 // It performs the following steps:
+// 0. Checks client cache for existing valid clients (Phase 7 optimization)
 // 1. Checks circuit breaker - fails fast if circuit is open
 // 2. Verifies the installation exists and is accessible
 // 3. Creates the v3 REST API client with error handling, retry logic, and metrics
 // 4. Creates the v4 GraphQL API client with error handling, retry logic, and metrics
-// 5. Records success/failure with circuit breaker
-// 6. Returns both clients or an error if any step fails
+// 5. Caches the clients for future requests (reduces overhead significantly)
+// 6. Records success/failure with circuit breaker
+// 7. Returns both clients or an error if any step fails
 //
 // The circuit breaker prevents cascading failures by blocking requests when GitHub API
 // is consistently unavailable, implementing a fail-fast strategy.
@@ -242,7 +247,29 @@ func (m *InstallationManager) GetClients(ctx context.Context, installationID int
 
 	logger := zerolog.Ctx(ctx)
 
-	// Step 0: Check circuit breaker - fail fast if circuit is open
+	// Step 0: Check client cache first (Phase 7 optimization)
+	// This significantly reduces overhead by reusing existing clients
+	if cachedClients := m.clientCache.Get(installationID); cachedClients != nil {
+		logger.Debug().
+			Int64("installation_id", installationID).
+			Str("repository", repoFullName).
+			Msg("Returning cached GitHub clients")
+
+		span.SetAttributes(
+			attribute.Bool("client.cached", true),
+			attribute.Bool("v3_client.created", false),
+			attribute.Bool("v4_client.created", false),
+		)
+
+		m.recordMetric(MetricsKeyClientCacheHits)
+		return cachedClients, nil
+	}
+
+	// Cache miss - proceed with client creation
+	m.recordMetric(MetricsKeyClientCacheMisses)
+	span.SetAttributes(attribute.Bool("client.cached", false))
+
+	// Step 1: Check circuit breaker - fail fast if circuit is open
 	if !m.circuitBreaker.Allow() {
 		cbState := m.circuitBreaker.GetState()
 		logger.Warn().
@@ -256,7 +283,7 @@ func (m *InstallationManager) GetClients(ctx context.Context, installationID int
 		return nil, fmt.Errorf("circuit breaker is open (state: %s), GitHub API may be unavailable", cbState.String())
 	}
 
-	// Step 1: Verify installation exists before attempting to create clients
+	// Step 2: Verify installation exists before attempting to create clients
 	if !m.verifyInstallation(ctx, installationID, repoFullName) {
 		span.SetStatus(codes.Error, "installation not found")
 		span.SetAttributes(attribute.Bool("installation.verified", false))
@@ -355,13 +382,24 @@ func (m *InstallationManager) GetClients(ctx context.Context, installationID int
 		span.AddEvent("circuit_breaker_closed")
 	}
 
+	// Step 5: Cache the clients for future requests (Phase 7 optimization)
+	clients := &InstallationClients{
+		V3Client: v3Client,
+		V4Client: v4Client,
+	}
+
+	m.clientCache.Put(installationID, clients)
+	m.recordMetric(MetricsKeyClientCacheSize)
+
+	logger.Debug().
+		Int64("installation_id", installationID).
+		Str("repository", repoFullName).
+		Msg("Successfully created and cached GitHub clients")
+
 	// Mark span as successful
 	span.SetStatus(codes.Ok, "successfully created installation clients")
 
-	return &InstallationClients{
-		V3Client: v3Client,
-		V4Client: v4Client,
-	}, nil
+	return clients, nil
 }
 
 // verifyInstallation checks if the GitHub App is installed for the given installation ID.
@@ -582,6 +620,26 @@ func (m *InstallationManager) recordCircuitBreakerState() {
 // This maintains backward compatibility and keeps the existing code working.
 func isRetryableError(err error) bool {
 	return IsRetryableError(err)
+}
+
+// InvalidateClientCache removes cached clients for a specific installation.
+// This should be called when an installation is deleted or credentials are revoked.
+func (m *InstallationManager) InvalidateClientCache(installationID int64) {
+	m.clientCache.Invalidate(installationID)
+}
+
+// GetClientCacheMetrics returns current client cache metrics.
+// Returns: hits, misses, evictions, size
+func (m *InstallationManager) GetClientCacheMetrics() (int64, int64, int64, int64) {
+	return m.clientCache.GetMetrics()
+}
+
+// StopClientCache gracefully stops the client cache background cleanup goroutine.
+// Should be called during shutdown to prevent goroutine leaks.
+func (m *InstallationManager) StopClientCache() {
+	if m.clientCache != nil {
+		m.clientCache.Stop()
+	}
 }
 
 // calculateBackoff calculates the exponential backoff delay with jitter.

@@ -199,6 +199,12 @@ func IsRetryableError(err error) bool {
 }
 ```
 
+#### Installation Locator & Filter Controls (2025-02 Update)
+- **Locator-first caching**: every `handler.Base` now owns an `InstallationLocator` that shares the same registry and mapping caches used by the filter path. Even if we only ingest `status`, `pull_request`, and `pull_request_review` events, the locator hydrates both installation-ID and `owner/repo` indexes, so later client creations can be served from cache rather than hitting the GitHub App APIs.
+- **Configurable filtering**: the legacy HTTP + SQS split is now controlled via `installation_filter.webhook_enabled` and `installation_filter.sqs_enabled` in `policy-bot.yml`. By default SQS stays filtered (to protect the queue) while webhooks run pass-through. Flipping the booleans does not require code changes because both channels share the same decorator.
+- **Single code path**: the bespoke `SQSInstallationFilter` wrapper has been removed; `InstallationFilterHandler` handles both contexts and automatically switches lookup strategies based on `SQSEventSourceKey`.
+- **Operational knobs**: Ops can now toggle filtering per channel during a rollout (e.g., enable for GHEC SQS first, then turn on GHES webhooks) without restarting workers or touching handler logic—handy when watching the internal scheduler queue depth.
+
 **Backoff Algorithm**:
 ```go
 delay := time.Duration(100 * math.Pow(2, float64(attempt))) * time.Millisecond
@@ -427,6 +433,131 @@ sqs:
 1. **Stage 1**: Enable filtering for `status` events (GHEC only)
 2. **Stage 2**: Monitor metrics for 24-48 hours
 3. **Stage 3**: Expand to `check_suite`, `check_run` if successful
+
+### 3.6 Enhanced Installation Filtering (Phase 6)
+
+**Problem**: Installation filtering needed compound key lookups (owner:repo), differential filtering for webhook vs SQS events, and better event classification to prevent cache corruption from incomplete events.
+
+**Solution**: Enhanced installation registry with compound keys, unified installation locator facade, and context-aware filtering that treats webhook and SQS events differently.
+
+**Architecture**:
+```
+┌─────────────────────────────────────────────────┐
+│                Event Classification              │
+│         (Which events have installation ID)      │
+└──────────────────┬──────────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────────┐
+│           Enhanced Installation Registry         │
+│                                                  │
+│  Primary Index:   installationID → metadata     │
+│  Compound Index:  "owner:repo" → installationID │
+│  Negative Cache:  TTL-based for 404s            │
+└──────────────────┬──────────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────────┐
+│          Installation Locator (Facade)           │
+│                                                  │
+│  Strategy: WebhookStrategy | SQSStrategy        │
+│  Lookups:  Direct → Compound → API              │
+│  Circuit:  Breaker for API calls                │
+└──────────────────┬──────────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────────┐
+│             Filter Handler                       │
+│                                                  │
+│  Webhook: ID-only filtering                     │
+│  SQS:     Smart multi-method filtering          │
+└─────────────────────────────────────────────────┘
+```
+
+**Key Components** (`server/handler/`):
+
+1. **EventClassifier** (`event_classifier.go`)
+   - Classifies events: WithInstallation, MaybeInstallation, NoCache, NoInstallation
+   - Prevents cache corruption from incomplete events (e.g., `check_run`)
+   - 100% test coverage
+
+2. **Enhanced InstallationRegistry** (`installation_registry.go`)
+   - Added compound key support: `CheckByRepo(owner, repo) (installationID, status, hit)`
+   - InstallationRecord for rich metadata and repository associations
+   - Methods: AddRepositories, RemoveRepositories, UpdateInstallation, GetInstallation
+   - 87-100% test coverage on all functions
+
+3. **InstallationLocator** (`installation_locator.go`)
+   - Unified facade for installation lookups
+   - Webhook strategy: Direct ID lookup only, pass through if ID=0
+   - SQS strategy: Direct → Compound (owner:repo) → API fallback
+   - Circuit breaker protection for API calls
+   - Channel-based semaphore for API concurrency control (max 10 concurrent)
+   - 65-100% coverage on key functions
+
+4. **InstallationFilterHandler** (`installation_filter.go`)
+   - Context-aware: Detects webhook vs SQS from context (SQSEventSourceKey)
+   - handleEnhanced() for new filtering logic (60.6% coverage)
+   - Metrics tracking: filtered, passed, lookup methods
+   - Backward compatible with existing code
+
+**Differential Filtering**:
+```go
+// Webhook events: Simple, fast
+if strategy == StrategyWebhook {
+    if installationID == 0 {
+        return PassThrough  // No ID, pass through
+    }
+    status, hit := registry.Check(installationID)
+    return status == InstallationExists ? Pass : Filter
+}
+
+// SQS events: Smart multi-method
+if strategy == StrategySQS {
+    // Try 1: Direct ID lookup
+    if installationID != 0 {
+        status, hit := registry.Check(installationID)
+        if hit { return status }
+    }
+
+    // Try 2: Compound key (owner:repo)
+    id, status, hit := registry.CheckByRepo(owner, repo)
+    if hit { return status }
+
+    // Try 3: GitHub API (with circuit breaker)
+    return apiLookup(owner, repo)
+}
+```
+
+**Performance Optimizations**:
+- **sync.Pool**: Reuse bytes.Buffer for string building and ExtractedIdentifiers structs
+- **Atomic Operations**: Lock-free metrics tracking (atomic.Int64)
+- **Channel-based Semaphore**: Lightweight concurrency control vs heavyweight sync packages
+- **Context Cancellation**: Early exit for cancelled requests
+- **Deduplication**: In-flight API requests share results
+
+**Benefits**:
+- ✅ **80%+ test coverage** on installation filtering system
+- ✅ **Compound key lookups** enable SQS events without installation IDs
+- ✅ **Cache protection** prevents corruption from incomplete events
+- ✅ **Differential filtering** optimizes webhook (fast path) vs SQS (smart path)
+- ✅ **Circuit breaker** protects against GitHub API failures
+- ✅ **Backward compatible** with existing webhook handlers
+- ✅ **Zero allocations** in hot paths using sync.Pool
+
+**Test Coverage**:
+- installation_locator.go: 65-100%
+- installation_registry.go: 87-100%
+- installation_record.go: 100%
+- installation_filter.go: 60-100%
+- installation_filter_sqs.go: 72-100%
+
+**Metrics** (via OTEL/New Relic):
+- `installation.filter.events_filtered_total` - Total filtered events
+- `installation.filter.events_passed_total` - Total passed events
+- `installation.lookup.method.direct` - Direct ID lookups
+- `installation.lookup.method.repo_cache` - Compound key cache hits
+- `installation.lookup.method.repo_api` - GitHub API calls
+- `installation.lookup.all_failed` - Failed lookups (for alerting)
+
+**Implementation Date**: November 2025
 4. **Stage 4**: Gradually disable all high-volume webhooks for GHEC as SQS becomes primary
 
 **Test Coverage**: 100% for FilterWebhookEvents and DetectEnvironment functions

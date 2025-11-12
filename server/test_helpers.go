@@ -156,6 +156,7 @@ func NewWithTestHandlers(c *Config, testHandlers []githubapp.EventHandler) (*Ser
 			BaseConfig:      &c.Server,
 			Installations:   githubapp.NewInstallationsService(appClient),
 			MetricsRegistry: base.Registry(),
+			Logger:          logger.With().Str("environment", "test").Str("channel", "webhook").Logger(),
 			PullOpts:        &c.CloudOptions,
 			ConfigFetcher: &handler.ConfigFetcher{
 				Loader: appconfig.NewLoader(
@@ -165,6 +166,7 @@ func NewWithTestHandlers(c *Config, testHandlers []githubapp.EventHandler) (*Ser
 			},
 			AppName: app.GetSlug(),
 		}
+		basePolicyHandler.Initialize()
 
 		handlers = []githubapp.EventHandler{
 			&handler.Installation{Base: basePolicyHandler},

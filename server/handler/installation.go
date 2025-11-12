@@ -42,6 +42,7 @@ func (h *Installation) Handle(ctx context.Context, eventType, deliveryID string,
 	var installationID int64
 	var repositories []*github.Repository
 	var owner string
+	var locatorPayload interface{}
 
 	switch eventType {
 	case "installation":
@@ -56,6 +57,7 @@ func (h *Installation) Handle(ctx context.Context, eventType, deliveryID string,
 		if event.Installation != nil && event.Installation.Account != nil {
 			owner = event.Installation.Account.GetLogin()
 		}
+		locatorPayload = &event
 
 	case "installation_repositories":
 		var event github.InstallationRepositoriesEvent
@@ -75,9 +77,15 @@ func (h *Installation) Handle(ctx context.Context, eventType, deliveryID string,
 		} else if action == "removed" {
 			repositories = event.RepositoriesRemoved
 		}
+		locatorPayload = &event
 	}
 
 	logger := zerolog.Ctx(ctx)
+
+	// Keep the installation locator registry in sync whenever we do receive lifecycle events
+	if h.InstallationLocator != nil && locatorPayload != nil {
+		h.InstallationLocator.UpdateFromEvent(ctx, eventType, locatorPayload)
+	}
 
 	// Extract repository names for cache operations
 	repoNames := make([]string, 0, len(repositories))

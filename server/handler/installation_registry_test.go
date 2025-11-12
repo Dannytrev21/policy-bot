@@ -15,6 +15,8 @@
 package handler
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -515,4 +517,235 @@ func TestInstallationRegistry_GoMetrics_ExpiredEntriesUpdateGauges(t *testing.T)
 	// Gauges should reflect the removal
 	assert.Equal(t, int64(0), cacheSizeGauge.Value())
 	assert.Equal(t, int64(0), positiveGauge.Value())
+}
+
+func TestInstallationRegistry_UpdateInstallation(t *testing.T) {
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+
+	t.Run("update existing installation with new repos", func(t *testing.T) {
+		// Create initial installation with repos
+		registry.MarkInstalled(12345)
+		registry.AddRepositories(12345, []struct{ Owner, Repo string }{
+			{Owner: "owner1", Repo: "repo1"},
+			{Owner: "owner1", Repo: "repo2"},
+		})
+
+		// Update with new information
+		record := &InstallationRecord{
+			InstallationID: 12345,
+			Status:         InstallationExists,
+			ExpiresAt:      time.Now().Add(1 * time.Hour),
+			LastUpdated:    time.Now(),
+			Repositories: map[string]bool{
+				"owner1:repo3": true,
+				"owner1:repo4": true,
+			},
+		}
+
+		registry.UpdateInstallation(record)
+
+		// Check that installation exists
+		status, hit := registry.Check(12345)
+		assert.True(t, hit)
+		assert.Equal(t, InstallationExists, status)
+
+		// Check new repos are added
+		id, status, hit := registry.CheckByRepo("owner1", "repo3")
+		assert.True(t, hit)
+		assert.Equal(t, InstallationExists, status)
+		assert.Equal(t, int64(12345), id)
+	})
+
+	t.Run("update non-existent installation", func(t *testing.T) {
+		record := &InstallationRecord{
+			InstallationID: 99999,
+			Status:         InstallationExists,
+			ExpiresAt:      time.Now().Add(1 * time.Hour),
+			LastUpdated:    time.Now(),
+			Repositories: map[string]bool{
+				"newowner:newrepo": true,
+			},
+		}
+
+		registry.UpdateInstallation(record)
+
+		// Should be created
+		status, hit := registry.Check(99999)
+		assert.True(t, hit)
+		assert.Equal(t, InstallationExists, status)
+
+		// Check repo is associated
+		id, status, hit := registry.CheckByRepo("newowner", "newrepo")
+		assert.True(t, hit)
+		assert.Equal(t, int64(99999), id)
+	})
+}
+
+func TestInstallationRegistry_RemoveRepositories(t *testing.T) {
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+
+	t.Run("remove repos from installation", func(t *testing.T) {
+		// Setup installation with multiple repos
+		registry.MarkInstalled(12345)
+		registry.AddRepositories(12345, []struct{ Owner, Repo string }{
+			{Owner: "owner1", Repo: "repo1"},
+			{Owner: "owner1", Repo: "repo2"},
+			{Owner: "owner1", Repo: "repo3"},
+		})
+
+		// Remove some repos
+		registry.RemoveRepositories(12345, []struct{ Owner, Repo string }{
+			{Owner: "owner1", Repo: "repo2"},
+			{Owner: "owner1", Repo: "repo3"},
+		})
+
+		// repo1 should still be associated
+		id, status, hit := registry.CheckByRepo("owner1", "repo1")
+		assert.True(t, hit)
+		assert.Equal(t, int64(12345), id)
+		assert.Equal(t, InstallationExists, status)
+
+		// repo2 and repo3 should not be associated
+		_, _, hit = registry.CheckByRepo("owner1", "repo2")
+		assert.False(t, hit)
+
+		_, _, hit = registry.CheckByRepo("owner1", "repo3")
+		assert.False(t, hit)
+
+		// Installation itself should still exist
+		status, hit = registry.Check(12345)
+		assert.True(t, hit)
+		assert.Equal(t, InstallationExists, status)
+	})
+
+	t.Run("remove repos from non-existent installation", func(t *testing.T) {
+		// Should not panic
+		registry.RemoveRepositories(99999, []struct{ Owner, Repo string }{
+			{Owner: "owner", Repo: "repo"},
+		})
+
+		// Should not create the installation
+		status, hit := registry.Check(99999)
+		assert.False(t, hit)
+		assert.Equal(t, InstallationUnknown, status)
+	})
+}
+
+func TestInstallationRegistry_GetInstallation(t *testing.T) {
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+
+	t.Run("get existing installation with repos", func(t *testing.T) {
+		// Setup installation
+		registry.MarkInstalled(12345)
+		registry.AddRepositories(12345, []struct{ Owner, Repo string }{
+			{Owner: "owner1", Repo: "repo1"},
+			{Owner: "owner1", Repo: "repo2"},
+		})
+
+		// Get the installation
+		record, exists := registry.GetInstallation(12345)
+		assert.True(t, exists)
+		assert.NotNil(t, record)
+		assert.Equal(t, int64(12345), record.InstallationID)
+		assert.Equal(t, InstallationExists, record.Status)
+		assert.True(t, record.HasRepository("owner1", "repo1"))
+		assert.True(t, record.HasRepository("owner1", "repo2"))
+		assert.Equal(t, 2, record.GetRepositoryCount())
+	})
+
+	t.Run("get non-existent installation", func(t *testing.T) {
+		record, exists := registry.GetInstallation(99999)
+		assert.False(t, exists)
+		assert.Nil(t, record)
+	})
+
+	t.Run("get installation marked as not found via legacy cache", func(t *testing.T) {
+		// MarkNotInstalled uses the legacy cache, not the installations map
+		// So GetInstallation won't find it
+		registry.MarkNotInstalled(54321)
+
+		record, exists := registry.GetInstallation(54321)
+		assert.False(t, exists)
+		assert.Nil(t, record)
+
+		// But the legacy Check method will find it
+		status, hit := registry.Check(54321)
+		assert.True(t, hit)
+		assert.Equal(t, InstallationNotFound, status)
+	})
+}
+
+func TestInstallationRegistry_CompoundKeyConcurrency(t *testing.T) {
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+
+	// Concurrent additions and lookups
+	var wg sync.WaitGroup
+	iterations := 100
+
+	// Add repos concurrently
+	for i := 0; i < iterations; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			installID := int64(12345 + (idx % 10))
+			registry.MarkInstalled(installID)
+			registry.AddRepositories(installID, []struct{ Owner, Repo string }{
+				{Owner: "owner", Repo: fmt.Sprintf("repo%d", idx)},
+			})
+		}(i)
+	}
+
+	// Lookup concurrently
+	for i := 0; i < iterations; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, _, _ = registry.CheckByRepo("owner", fmt.Sprintf("repo%d", idx))
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Verify some entries exist
+	id, status, hit := registry.CheckByRepo("owner", "repo0")
+	assert.True(t, hit)
+	assert.Equal(t, InstallationExists, status)
+	assert.GreaterOrEqual(t, id, int64(12345))
+}
+
+func TestInstallationRegistry_CheckByRepoEdgeCases(t *testing.T) {
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+
+	t.Run("lookup with empty owner", func(t *testing.T) {
+		_, _, hit := registry.CheckByRepo("", "repo")
+		assert.False(t, hit)
+	})
+
+	t.Run("lookup with empty repo", func(t *testing.T) {
+		_, _, hit := registry.CheckByRepo("owner", "")
+		assert.False(t, hit)
+	})
+
+	t.Run("lookup with both empty", func(t *testing.T) {
+		_, _, hit := registry.CheckByRepo("", "")
+		assert.False(t, hit)
+	})
+
+	t.Run("lookup after installation deleted but repo mapping remains", func(t *testing.T) {
+		registry.MarkInstalled(12345)
+		registry.AddRepositories(12345, []struct{ Owner, Repo string }{
+			{Owner: "owner", Repo: "repo"},
+		})
+
+		// Delete the installation
+		registry.Remove(12345)
+
+		// Compound key should return not found
+		_, status, hit := registry.CheckByRepo("owner", "repo")
+		// The mapping might still exist but installation is gone
+		if hit {
+			// If mapping exists, status should indicate installation doesn't exist
+			assert.NotEqual(t, InstallationExists, status)
+		}
+	})
 }

@@ -122,6 +122,14 @@ done
 
 **Purpose**: Gradually disable high-volume webhook events for GHEC during transition to full event-driven architecture, reducing scheduler queue pressure while maintaining SQS event processing.
 
+**Channel Switches (NEW)**: The new `installation_filter` block controls whether the installation-aware filter wraps HTTP and/or SQS handlers. Default: webhooks disabled, SQS enabled.
+
+```yaml
+installation_filter:
+  webhook_enabled: false  # Turn on when you want HTTP ingress filtered
+  sqs_enabled: true       # Leave enabled to protect the SQS worker pools
+```
+
 #### Configuration Management
 
 **Enable Filtering for Status Events (GHEC Only)**:

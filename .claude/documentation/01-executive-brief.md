@@ -95,7 +95,7 @@ We decoupled webhook reception from processing using AWS managed services:
 
 #### 🎛️ **Selective Webhook Filtering** (Phase 5 - NEW)
 - **Gradual Migration**: Environment-aware webhook filtering for controlled SQS transition
-- **Zero Configuration Changes**: Reuses existing SQS config (ghec_enabled/ghes_enabled)
+- **Single Config Switch**: `installation_filter.webhook_enabled` / `installation_filter.sqs_enabled` manage each ingress path
 - **Scheduler Relief**: 30-50% reduction in internal queue pressure
 - **Minimal Overhead**: < 0.0002ms per webhook, 100% test coverage
 

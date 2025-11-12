@@ -15,6 +15,7 @@
 package handler
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,6 +46,7 @@ const (
 )
 
 // installationCacheEntry represents a cached installation status with expiration
+// Deprecated: Use InstallationRecord for new code
 type installationCacheEntry struct {
 	status    InstallationStatus
 	expiresAt time.Time
@@ -54,12 +56,21 @@ type installationCacheEntry struct {
 // to reduce API calls to GitHub. It caches both positive (installed) and
 // negative (not installed) results with different TTLs.
 //
+// Enhanced with compound key support for owner:repo lookups in addition to
+// installation ID lookups.
+//
 // Thread Safety: Uses RWMutex for cache access and atomic operations for counters
 // to minimize lock contention under high load (200 events/sec target).
 type InstallationRegistry struct {
 	mu sync.RWMutex
 
-	// cache maps installation ID to its cached status
+	// installations maps installation ID to enhanced installation records
+	installations map[int64]*InstallationRecord
+
+	// repoIndex maps "owner:repo" to installation ID for quick lookups
+	repoIndex map[string]int64
+
+	// cache maps installation ID to its cached status (legacy compatibility)
 	cache map[int64]installationCacheEntry
 
 	// TTL for positive results (app is installed)
@@ -82,6 +93,8 @@ type InstallationRegistry struct {
 // for metrics export via OTEL.
 func NewInstallationRegistry(positiveTTL, negativeTTL time.Duration, metricsRegistry gometrics.Registry) *InstallationRegistry {
 	r := &InstallationRegistry{
+		installations:   make(map[int64]*InstallationRecord),
+		repoIndex:       make(map[string]int64),
 		cache:           make(map[int64]installationCacheEntry),
 		positiveTTL:     positiveTTL,
 		negativeTTL:     negativeTTL,
@@ -210,6 +223,8 @@ func (r *InstallationRegistry) Clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.installations = make(map[int64]*InstallationRecord)
+	r.repoIndex = make(map[string]int64)
 	r.cache = make(map[int64]installationCacheEntry)
 	r.updateCacheGauges()
 }
@@ -276,4 +291,129 @@ func (r *InstallationRegistry) updateCacheGauges() {
 			g.Update(negativeCount)
 		}
 	}
+}
+
+// === Enhanced Methods for Compound Key Support ===
+
+// CheckByRepo looks up an installation by owner:repo compound key
+// Returns (installationID, status, cacheHit)
+func (r *InstallationRegistry) CheckByRepo(owner, repo string) (int64, InstallationStatus, bool) {
+	key := fmt.Sprintf("%s:%s", owner, repo)
+
+	r.mu.RLock()
+	installationID, exists := r.repoIndex[key]
+	r.mu.RUnlock()
+
+	if !exists {
+		r.cacheMisses.Add(1)
+		r.recordCacheMiss()
+		return 0, InstallationUnknown, false
+	}
+
+	// Now check the installation itself
+	status, hit := r.Check(installationID)
+	if !hit {
+		// Installation expired or not found, clean up repo index
+		r.mu.Lock()
+		delete(r.repoIndex, key)
+		r.mu.Unlock()
+		return 0, InstallationUnknown, false
+	}
+
+	return installationID, status, true
+}
+
+// UpdateInstallation updates or creates an enhanced installation record
+func (r *InstallationRegistry) UpdateInstallation(record *InstallationRecord) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Update the installations map
+	r.installations[record.InstallationID] = record
+
+	// Update the legacy cache for compatibility
+	r.cache[record.InstallationID] = installationCacheEntry{
+		status:    record.Status,
+		expiresAt: record.ExpiresAt,
+	}
+
+	// Rebuild repo index for this installation
+	if record.Repositories != nil {
+		for repoKey := range record.Repositories {
+			r.repoIndex[repoKey] = record.InstallationID
+		}
+	}
+
+	r.updateCacheGauges()
+}
+
+// AddRepositories adds repositories to an existing installation
+func (r *InstallationRegistry) AddRepositories(installationID int64, repos []struct{ Owner, Repo string }) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	record, exists := r.installations[installationID]
+	if !exists {
+		// Create a new record if it doesn't exist
+		record = &InstallationRecord{
+			InstallationID: installationID,
+			Status:         InstallationExists,
+			ExpiresAt:      time.Now().Add(r.positiveTTL),
+			Repositories:   make(map[string]bool),
+			LastUpdated:    time.Now(),
+		}
+		r.installations[installationID] = record
+	}
+
+	// Add repositories to the record and update index
+	for _, repo := range repos {
+		key := fmt.Sprintf("%s:%s", repo.Owner, repo.Repo)
+		record.Repositories[key] = true
+		r.repoIndex[key] = installationID
+	}
+
+	record.LastUpdated = time.Now()
+
+	// Update legacy cache
+	r.cache[installationID] = installationCacheEntry{
+		status:    InstallationExists,
+		expiresAt: record.ExpiresAt,
+	}
+}
+
+// RemoveRepositories removes repositories from an installation
+func (r *InstallationRegistry) RemoveRepositories(installationID int64, repos []struct{ Owner, Repo string }) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	record, exists := r.installations[installationID]
+	if !exists {
+		return
+	}
+
+	// Remove repositories from the record and index
+	for _, repo := range repos {
+		key := fmt.Sprintf("%s:%s", repo.Owner, repo.Repo)
+		delete(record.Repositories, key)
+		delete(r.repoIndex, key)
+	}
+
+	record.LastUpdated = time.Now()
+}
+
+// GetInstallation returns the full installation record if it exists and is not expired
+func (r *InstallationRegistry) GetInstallation(installationID int64) (*InstallationRecord, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	record, exists := r.installations[installationID]
+	if !exists {
+		return nil, false
+	}
+
+	if record.IsExpired() {
+		return nil, false
+	}
+
+	return record, true
 }

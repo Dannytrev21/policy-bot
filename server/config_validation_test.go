@@ -788,3 +788,209 @@ func TestSQSConfig_Validate_Enhanced(t *testing.T) {
 		})
 	}
 }
+
+// TestRateLimitConfig_Defaults tests default values for rate limit configuration
+func TestRateLimitConfig_Defaults(t *testing.T) {
+	t.Run("default_values_set_correctly", func(t *testing.T) {
+		config := RateLimitConfig{}
+		config.SetDefaults()
+
+		assert.Equal(t, 3.0, config.InstallationRate, "Default installation rate should be 3.0 req/sec")
+		assert.Equal(t, 10, config.InstallationBurst, "Default installation burst should be 10")
+		assert.Equal(t, 100.0, config.GlobalRate, "Default global rate should be 100.0 req/sec")
+		assert.Equal(t, 50, config.GlobalBurst, "Default global burst should be 50")
+	})
+
+	t.Run("does_not_override_set_values", func(t *testing.T) {
+		config := RateLimitConfig{
+			InstallationRate:  5.0,
+			InstallationBurst: 20,
+			GlobalRate:        200.0,
+			GlobalBurst:       100,
+		}
+		config.SetDefaults()
+
+		assert.Equal(t, 5.0, config.InstallationRate, "Should not override set installation rate")
+		assert.Equal(t, 20, config.InstallationBurst, "Should not override set installation burst")
+		assert.Equal(t, 200.0, config.GlobalRate, "Should not override set global rate")
+		assert.Equal(t, 100, config.GlobalBurst, "Should not override set global burst")
+	})
+
+	t.Run("sets_only_unset_values", func(t *testing.T) {
+		config := RateLimitConfig{
+			InstallationRate: 5.0,
+			// InstallationBurst not set (0)
+			GlobalRate: 200.0,
+			// GlobalBurst not set (0)
+		}
+		config.SetDefaults()
+
+		assert.Equal(t, 5.0, config.InstallationRate, "Should keep custom installation rate")
+		assert.Equal(t, 10, config.InstallationBurst, "Should set default installation burst")
+		assert.Equal(t, 200.0, config.GlobalRate, "Should keep custom global rate")
+		assert.Equal(t, 50, config.GlobalBurst, "Should set default global burst")
+	})
+}
+
+// TestConfig_ParseRateLimitConfig tests parsing rate limit configuration from YAML
+func TestConfig_ParseRateLimitConfig(t *testing.T) {
+	tests := []struct {
+		name      string
+		yaml      string
+		expectErr bool
+		validate  func(t *testing.T, config *Config)
+	}{
+		{
+			name: "basic_rate_limit_config",
+			yaml: `
+server:
+  address: "0.0.0.0"
+  port: 8080
+
+rate_limit:
+  enabled: true
+  installation_rate: 3.0
+  installation_burst: 10
+  global_rate: 100.0
+  global_burst: 50
+`,
+			expectErr: false,
+			validate: func(t *testing.T, config *Config) {
+				assert.True(t, config.RateLimit.Enabled)
+				assert.Equal(t, 3.0, config.RateLimit.InstallationRate)
+				assert.Equal(t, 10, config.RateLimit.InstallationBurst)
+				assert.Equal(t, 100.0, config.RateLimit.GlobalRate)
+				assert.Equal(t, 50, config.RateLimit.GlobalBurst)
+			},
+		},
+		{
+			name: "rate_limit_disabled",
+			yaml: `
+server:
+  address: "0.0.0.0"
+  port: 8080
+
+rate_limit:
+  enabled: false
+`,
+			expectErr: false,
+			validate: func(t *testing.T, config *Config) {
+				assert.False(t, config.RateLimit.Enabled)
+				// Defaults should still be set
+				assert.Equal(t, 3.0, config.RateLimit.InstallationRate)
+				assert.Equal(t, 10, config.RateLimit.InstallationBurst)
+			},
+		},
+		{
+			name: "rate_limit_custom_values",
+			yaml: `
+server:
+  address: "0.0.0.0"
+  port: 8080
+
+rate_limit:
+  enabled: true
+  installation_rate: 5.0
+  installation_burst: 20
+  global_rate: 200.0
+  global_burst: 100
+`,
+			expectErr: false,
+			validate: func(t *testing.T, config *Config) {
+				assert.True(t, config.RateLimit.Enabled)
+				assert.Equal(t, 5.0, config.RateLimit.InstallationRate)
+				assert.Equal(t, 20, config.RateLimit.InstallationBurst)
+				assert.Equal(t, 200.0, config.RateLimit.GlobalRate)
+				assert.Equal(t, 100, config.RateLimit.GlobalBurst)
+			},
+		},
+		{
+			name: "rate_limit_partial_config",
+			yaml: `
+server:
+  address: "0.0.0.0"
+  port: 8080
+
+rate_limit:
+  enabled: true
+  installation_rate: 4.0
+  # Other values should use defaults
+`,
+			expectErr: false,
+			validate: func(t *testing.T, config *Config) {
+				assert.True(t, config.RateLimit.Enabled)
+				assert.Equal(t, 4.0, config.RateLimit.InstallationRate)
+				assert.Equal(t, 10, config.RateLimit.InstallationBurst) // default
+				assert.Equal(t, 100.0, config.RateLimit.GlobalRate)     // default
+				assert.Equal(t, 50, config.RateLimit.GlobalBurst)       // default
+			},
+		},
+		{
+			name: "rate_limit_not_specified",
+			yaml: `
+server:
+  address: "0.0.0.0"
+  port: 8080
+`,
+			expectErr: false,
+			validate: func(t *testing.T, config *Config) {
+				// Defaults should be set by ParseConfig
+				assert.Equal(t, 3.0, config.RateLimit.InstallationRate)
+				assert.Equal(t, 10, config.RateLimit.InstallationBurst)
+				assert.Equal(t, 100.0, config.RateLimit.GlobalRate)
+				assert.Equal(t, 50, config.RateLimit.GlobalBurst)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config, err := ParseConfig([]byte(tt.yaml))
+
+			if tt.expectErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, config)
+				if tt.validate != nil {
+					tt.validate(t, config)
+				}
+			}
+		})
+	}
+}
+
+// TestRateLimitConfig_IntegrationWithSQS tests that rate limiting works with SQS config
+func TestRateLimitConfig_IntegrationWithSQS(t *testing.T) {
+	yaml := `
+server:
+  address: "0.0.0.0"
+  port: 8080
+
+sqs:
+  enabled: true
+  region: "us-east-1"
+  queues:
+    pull_request:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123/pr"
+
+rate_limit:
+  enabled: true
+  installation_rate: 3.0
+  installation_burst: 10
+  global_rate: 100.0
+  global_burst: 50
+`
+
+	config, err := ParseConfig([]byte(yaml))
+	require.NoError(t, err)
+	require.NotNil(t, config)
+
+	// Verify both SQS and rate limit configs are parsed correctly
+	assert.True(t, config.SQS.Enabled, "SQS should be enabled")
+	assert.True(t, config.RateLimit.Enabled, "Rate limiting should be enabled")
+	assert.Equal(t, 3.0, config.RateLimit.InstallationRate)
+	assert.Equal(t, 10, config.RateLimit.InstallationBurst)
+	assert.Equal(t, 100.0, config.RateLimit.GlobalRate)
+	assert.Equal(t, 50, config.RateLimit.GlobalBurst)
+}

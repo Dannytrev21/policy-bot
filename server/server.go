@@ -200,6 +200,44 @@ func New(c *Config) (*Server, error) {
 		pushedAtSize = DefaultPushedAtCacheSize
 	}
 
+	// Create rate-limited client creators for SQS if enabled
+	var sqsEnterpriseClientCreator githubapp.ClientCreator = enterpriseClientCreator
+	var sqsCloudClientCreator githubapp.ClientCreator = cloudClientCreator
+
+	if c.RateLimit.Enabled {
+		// Convert server.RateLimitConfig to handler.RateLimitConfig
+		rateLimitConfig := &handler.RateLimitConfig{
+			InstallationRate:  c.RateLimit.InstallationRate,
+			InstallationBurst: c.RateLimit.InstallationBurst,
+			GlobalRate:        c.RateLimit.GlobalRate,
+			GlobalBurst:       c.RateLimit.GlobalBurst,
+			Enabled:           c.RateLimit.Enabled,
+		}
+
+		// Wrap client creators with rate limiting for SQS processing only
+		sqsEnterpriseClientCreator = handler.NewRateLimitedClientCreator(
+			enterpriseClientCreator,
+			rateLimitConfig,
+			logger.With().Str("environment", "enterprise").Logger(),
+			base.Registry(),
+		)
+
+		sqsCloudClientCreator = handler.NewRateLimitedClientCreator(
+			cloudClientCreator,
+			rateLimitConfig,
+			logger.With().Str("environment", "cloud").Logger(),
+			base.Registry(),
+		)
+
+		logger.Info().
+			Bool("enabled", c.RateLimit.Enabled).
+			Float64("installation_rate", c.RateLimit.InstallationRate).
+			Int("installation_burst", c.RateLimit.InstallationBurst).
+			Float64("global_rate", c.RateLimit.GlobalRate).
+			Int("global_burst", c.RateLimit.GlobalBurst).
+			Msg("SQS rate limiting enabled")
+	}
+
 	// policyPaths := []string{c.Options.PolicyPath}
 	// if c.Options.ForceSharedPolicy {
 	// 	policyPaths = []string{}
@@ -216,6 +254,7 @@ func New(c *Config) (*Server, error) {
 		Installations:     githubapp.NewInstallationsService(enterpriseAppClient),
 		InstallationIdMap: make(map[int64]int64),
 		MetricsRegistry:   base.Registry(),
+		Logger:            logger.With().Str("environment", "enterprise").Str("channel", "webhook").Logger(),
 
 		PullOpts: &c.EnterpriseOptions,
 		ConfigFetcher: &handler.ConfigFetcher{
@@ -233,6 +272,7 @@ func New(c *Config) (*Server, error) {
 		BaseConfig:      &c.Server,
 		Installations:   githubapp.NewInstallationsService(cloudAppClient),
 		MetricsRegistry: base.Registry(),
+		Logger:          logger.With().Str("environment", "cloud").Str("channel", "webhook").Logger(),
 
 		PullOpts: &c.CloudOptions,
 		ConfigFetcher: &handler.ConfigFetcher{
@@ -282,48 +322,109 @@ func New(c *Config) (*Server, error) {
 		&handler.WorkflowRun{Base: cloudBasePolicyHandler},
 	}
 
-	// Wrap handlers with installation filter (except Installation handler which manages the cache)
-	enterpriseHandlers := make([]githubapp.EventHandler, 0, len(rawEnterpriseHandlers))
-	for i, h := range rawEnterpriseHandlers {
-		if i == 0 {
-			// Don't filter Installation events - they manage the cache
-			enterpriseHandlers = append(enterpriseHandlers, h)
-		} else {
-			// Wrap with filter for early rejection of non-installed repo events
-			// Pass InstallationsService for repository-based fallback lookup
-			// Pass metrics registry for OTEL export
-			// Pass shared mapping caches from Base for cache lifecycle management
-			enterpriseHandlers = append(enterpriseHandlers, handler.NewInstallationFilterHandler(
-				h,
-				enterpriseBasePolicyHandler.InstallationRegistry,
-				enterpriseBasePolicyHandler.Installations,
-				base.Registry(),
-				enterpriseBasePolicyHandler.RepoMappingCache,
-				enterpriseBasePolicyHandler.OrgMappingCache,
-			))
-		}
+	registry := base.Registry()
+	isInstallationHandler := func(h githubapp.EventHandler) bool {
+		_, ok := h.(*handler.Installation)
+		return ok
 	}
 
-	cloudHandlers := make([]githubapp.EventHandler, 0, len(rawCloudHandlers))
-	for i, h := range rawCloudHandlers {
-		if i == 0 {
-			// Don't filter Installation events - they manage the cache
-			cloudHandlers = append(cloudHandlers, h)
-		} else {
-			// Wrap with filter for early rejection of non-installed repo events
-			// Pass InstallationsService for repository-based fallback lookup
-			// Pass metrics registry for OTEL export
-			// Pass shared mapping caches from Base for cache lifecycle management
-			cloudHandlers = append(cloudHandlers, handler.NewInstallationFilterHandler(
+	wrapHandlers := func(rawHandlers []githubapp.EventHandler, baseHandler *handler.Base, filterEnabled bool) []githubapp.EventHandler {
+		handlers := make([]githubapp.EventHandler, 0, len(rawHandlers))
+		for _, h := range rawHandlers {
+			if isInstallationHandler(h) {
+				handlers = append(handlers, h)
+				continue
+			}
+
+			if !filterEnabled || baseHandler.InstallationLocator == nil {
+				handlers = append(handlers, h)
+				continue
+			}
+
+			handlers = append(handlers, handler.NewInstallationFilterHandler(
 				h,
-				cloudBasePolicyHandler.InstallationRegistry,
-				cloudBasePolicyHandler.Installations,
-				base.Registry(),
-				cloudBasePolicyHandler.RepoMappingCache,
-				cloudBasePolicyHandler.OrgMappingCache,
+				baseHandler.InstallationRegistry,
+				baseHandler.Installations,
+				registry,
+				baseHandler.RepoMappingCache,
+				baseHandler.OrgMappingCache,
+				baseHandler.InstallationLocator,
 			))
 		}
+		return handlers
 	}
+
+	enterpriseHandlers := wrapHandlers(rawEnterpriseHandlers, &enterpriseBasePolicyHandler, c.InstallationFilter.WebhookEnabledValue())
+	cloudHandlers := wrapHandlers(rawCloudHandlers, &cloudBasePolicyHandler, c.InstallationFilter.WebhookEnabledValue())
+
+	// Create separate base handlers for SQS with rate-limited client creators
+	sqsEnterpriseBasePolicyHandler := handler.Base{
+		ClientCreator:     sqsEnterpriseClientCreator,
+		BaseConfig:        &c.Server,
+		Installations:     githubapp.NewInstallationsService(enterpriseAppClient),
+		InstallationIdMap: make(map[int64]int64),
+		MetricsRegistry:   base.Registry(),
+		Logger:            logger.With().Str("environment", "enterprise").Str("channel", "sqs").Logger(),
+
+		PullOpts: &c.EnterpriseOptions,
+		ConfigFetcher: &handler.ConfigFetcher{
+			Loader: appconfig.NewLoader(
+				[]string{c.EnterpriseOptions.PolicyPath},
+				appconfig.WithOwnerDefault(c.EnterpriseOptions.SharedRepository, []string{c.EnterpriseOptions.SharedPolicyPath}),
+			),
+		},
+
+		AppName: enterpriseApp.GetSlug(),
+	}
+
+	sqsCloudBasePolicyHandler := handler.Base{
+		ClientCreator:   sqsCloudClientCreator,
+		BaseConfig:      &c.Server,
+		Installations:   githubapp.NewInstallationsService(cloudAppClient),
+		MetricsRegistry: base.Registry(),
+		Logger:          logger.With().Str("environment", "cloud").Str("channel", "sqs").Logger(),
+
+		PullOpts: &c.CloudOptions,
+		ConfigFetcher: &handler.ConfigFetcher{
+			Loader: appconfig.NewLoader(
+				[]string{c.CloudOptions.PolicyPath},
+				appconfig.WithOwnerDefault(c.CloudOptions.SharedRepository, []string{c.CloudOptions.SharedPolicyPath}),
+			),
+		},
+
+		AppName: cloudApp.GetSlug(),
+	}
+
+	// Initialize SQS base handlers
+	sqsEnterpriseBasePolicyHandler.Initialize()
+	sqsCloudBasePolicyHandler.Initialize()
+
+	// Create handlers for SQS processing (with rate-limited clients)
+	sqsRawEnterpriseHandlers := []githubapp.EventHandler{
+		&handler.Installation{Base: sqsEnterpriseBasePolicyHandler},
+		&handler.MergeGroup{Base: sqsEnterpriseBasePolicyHandler},
+		&handler.PullRequest{Base: sqsEnterpriseBasePolicyHandler},
+		&handler.PullRequestReview{Base: sqsEnterpriseBasePolicyHandler},
+		&handler.IssueComment{Base: sqsEnterpriseBasePolicyHandler},
+		&handler.Status{Base: sqsEnterpriseBasePolicyHandler},
+		&handler.CheckRun{Base: sqsEnterpriseBasePolicyHandler},
+		&handler.WorkflowRun{Base: sqsEnterpriseBasePolicyHandler},
+	}
+
+	sqsRawCloudHandlers := []githubapp.EventHandler{
+		&handler.Installation{Base: sqsCloudBasePolicyHandler},
+		&handler.MergeGroup{Base: sqsCloudBasePolicyHandler},
+		&handler.PullRequest{Base: sqsCloudBasePolicyHandler},
+		&handler.PullRequestReview{Base: sqsCloudBasePolicyHandler},
+		&handler.IssueComment{Base: sqsCloudBasePolicyHandler},
+		&handler.Status{Base: sqsCloudBasePolicyHandler},
+		&handler.CheckRun{Base: sqsCloudBasePolicyHandler},
+		&handler.WorkflowRun{Base: sqsCloudBasePolicyHandler},
+	}
+
+	// Wrap SQS handlers with installation filter (same as HTTP handlers)
+	sqsEnterpriseHandlers := wrapHandlers(sqsRawEnterpriseHandlers, &sqsEnterpriseBasePolicyHandler, c.InstallationFilter.SQSEnabledValue())
+	sqsCloudHandlers := wrapHandlers(sqsRawCloudHandlers, &sqsCloudBasePolicyHandler, c.InstallationFilter.SQSEnabledValue())
 
 	// Create the scheduler that both HTTP and SQS will use
 	cloudScheduler := githubapp.QueueAsyncScheduler(
@@ -390,7 +491,8 @@ func New(c *Config) (*Server, error) {
 		},
 	}
 
-	sqsConsumer, err := sqsconsumer.New(sqsConfig, cloudHandlers, enterpriseHandlers, cloudScheduler, enterpriseScheduler, logger, base.Registry())
+	// Use SQS-specific handlers with rate-limited client creators
+	sqsConsumer, err := sqsconsumer.New(sqsConfig, sqsCloudHandlers, sqsEnterpriseHandlers, cloudScheduler, enterpriseScheduler, logger, base.Registry())
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create SQS consumer")
 	}

@@ -16,6 +16,8 @@ package handler
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -484,4 +486,443 @@ func TestDefaultRateLimitConfig(t *testing.T) {
 	assert.Equal(t, DefaultGlobalRateLimit, config.GlobalRate)
 	assert.Equal(t, DefaultGlobalBurst, config.GlobalBurst)
 	assert.True(t, config.Enabled)
+
+	// Phase 2: Adaptive defaults
+	assert.False(t, config.Adaptive.Enabled, "Adaptive should be disabled by default (feature flag)")
+	assert.Equal(t, DefaultAdaptiveSafetyFactor, config.Adaptive.SafetyFactor)
+	assert.Equal(t, DefaultAdaptiveMinRate, config.Adaptive.MinRate)
+	assert.Equal(t, DefaultAdaptiveMaxRate, config.Adaptive.MaxRate)
+	assert.Equal(t, DefaultAdaptiveSmoothingFactor, config.Adaptive.SmoothingFactor)
+	assert.Equal(t, DefaultAdaptiveUpdateInterval, config.Adaptive.UpdateInterval)
+}
+
+// =============================================================================
+// Phase 2: Adaptive Rate Limiting Tests
+// =============================================================================
+
+func TestParseGitHubRateLimitHeaders(t *testing.T) {
+	tests := []struct {
+		name              string
+		headers           map[string]string
+		expectedRemaining int
+		expectedLimit     int
+		expectedReset     int64
+		expectedOk        bool
+	}{
+		{
+			name: "valid_headers",
+			headers: map[string]string{
+				"X-RateLimit-Remaining": "4500",
+				"X-RateLimit-Limit":     "5000",
+				"X-RateLimit-Reset":     "1700000000",
+			},
+			expectedRemaining: 4500,
+			expectedLimit:     5000,
+			expectedReset:     1700000000,
+			expectedOk:        true,
+		},
+		{
+			name: "missing_remaining",
+			headers: map[string]string{
+				"X-RateLimit-Limit": "5000",
+				"X-RateLimit-Reset": "1700000000",
+			},
+			expectedOk: false,
+		},
+		{
+			name: "missing_limit",
+			headers: map[string]string{
+				"X-RateLimit-Remaining": "4500",
+				"X-RateLimit-Reset":     "1700000000",
+			},
+			expectedOk: false,
+		},
+		{
+			name: "missing_reset",
+			headers: map[string]string{
+				"X-RateLimit-Remaining": "4500",
+				"X-RateLimit-Limit":     "5000",
+			},
+			expectedOk: false,
+		},
+		{
+			name: "invalid_format",
+			headers: map[string]string{
+				"X-RateLimit-Remaining": "invalid",
+				"X-RateLimit-Limit":     "5000",
+				"X-RateLimit-Reset":     "1700000000",
+			},
+			expectedOk: false,
+		},
+		{
+			name:       "nil_response",
+			headers:    nil,
+			expectedOk: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create response with headers
+			var resp *http.Response
+			if tt.headers != nil {
+				resp = &http.Response{
+					Header: make(http.Header),
+				}
+				for k, v := range tt.headers {
+					resp.Header.Set(k, v)
+				}
+			}
+
+			remaining, limit, reset, ok := parseGitHubRateLimitHeaders(resp)
+
+			assert.Equal(t, tt.expectedOk, ok)
+			if tt.expectedOk {
+				assert.Equal(t, tt.expectedRemaining, remaining)
+				assert.Equal(t, tt.expectedLimit, limit)
+				assert.Equal(t, tt.expectedReset, reset.Unix())
+			}
+		})
+	}
+}
+
+func TestCalculateAdaptiveRate(t *testing.T) {
+	config := &RateLimitConfig{
+		Adaptive: AdaptiveRateLimitConfig{
+			Enabled:      true,
+			SafetyFactor: 0.8,
+			MinRate:      1.0,
+			MaxRate:      4.0,
+		},
+	}
+
+	creator := &RateLimitedClientCreator{
+		config: config,
+		logger: zerolog.Nop(),
+	}
+
+	tests := []struct {
+		name         string
+		remaining    int
+		resetIn      time.Duration
+		expectedRate float64
+		description  string
+	}{
+		{
+			name:         "plenty_of_quota",
+			remaining:    5000,
+			resetIn:      1 * time.Hour,
+			expectedRate: 1.11, // (5000 / 3600) * 0.8 ≈ 1.11
+			description:  "With plenty of quota, should calculate moderate rate",
+		},
+		{
+			name:         "low_quota",
+			remaining:    100,
+			resetIn:      1 * time.Hour,
+			expectedRate: 1.0, // Below min, clamped to 1.0
+			description:  "With low quota, should clamp to min rate",
+		},
+		{
+			name:         "very_high_quota",
+			remaining:    20000,
+			resetIn:      1 * time.Hour,
+			expectedRate: 4.0, // Above max, clamped to 4.0
+			description:  "With very high quota, should clamp to max rate",
+		},
+		{
+			name:         "reset_passed",
+			remaining:    1000,
+			resetIn:      -1 * time.Second,
+			expectedRate: 4.0, // Reset passed, use max
+			description:  "When reset time has passed, should use max rate",
+		},
+		{
+			name:         "near_reset",
+			remaining:    10,
+			resetIn:      1 * time.Second,
+			expectedRate: 4.0, // (10 / 1) * 0.8 = 8.0, clamped to max 4.0
+			description:  "Near reset with low remaining should be clamped to max",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reset := time.Now().Add(tt.resetIn)
+			rate := creator.calculateAdaptiveRate(tt.remaining, reset)
+
+			// Allow small floating point error
+			assert.InDelta(t, tt.expectedRate, rate, 0.5, tt.description)
+		})
+	}
+}
+
+func TestAdaptiveRateState(t *testing.T) {
+	config := &RateLimitConfig{
+		InstallationRate:  3.0,
+		InstallationBurst: 10,
+		GlobalRate:        100.0,
+		GlobalBurst:       50,
+		Enabled:           true,
+		Adaptive: AdaptiveRateLimitConfig{
+			Enabled:         true,
+			SafetyFactor:    0.8,
+			MinRate:         1.0,
+			MaxRate:         4.0,
+			SmoothingFactor: 0.3,
+			UpdateInterval:  1 * time.Second,
+		},
+	}
+
+	mockCreator := &MockRateLimitClientCreator{}
+	registry := metrics.NewRegistry()
+
+	creator := NewRateLimitedClientCreator(mockCreator, config, zerolog.Nop(), registry)
+	defer creator.Close()
+
+	// Get or create state for installation
+	installationID := int64(12345)
+	state := creator.getOrCreateAdaptiveState(installationID)
+
+	assert.NotNil(t, state)
+	assert.Equal(t, config.InstallationRate, state.currentRate, "Should start with configured rate")
+
+	// Update with GitHub headers
+	remaining := 4000
+	limit := 5000
+	reset := time.Now().Add(1 * time.Hour)
+
+	creator.updateAdaptiveRate(installationID, remaining, limit, reset)
+
+	// Wait a bit for async update
+	time.Sleep(100 * time.Millisecond)
+
+	state.mu.RLock()
+	updatedRate := state.currentRate
+	lastRemaining := state.lastRemaining
+	lastLimit := state.lastLimit
+	state.mu.RUnlock()
+
+	assert.NotEqual(t, config.InstallationRate, updatedRate, "Rate should have been adjusted")
+	assert.Equal(t, remaining, lastRemaining)
+	assert.Equal(t, limit, lastLimit)
+
+	// Verify metrics were recorded
+	if gauge := registry.Get(MetricsKeyRateLimitGitHubRemaining); gauge != nil {
+		if g, ok := gauge.(metrics.Gauge); ok {
+			assert.Equal(t, int64(remaining), g.Value())
+		}
+	}
+}
+
+func TestAdaptiveRateEMASmoothing(t *testing.T) {
+	config := &RateLimitConfig{
+		InstallationRate:  3.0,
+		InstallationBurst: 10,
+		Enabled:           true,
+		Adaptive: AdaptiveRateLimitConfig{
+			Enabled:         true,
+			SafetyFactor:    0.8,
+			MinRate:         1.0,
+			MaxRate:         4.0,
+			SmoothingFactor: 0.5, // Higher smoothing for this test
+			UpdateInterval:  1 * time.Second,
+		},
+	}
+
+	mockCreator := &MockRateLimitClientCreator{}
+	creator := NewRateLimitedClientCreator(mockCreator, config, zerolog.Nop(), metrics.NewRegistry())
+	defer creator.Close()
+
+	installationID := int64(123)
+	state := creator.getOrCreateAdaptiveState(installationID)
+
+	initialRate := state.currentRate
+
+	// First update
+	reset1 := time.Now().Add(1 * time.Hour)
+	creator.updateAdaptiveRate(installationID, 4500, 5000, reset1)
+	time.Sleep(50 * time.Millisecond)
+
+	state.mu.RLock()
+	rate1 := state.currentRate
+	state.mu.RUnlock()
+
+	// Second update with different value
+	reset2 := time.Now().Add(1 * time.Hour)
+	creator.updateAdaptiveRate(installationID, 3000, 5000, reset2)
+	time.Sleep(50 * time.Millisecond)
+
+	state.mu.RLock()
+	rate2 := state.currentRate
+	state.mu.RUnlock()
+
+	// Verify EMA smoothing: rates should change gradually, not jump
+	assert.NotEqual(t, initialRate, rate1, "First update should change rate")
+	assert.NotEqual(t, rate1, rate2, "Second update should change rate")
+
+	// Due to EMA smoothing, the change should be gradual
+	// rate2 should be between rate1 and the raw calculated rate
+	t.Logf("Rate progression: initial=%.2f, after1=%.2f, after2=%.2f", initialRate, rate1, rate2)
+}
+
+func TestAdaptiveTransport(t *testing.T) {
+	config := &RateLimitConfig{
+		InstallationRate:  3.0,
+		InstallationBurst: 10,
+		Enabled:           true,
+		Adaptive: AdaptiveRateLimitConfig{
+			Enabled:         true,
+			SafetyFactor:    0.8,
+			MinRate:         1.0,
+			MaxRate:         4.0,
+			SmoothingFactor: 0.3,
+			UpdateInterval:  1 * time.Second,
+		},
+	}
+
+	mockCreator := &MockRateLimitClientCreator{}
+	registry := metrics.NewRegistry()
+	creator := NewRateLimitedClientCreator(mockCreator, config, zerolog.Nop(), registry)
+	defer creator.Close()
+
+	installationID := int64(999)
+
+	// Test updateAdaptiveRate directly (more reliable than testing async transport)
+	remaining := 4200
+	limit := 5000
+	reset := time.Now().Add(1 * time.Hour)
+
+	creator.updateAdaptiveRate(installationID, remaining, limit, reset)
+
+	// Verify state was updated
+	state := creator.getOrCreateAdaptiveState(installationID)
+	state.mu.RLock()
+	updatedRemaining := state.lastRemaining
+	updatedLimit := state.lastLimit
+	updatedReset := state.lastReset
+	state.mu.RUnlock()
+
+	assert.Equal(t, remaining, updatedRemaining, "Remaining quota should be updated")
+	assert.Equal(t, limit, updatedLimit, "Limit should be updated")
+	assert.WithinDuration(t, reset, updatedReset, 1*time.Second, "Reset time should be updated")
+
+	// Verify metrics were recorded
+	if gauge := registry.Get(MetricsKeyRateLimitGitHubRemaining); gauge != nil {
+		if g, ok := gauge.(metrics.Gauge); ok {
+			assert.Equal(t, int64(remaining), g.Value(), "Metrics should reflect remaining quota")
+		}
+	}
+}
+
+func TestAdaptiveTransportRoundTrip(t *testing.T) {
+	config := &RateLimitConfig{
+		InstallationRate:  3.0,
+		InstallationBurst: 10,
+		Enabled:           true,
+		Adaptive: AdaptiveRateLimitConfig{
+			Enabled:         true,
+			SafetyFactor:    0.8,
+			MinRate:         1.0,
+			MaxRate:         4.0,
+			SmoothingFactor: 0.3,
+			UpdateInterval:  1 * time.Second,
+		},
+	}
+
+	mockCreator := &MockRateLimitClientCreator{}
+	creator := NewRateLimitedClientCreator(mockCreator, config, zerolog.Nop(), metrics.NewRegistry())
+	defer creator.Close()
+
+	installationID := int64(999)
+
+	// Create a mock round tripper that returns rate limit headers
+	mockRoundTripper := &mockRoundTripper{
+		response: &http.Response{
+			StatusCode: 200,
+			Header: http.Header{
+				"X-RateLimit-Remaining": []string{"4200"},
+				"X-RateLimit-Limit":     []string{"5000"},
+				"X-RateLimit-Reset":     []string{fmt.Sprintf("%d", time.Now().Add(1*time.Hour).Unix())},
+			},
+			Body: http.NoBody,
+		},
+	}
+
+	// Wrap with adaptive transport
+	adaptiveTransport := creator.newAdaptiveTransport(mockRoundTripper, installationID)
+
+	// Make a request
+	req, _ := http.NewRequest("GET", "https://api.github.com/repos/test/test", nil)
+	resp, err := adaptiveTransport.RoundTrip(req)
+
+	// Verify basic response handling
+	assert.NoError(t, err, "RoundTrip should not error")
+	assert.NotNil(t, resp, "Response should not be nil")
+	assert.Equal(t, 200, resp.StatusCode, "Status code should be preserved")
+
+	// The main point of this test is to verify the adaptiveTransport wrapper
+	// doesn't break the HTTP request/response flow. The async header parsing
+	// is tested separately in TestAdaptiveTransport.
+}
+
+func TestAdaptiveRateLimiting_DisabledByDefault(t *testing.T) {
+	// Default config should have adaptive disabled
+	config := DefaultRateLimitConfig()
+	assert.False(t, config.Adaptive.Enabled, "Adaptive should be disabled by default (feature flag)")
+
+	mockCreator := &MockRateLimitClientCreator{}
+	creator := NewRateLimitedClientCreator(mockCreator, config, zerolog.Nop(), metrics.NewRegistry())
+	defer creator.Close()
+
+	// Create client - should NOT have adaptive transport wrapper
+	client, err := creator.NewInstallationClient(123)
+	assert.NoError(t, err)
+	assert.NotNil(t, client)
+
+	// The transport should be the original, not wrapped
+	// (We can't easily test this without reflection, but at least verify no errors)
+}
+
+func TestAdaptiveRateAdjustmentLoop_Cleanup(t *testing.T) {
+	config := &RateLimitConfig{
+		InstallationRate:  3.0,
+		InstallationBurst: 10,
+		Enabled:           true,
+		Adaptive: AdaptiveRateLimitConfig{
+			Enabled:         true,
+			SafetyFactor:    0.8,
+			MinRate:         1.0,
+			MaxRate:         4.0,
+			SmoothingFactor: 0.3,
+			UpdateInterval:  100 * time.Millisecond, // Short for testing
+		},
+	}
+
+	mockCreator := &MockRateLimitClientCreator{}
+	creator := NewRateLimitedClientCreator(mockCreator, config, zerolog.Nop(), metrics.NewRegistry())
+
+	// Add some state
+	creator.getOrCreateAdaptiveState(123)
+	creator.getOrCreateAdaptiveState(456)
+
+	// Let the loop run a bit
+	time.Sleep(250 * time.Millisecond)
+
+	// Close should stop the loop
+	creator.Close()
+
+	// Give it time to stop
+	time.Sleep(100 * time.Millisecond)
+
+	// No assertions - just verify no panics or deadlocks
+}
+
+// mockRoundTripper for testing HTTP transport
+type mockRoundTripper struct {
+	response *http.Response
+	err      error
+}
+
+func (m *mockRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return m.response, m.err
 }

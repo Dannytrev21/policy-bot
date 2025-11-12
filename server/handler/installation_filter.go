@@ -58,6 +58,10 @@ type InstallationFilterHandler struct {
 	installationsService githubapp.InstallationsService
 	metrics              *InstallationFilterMetrics
 	metricsRegistry      gometrics.Registry
+
+	// Enhanced components for improved filtering
+	locator    *InstallationLocator
+	classifier *EventClassifier
 }
 
 // InstallationFilterMetrics tracks filtering statistics
@@ -79,6 +83,7 @@ func NewInstallationFilterHandler(
 	metricsRegistry gometrics.Registry,
 	repoCache *MappingCache,
 	orgCache *MappingCache,
+	locator *InstallationLocator,
 ) *InstallationFilterHandler {
 	// Use provided caches or create new ones for testing
 	if repoCache == nil {
@@ -96,6 +101,8 @@ func NewInstallationFilterHandler(
 		installationsService: installationsService,
 		metrics:              &InstallationFilterMetrics{},
 		metricsRegistry:      metricsRegistry,
+		locator:              locator,
+		classifier:           NewEventClassifier(),
 	}
 
 	// Register metrics counters if registry is provided
@@ -125,6 +132,11 @@ func (h *InstallationFilterHandler) Handles() []string {
 // Handle processes an event, filtering it first based on installation status
 func (h *InstallationFilterHandler) Handle(ctx context.Context, eventType, deliveryID string, payload []byte) error {
 	logger := zerolog.Ctx(ctx)
+
+	// Use enhanced handling if locator is available
+	if h.locator != nil && h.classifier != nil {
+		return h.handleEnhanced(ctx, eventType, deliveryID, payload)
+	}
 
 	// Extract installation ID from payload with fallback strategies
 	// Layer 1: Direct extraction from installation.id
@@ -189,6 +201,109 @@ func (h *InstallationFilterHandler) Handle(ctx context.Context, eventType, deliv
 
 	h.recordPassedEvent()
 	return h.wrapped.Handle(ctx, eventType, deliveryID, payload)
+}
+
+// handleEnhanced uses the new InstallationLocator and EventClassifier for improved filtering
+func (h *InstallationFilterHandler) handleEnhanced(ctx context.Context, eventType, deliveryID string, payload []byte) error {
+	logger := zerolog.Ctx(ctx).With().
+		Str("event_type", eventType).
+		Str("delivery_id", deliveryID).
+		Logger()
+
+	// Step 1: Classify the event
+	classification := h.classifier.Classify(eventType)
+
+	// Step 2: Check if event should bypass caching
+	if classification == EventNoCache {
+		logger.Debug().Msg("Event type bypasses caching - passing to handler")
+		h.recordPassedEvent()
+		return h.wrapped.Handle(ctx, eventType, deliveryID, payload)
+	}
+
+	// Step 3: Extract identifiers
+	ids, err := extractIdentifiers(payload)
+	if err != nil {
+		logger.Debug().Err(err).Msg("Failed to extract identifiers - passing to handler")
+		h.recordPassedEvent()
+		return h.wrapped.Handle(ctx, eventType, deliveryID, payload)
+	}
+	defer putIdentifiers(ids)
+
+	// Step 4: Determine strategy based on event source
+	strategy := StrategyWebhook
+	if eventSource, ok := ctx.Value(SQSEventSourceKey).(string); ok && eventSource == "sqs" {
+		strategy = StrategySQS
+		logger.Debug().Msg("Using SQS strategy for event processing")
+	}
+
+	// Step 5: Create lookup request
+	lookupReq := LookupRequest{
+		InstallationID: ids.InstallationID,
+		Owner:          ids.OwnerLogin,
+		Repo:           ids.RepoName,
+		Strategy:       strategy,
+		EventType:      eventType,
+	}
+
+	// Step 6: Perform lookup
+	result := h.locator.Lookup(ctx, lookupReq)
+
+	// Step 7: Handle result
+	if result.Error != nil {
+		// Check if it's a definitive "not installed" result
+		if errors.Is(result.Error, ErrInstallationNotInstalled) || result.Source == SourceAPI && !result.Exists {
+			logger.Info().
+				Int64("installation_id", result.InstallationID).
+				Str("source", getSourceName(result.Source)).
+				Msg("Event filtered - app not installed")
+
+			h.recordFilteredEvent()
+			return nil // Successfully filtered
+		}
+
+		// Other errors - pass through to handler
+		logger.Debug().
+			Err(result.Error).
+			Msg("Lookup error - passing to handler")
+		h.recordPassedEvent()
+		return h.wrapped.Handle(ctx, eventType, deliveryID, payload)
+	}
+
+	// Step 8: Check if installation exists
+	if !result.Exists {
+		logger.Info().
+			Int64("installation_id", result.InstallationID).
+			Str("source", getSourceName(result.Source)).
+			Msg("Event filtered - installation not found")
+
+		h.recordFilteredEvent()
+		return nil // Successfully filtered
+	}
+
+	// Step 9: Installation exists - pass to handler
+	logger.Debug().
+		Int64("installation_id", result.InstallationID).
+		Str("source", getSourceName(result.Source)).
+		Msg("Installation found - passing to handler")
+
+	h.recordPassedEvent()
+	return h.wrapped.Handle(ctx, eventType, deliveryID, payload)
+}
+
+// getSourceName returns a human-readable name for a lookup source
+func getSourceName(source LookupSource) string {
+	switch source {
+	case SourceCacheID:
+		return "cache_id"
+	case SourceCacheRepo:
+		return "cache_repo"
+	case SourceAPI:
+		return "api"
+	case SourceNotFound:
+		return "not_found"
+	default:
+		return "unknown"
+	}
 }
 
 // recordFilteredEvent records metrics for a filtered event

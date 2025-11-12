@@ -59,14 +59,16 @@ type Config struct {
 	// GithubCloud configuration for GitHub Enterprise Cloud
 	GithubCloud GithubAppConfig `yaml:"github_cloud"`
 
-	Sessions          SessionsConfig                `yaml:"sessions"`
-	CloudOptions      handler.PullEvaluationOptions `yaml:"cloud_options"`
-	EnterpriseOptions handler.PullEvaluationOptions `yaml:"enterprise_options"`
-	Files             handler.FilesConfig           `yaml:"files"`
-	Datadog           datadog.Config                `yaml:"datadog"`
-	Prometheus        metricsbridge.Config          `yaml:"prometheus"`
-	Workers           WorkerConfig                  `yaml:"workers"`
-	SQS               SQSConfig                     `yaml:"sqs"`
+	Sessions           SessionsConfig                `yaml:"sessions"`
+	CloudOptions       handler.PullEvaluationOptions `yaml:"cloud_options"`
+	EnterpriseOptions  handler.PullEvaluationOptions `yaml:"enterprise_options"`
+	Files              handler.FilesConfig           `yaml:"files"`
+	Datadog            datadog.Config                `yaml:"datadog"`
+	Prometheus         metricsbridge.Config          `yaml:"prometheus"`
+	Workers            WorkerConfig                  `yaml:"workers"`
+	SQS                SQSConfig                     `yaml:"sqs"`
+	RateLimit          RateLimitConfig               `yaml:"rate_limit"`
+	InstallationFilter InstallationFilterConfig      `yaml:"installation_filter"`
 }
 
 type LoggingConfig struct {
@@ -105,6 +107,28 @@ type WorkerConfig struct {
 type SessionsConfig struct {
 	Key      string `yaml:"key"`
 	Lifetime string `yaml:"lifetime"`
+}
+
+// InstallationFilterConfig controls whether installation filtering is applied to each ingress channel.
+type InstallationFilterConfig struct {
+	WebhookEnabled *bool `yaml:"webhook_enabled" json:"webhook_enabled"`
+	SQSEnabled     *bool `yaml:"sqs_enabled" json:"sqs_enabled"`
+}
+
+// WebhookEnabledValue returns the effective value (default false when unspecified).
+func (c *InstallationFilterConfig) WebhookEnabledValue() bool {
+	if c == nil || c.WebhookEnabled == nil {
+		return false
+	}
+	return *c.WebhookEnabled
+}
+
+// SQSEnabledValue returns the effective value (default true when unspecified).
+func (c *InstallationFilterConfig) SQSEnabledValue() bool {
+	if c == nil || c.SQSEnabled == nil {
+		return true
+	}
+	return *c.SQSEnabled
 }
 
 type SQSConfig struct {
@@ -206,6 +230,103 @@ type AdaptivePollingEventConfig struct {
 	Enabled     bool          `yaml:"enabled"`
 	BaseBackoff time.Duration `yaml:"base_backoff"`
 	MaxBackoff  time.Duration `yaml:"max_backoff"`
+}
+
+// RateLimitConfig configures GitHub API rate limiting for SQS event processing
+type RateLimitConfig struct {
+	// Enable rate limiting (default: true)
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// Per-installation rate limit (requests per second)
+	// Default: 3.0 req/sec (conservative for GitHub's 15k/hr = 4.16 req/sec limit)
+	InstallationRate float64 `yaml:"installation_rate" json:"installation_rate"`
+
+	// Per-installation burst allowance
+	// Default: 10 requests
+	InstallationBurst int `yaml:"installation_burst" json:"installation_burst"`
+
+	// Global rate limit across all installations (requests per second)
+	// Default: 100.0 req/sec
+	GlobalRate float64 `yaml:"global_rate" json:"global_rate"`
+
+	// Global burst allowance
+	// Default: 50 requests
+	GlobalBurst int `yaml:"global_burst" json:"global_burst"`
+
+	// Adaptive rate limiting configuration (Phase 2)
+	Adaptive AdaptiveRateLimitConfig `yaml:"adaptive" json:"adaptive"`
+}
+
+// AdaptiveRateLimitConfig configures adaptive rate limiting based on GitHub API headers
+type AdaptiveRateLimitConfig struct {
+	// Enable adaptive rate limiting (default: false for Phase 2 rollout)
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// Safety factor for rate calculation (0.0-1.0)
+	// Calculated rate = (remaining / time_until_reset) * safety_factor
+	// Default: 0.8 (use 80% of calculated safe rate for safety margin)
+	SafetyFactor float64 `yaml:"safety_factor" json:"safety_factor"`
+
+	// Minimum rate limit floor (requests per second)
+	// Never go below this rate even if GitHub headers suggest lower
+	// Default: 1.0 req/sec (safety floor)
+	MinRate float64 `yaml:"min_rate" json:"min_rate"`
+
+	// Maximum rate limit ceiling (requests per second)
+	// Never exceed this rate even if GitHub headers suggest higher
+	// Default: 4.0 req/sec (close to GitHub's 4.16 req/sec limit)
+	MaxRate float64 `yaml:"max_rate" json:"max_rate"`
+
+	// Smoothing factor for exponential moving average (0.0-1.0)
+	// Higher = more responsive to changes, Lower = more stable
+	// Default: 0.3 (balanced between stability and responsiveness)
+	SmoothingFactor float64 `yaml:"smoothing_factor" json:"smoothing_factor"`
+
+	// Update interval for rate adjustments
+	// Default: 10s (adjust every 10 seconds based on accumulated data)
+	UpdateInterval time.Duration `yaml:"update_interval" json:"update_interval"`
+}
+
+// SetDefaults sets default values for rate limit configuration
+func (c *RateLimitConfig) SetDefaults() {
+	if c.InstallationRate == 0 {
+		c.InstallationRate = 3.0
+	}
+	if c.InstallationBurst == 0 {
+		c.InstallationBurst = 10
+	}
+	if c.GlobalRate == 0 {
+		c.GlobalRate = 100.0
+	}
+	if c.GlobalBurst == 0 {
+		c.GlobalBurst = 50
+	}
+
+	// Set adaptive rate limiting defaults
+	c.Adaptive.SetDefaults()
+}
+
+// SetDefaults sets default values for adaptive rate limit configuration
+func (c *AdaptiveRateLimitConfig) SetDefaults() {
+	// Adaptive is disabled by default for Phase 2 (feature flag)
+	// Can be enabled via configuration once validated
+	// c.Enabled defaults to false
+
+	if c.SafetyFactor == 0 {
+		c.SafetyFactor = 0.8 // Use 80% of calculated safe rate
+	}
+	if c.MinRate == 0 {
+		c.MinRate = 1.0 // Never go below 1 req/sec
+	}
+	if c.MaxRate == 0 {
+		c.MaxRate = 4.0 // Never exceed 4 req/sec (close to GitHub's 4.16 limit)
+	}
+	if c.SmoothingFactor == 0 {
+		c.SmoothingFactor = 0.3 // Balanced between stability and responsiveness
+	}
+	if c.UpdateInterval == 0 {
+		c.UpdateInterval = 10 * time.Second // Adjust every 10 seconds
+	}
 }
 
 // Validate validates the SQS configuration
@@ -447,6 +568,9 @@ func ParseConfig(bytes []byte) (*Config, error) {
 	c.Logging.SetValuesFromEnv(envPrefix)
 	c.GithubEnterprise.Config.SetValuesFromEnv("GITHUB_ENTERPRISE_")
 	c.GithubCloud.Config.SetValuesFromEnv("GITHUB_CLOUD_")
+
+	// Set rate limit defaults
+	c.RateLimit.SetDefaults()
 
 	if v, ok := os.LookupEnv(envPrefix + "SESSIONS_KEY"); ok {
 		c.Sessions.Key = v

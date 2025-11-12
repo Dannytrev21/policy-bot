@@ -257,24 +257,31 @@ func TestInstallationManager_MultipleClientCreations(t *testing.T) {
 	// Mark installation as installed in registry
 	registry.MarkInstalled(installationID)
 
-	// Create clients multiple times
+	// Create clients multiple times - with caching, only first call creates new clients
 	for i := 0; i < 3; i++ {
 		clients, err := manager.GetClients(ctx, installationID, repoFullName)
 		require.NoError(t, err, "Should not return error on iteration %d", i)
 		require.NotNil(t, clients, "Clients should not be nil on iteration %d", i)
 	}
 
-	// Verify metrics were recorded 3 times
+	// Verify metrics: only 1 creation (first call), subsequent calls use cache
 	v3Success := metricsRegistry.Get(MetricsKeyInstallationClientSuccess)
 	require.NotNil(t, v3Success, "V3 success metric should be recorded")
 	if counter, ok := v3Success.(interface{ Count() int64 }); ok {
-		assert.Equal(t, int64(3), counter.Count(), "V3 success metric should be 3")
+		assert.Equal(t, int64(1), counter.Count(), "V3 success metric should be 1 (only first call creates)")
 	}
 
 	v4Success := metricsRegistry.Get(MetricsKeyInstallationV4ClientSuccess)
 	require.NotNil(t, v4Success, "V4 success metric should be recorded")
 	if counter, ok := v4Success.(interface{ Count() int64 }); ok {
-		assert.Equal(t, int64(3), counter.Count(), "V4 success metric should be 3")
+		assert.Equal(t, int64(1), counter.Count(), "V4 success metric should be 1 (only first call creates)")
+	}
+
+	// Verify cache hits were recorded
+	cacheHits := metricsRegistry.Get(MetricsKeyClientCacheHits)
+	require.NotNil(t, cacheHits, "Cache hits metric should be recorded")
+	if counter, ok := cacheHits.(interface{ Count() int64 }); ok {
+		assert.Equal(t, int64(2), counter.Count(), "Should have 2 cache hits (calls 2 and 3)")
 	}
 }
 
@@ -298,7 +305,9 @@ func TestInstallationManager_ConcurrentClientCreations(t *testing.T) {
 	// Mark installation as installed in registry
 	registry.MarkInstalled(installationID)
 
-	// Create clients concurrently
+	// Create clients concurrently - with caching, only first goroutine creates clients
+	// All others get cached clients. Race condition means we might have 1-2 creations
+	// if multiple goroutines check cache before first one finishes
 	done := make(chan bool)
 	for i := 0; i < 10; i++ {
 		go func() {
@@ -314,11 +323,24 @@ func TestInstallationManager_ConcurrentClientCreations(t *testing.T) {
 		<-done
 	}
 
-	// Verify metrics were recorded 10 times (thread-safe)
+	// Verify metrics: With caching, should have 1-2 creations (race condition)
+	// and rest should be cache hits
 	v3Success := metricsRegistry.Get(MetricsKeyInstallationClientSuccess)
 	require.NotNil(t, v3Success, "V3 success metric should be recorded")
 	if counter, ok := v3Success.(interface{ Count() int64 }); ok {
-		assert.Equal(t, int64(10), counter.Count(), "V3 success metric should be 10")
+		creationCount := counter.Count()
+		assert.GreaterOrEqual(t, creationCount, int64(1), "Should have at least 1 creation")
+		assert.LessOrEqual(t, creationCount, int64(2), "Should have at most 2 creations (race condition)")
+	}
+
+	// Total of creations + cache hits should equal 10
+	cacheHits := metricsRegistry.Get(MetricsKeyClientCacheHits)
+	if cacheHits != nil {
+		if counter, ok := cacheHits.(interface{ Count() int64 }); ok {
+			v3Counter, _ := v3Success.(interface{ Count() int64 })
+			total := v3Counter.Count() + counter.Count()
+			assert.GreaterOrEqual(t, total, int64(10), "Total of creations + cache hits should be at least 10")
+		}
 	}
 }
 

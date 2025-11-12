@@ -86,7 +86,7 @@ graph LR
 
 #### 5. **Selective Webhook Filtering** (Phase 5 - NEW)
 - Environment-aware webhook filtering for gradual migration
-- Reuses existing configuration (zero new types needed)
+- Configured via `installation_filter.webhook_enabled` / `installation_filter.sqs_enabled`
 - 30-50% reduction in scheduler queue pressure
 - 100% test coverage, < 0.0002ms overhead
 

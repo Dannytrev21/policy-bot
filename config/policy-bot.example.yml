@@ -270,6 +270,100 @@ logging:
 #   #   queue_suffix: "-dlq"    # Suffix for DLQ names (e.g., "github-pull-request-dlq")
 
 # ==============================================================================
+# GitHub API Rate Limiting (SQS Events Only)
+# ==============================================================================
+#
+# Proactive rate limiting for GitHub API calls during SQS event processing.
+# This prevents exceeding GitHub's rate limits before 429 errors occur.
+#
+# IMPORTANT: Rate limiting applies ONLY to SQS event processing.
+# Webhook (HTTP) events are NOT rate limited to maintain low latency.
+#
+# GitHub API Limits:
+# - GitHub Enterprise Cloud: 15,000 requests/hour per installation (~4.16 req/sec)
+# - The defaults below use conservative limits with safety margins
+#
+# Rate limiting uses token bucket algorithm with:
+# - Per-installation rate limiters (isolated per GitHub App installation)
+# - Global rate limiter (safety limit across all installations)
+# - Metrics exported via Prometheus and go-metrics
+#
+# rate_limit:
+#   # Enable rate limiting for SQS events (default: true)
+#   # Set to false to disable rate limiting entirely
+#   enabled: true
+#
+#   # Per-installation rate limit (requests per second)
+#   # Default: 3.0 req/sec (conservative for GitHub's 15k/hr = 4.16 req/sec limit)
+#   # Adjust based on your traffic patterns and GitHub's rate limit allowance
+#   installation_rate: 3.0
+#
+#   # Per-installation burst allowance (requests)
+#   # Default: 10 requests
+#   # Allows short bursts above the steady rate for bursty workloads
+#   installation_burst: 10
+#
+#   # Global rate limit across all installations (requests per second)
+#   # Default: 100.0 req/sec
+#   # Safety limit to prevent overwhelming GitHub API across all installations
+#   global_rate: 100.0
+#
+#   # Global burst allowance (requests)
+#   # Default: 50 requests
+#   # Allows global bursts for handling spikes across installations
+#   global_burst: 50
+#
+#   # Adaptive Rate Limiting (Phase 2 - FEATURE FLAG)
+#   # Dynamically adjusts rate limits based on GitHub's X-RateLimit-* response headers
+#   # IMPORTANT: Disabled by default. Enable only after validation in staging.
+#   adaptive:
+#     # Enable adaptive rate limiting (default: false - feature flag)
+#     # When enabled, rate limits dynamically adjust based on actual GitHub quota
+#     enabled: false
+#
+#     # Safety factor for rate calculation (0.0-1.0)
+#     # Calculated rate = (remaining / time_until_reset) * safety_factor
+#     # Default: 0.8 (use 80% of calculated safe rate for safety margin)
+#     safety_factor: 0.8
+#
+#     # Minimum rate limit floor (requests per second)
+#     # Never go below this rate even if GitHub headers suggest lower
+#     # Default: 1.0 req/sec (safety floor to prevent stalling)
+#     min_rate: 1.0
+#
+#     # Maximum rate limit ceiling (requests per second)
+#     # Never exceed this rate even if GitHub headers suggest higher
+#     # Default: 4.0 req/sec (close to GitHub's 4.16 req/sec limit)
+#     max_rate: 4.0
+#
+#     # Smoothing factor for exponential moving average (0.0-1.0)
+#     # Higher = more responsive to changes, Lower = more stable
+#     # Default: 0.3 (balanced between stability and responsiveness)
+#     smoothing_factor: 0.3
+#
+# ==============================================================================
+# Installation Filtering Controls
+# ==============================================================================
+#
+# Installation filtering drops events early when the GitHub App is not installed
+# on the target repository. Filtering is implemented as a decorator around the
+# existing handlers and can be toggled independently for HTTP webhooks and SQS
+# ingestion.
+#
+# installation_filter:
+#   # Enable filtering for webhook (HTTP) events.
+#   # Default: false (only SQS filtering is enabled out of the box).
+#   webhook_enabled: false
+#
+#   # Enable filtering for SQS events (recommended).
+#   # Default: true to keep queue ingestion efficient.
+#   sqs_enabled: true
+#
+#     # Update interval for periodic rate adjustments
+#     # Default: 10s (adjust rates every 10 seconds)
+#     update_interval: 10s
+
+# ==============================================================================
 # GitHub Configuration
 # ==============================================================================
 # Configure one or both GitHub app connections. The application supports:
