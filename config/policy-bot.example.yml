@@ -63,6 +63,43 @@ logging:
 # Options for consuming GitHub events from AWS SQS queues. This is an alternative
 # to receiving events via HTTP webhooks. Both can be enabled simultaneously.
 #
+# The ghec_enabled and ghes_enabled flags control webhook processing:
+# - true: Webhooks are ENABLED (processed via HTTP)
+# - false: Webhooks are DISABLED (skipped, SQS handles them)
+#
+# Common Configuration Patterns:
+#
+# Pattern 1: GHES uses HTTP only, GHEC uses SQS for specific events
+# (This is the recommended configuration for gradual SQS migration)
+#   sqs:
+#     enabled: true
+#     queues:
+#       status:
+#         east_region_url: "https://sqs.us-east-1.amazonaws.com/123/status"
+#         ghec_enabled: false  # GHEC: Webhook disabled, SQS handles it
+#         ghes_enabled: true   # GHES: Webhook enabled, no SQS
+#       # Other events not configured → webhooks pass through for both environments
+#
+# Pattern 2: All events via SQS (full migration)
+#   sqs:
+#     enabled: true
+#     queues:
+#       pull_request:
+#         east_region_url: "https://sqs.us-east-1.amazonaws.com/123/pull_request"
+#         ghec_enabled: false  # SQS only
+#         ghes_enabled: false  # SQS only
+#
+# Pattern 3: Hybrid approach (some via SQS, some via HTTP)
+#   sqs:
+#     enabled: true
+#     queues:
+#       status:
+#         ghec_enabled: false  # SQS only
+#         ghes_enabled: true   # HTTP only
+#       pull_request:
+#         ghec_enabled: true   # HTTP only
+#         ghes_enabled: true   # HTTP only
+#
 # sqs:
 #   # Enable SQS event consumption
 #   enabled: false
@@ -74,18 +111,52 @@ logging:
 #   # endpoint_url: "http://localhost:4566"
 #
 #   # ===========================================================================
-#   # Queue Configuration
+#   # Queue Configuration with Environment Control
 #   # ===========================================================================
-#
-#   # OPTION 1: Simple queue mapping (legacy, backward compatible)
-#   # Map GitHub event types directly to SQS queue URLs
+#   #
+#   # Each event type can be configured with environment-specific webhook behavior:
+#   # - ghec_enabled: Controls webhook processing for GitHub Enterprise Cloud
+#   # - ghes_enabled: Controls webhook processing for GitHub Enterprise Server
+#   #
+#   # Webhook Behavior:
+#   #   true  = Webhooks ENABLED (processed via HTTP)
+#   #   false = Webhooks DISABLED (skipped, SQS handles them)
+#   #
+#   # Default behavior: Events not configured pass through to webhooks
+#   #
 #   queues:
-#     installation: "https://sqs.us-east-1.amazonaws.com/123456789012/github-installation"
-#     pull_request: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request"
-#     pull_request_review: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request-review"
-#     issue_comment: "https://sqs.us-east-1.amazonaws.com/123456789012/github-issue-comment"
-#     status: "https://sqs.us-east-1.amazonaws.com/123456789012/github-status"
-#     check_run: "https://sqs.us-east-1.amazonaws.com/123456789012/github-check-run"
+#     # Example: Status events via SQS for GHEC, HTTP for GHES
+#     status:
+#       east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-status"
+#       ghec_enabled: false  # GHEC: Webhook disabled, SQS handles it
+#       ghes_enabled: true   # GHES: Webhook enabled (HTTP only)
+#       queue_workers: 15    # High volume events need more workers
+#
+#     # Example: Pull requests via HTTP for both environments
+#     pull_request:
+#       east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request"
+#       ghec_enabled: true   # GHEC: Webhook enabled
+#       ghes_enabled: true   # GHES: Webhook enabled
+#       queue_workers: 10
+#
+#     # Additional event types can be configured similarly
+#     pull_request_review:
+#       east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request-review"
+#       ghec_enabled: true
+#       ghes_enabled: true
+#       queue_workers: 5
+#
+#     issue_comment:
+#       east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-issue-comment"
+#       ghec_enabled: true
+#       ghes_enabled: true
+#       queue_workers: 5
+#
+#     check_run:
+#       east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-check-run"
+#       ghec_enabled: true
+#       ghes_enabled: true
+#       queue_workers: 10
 #
 #   # OPTION 2: Enhanced queue mapping with per-queue configuration (recommended)
 #   # Provides fine-grained control over each queue's behavior
