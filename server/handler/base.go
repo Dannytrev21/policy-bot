@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"reflect"
-	"strings"
 	"sync"
 	"time"
 
@@ -155,33 +154,12 @@ func (b *Base) recordInstallationClientMetric(metricKey string) {
 // This method helps prevent 404 errors by verifying installation status before attempting
 // to create installation clients for repositories where the app may not be installed.
 //
-// The method uses a TTL-based cache that stores both positive (installed) and negative
-// (not installed) results to minimize API calls to GitHub.
+// The method delegates to InstallationRegistry.VerifyInstallation which uses a TTL-based cache
+// that stores both positive (installed) and negative (not installed) results to minimize API calls.
 func (b *Base) VerifyInstallation(ctx context.Context, installationID int64) bool {
 	logger := zerolog.Ctx(ctx)
 
-	// Check the installation registry cache first
-	status, cacheHit := b.InstallationRegistry.Check(installationID)
-	if cacheHit {
-		switch status {
-		case InstallationExists:
-			logger.Debug().
-				Int64("installation_id", installationID).
-				Msg("Installation found in cache (positive)")
-			return true
-		case InstallationNotFound:
-			logger.Debug().
-				Int64("installation_id", installationID).
-				Msg("Installation found in cache (negative - not installed)")
-			return false
-		}
-	}
-
-	// Cache miss - verify installation via GitHub API
-	logger.Debug().
-		Int64("installation_id", installationID).
-		Msg("Installation cache miss - verifying via API")
-
+	// Create app client for API verification if cache misses
 	appClient, err := b.NewAppClient()
 	if err != nil {
 		logger.Warn().Err(err).
@@ -190,39 +168,23 @@ func (b *Base) VerifyInstallation(ctx context.Context, installationID int64) boo
 		return false
 	}
 
-	b.InstallationRegistry.RecordAPICall()
-	installation, resp, err := appClient.Apps.GetInstallation(ctx, installationID)
+	// Delegate to registry's consolidated verification method
+	exists, err := b.InstallationRegistry.VerifyInstallation(ctx, installationID, appClient)
 	if err != nil {
-		// Check if it's a 404 (installation not found) - this is expected for repos where app isn't installed
-		if resp != nil && resp.StatusCode == 404 || strings.Contains(err.Error(), "404") {
-			logger.Info().
-				Int64("installation_id", installationID).
-				Msg("Installation not found - app may not be installed on this repository")
-
-			// Cache negative result to avoid repeated API calls
-			b.InstallationRegistry.MarkNotInstalled(installationID)
-			return false
-		}
-		// Other errors are unexpected and should be logged as warnings
 		logger.Warn().Err(err).
 			Int64("installation_id", installationID).
-			Msg("Failed to verify installation")
+			Msg("Installation verification failed")
 		return false
 	}
 
-	// Cache the valid installation (positive result)
-	b.InstallationRegistry.MarkInstalled(installationID)
+	// Update legacy cache for backwards compatibility if installation exists
+	if exists {
+		b.mu.Lock()
+		b.InstallationIdMap[installationID] = installationID
+		b.mu.Unlock()
+	}
 
-	// Also update legacy cache for backwards compatibility
-	b.mu.Lock()
-	b.InstallationIdMap[installationID] = installation.GetID()
-	b.mu.Unlock()
-
-	logger.Debug().
-		Int64("installation_id", installationID).
-		Msg("Installation verified and cached")
-
-	return true
+	return exists
 }
 
 // PostStatus posts a GitHub commit status with consistent logging.

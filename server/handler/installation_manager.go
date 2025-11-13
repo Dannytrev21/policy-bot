@@ -406,36 +406,28 @@ func (m *InstallationManager) GetClients(ctx context.Context, installationID int
 }
 
 // verifyInstallation checks if the GitHub App is installed for the given installation ID.
-// It delegates to the InstallationRegistry which uses TTL-based caching to minimize API calls.
+// It delegates to the InstallationRegistry's consolidated verification method, which uses
+// TTL-based caching. This method only checks the cache (passes nil for appClient) since
+// Base.VerifyInstallation should have been called first to populate the cache.
 func (m *InstallationManager) verifyInstallation(ctx context.Context, installationID int64, repoFullName string) bool {
 	logger := zerolog.Ctx(ctx)
 
-	// Delegate to registry for verification (uses cache)
-	status, cacheHit := m.installationRegistry.Check(installationID)
-	if cacheHit {
-		switch status {
-		case InstallationExists:
-			logger.Debug().
-				Int64("installation_id", installationID).
-				Str("repository", repoFullName).
-				Msg("Installation verified via cache (positive)")
-			return true
-		case InstallationNotFound:
-			logger.Debug().
-				Int64("installation_id", installationID).
-				Str("repository", repoFullName).
-				Msg("Installation not found via cache (negative)")
-			return false
-		}
+	// Delegate to registry's consolidated verification method (cache-only mode)
+	exists, _ := m.installationRegistry.VerifyInstallation(ctx, installationID, nil)
+
+	if exists {
+		logger.Debug().
+			Int64("installation_id", installationID).
+			Str("repository", repoFullName).
+			Msg("Installation verified via cache")
+	} else {
+		logger.Debug().
+			Int64("installation_id", installationID).
+			Str("repository", repoFullName).
+			Msg("Installation not found or not in cache")
 	}
 
-	// Cache miss - this shouldn't happen if Base.VerifyInstallation was called first,
-	// but we handle it gracefully
-	logger.Warn().
-		Int64("installation_id", installationID).
-		Str("repository", repoFullName).
-		Msg("Installation verification cache miss in manager - this should have been verified earlier")
-	return false
+	return exists
 }
 
 // createV3Client creates a GitHub REST API v3 client for the specified installation.

@@ -15,11 +15,16 @@
 package handler
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/go-github/v47/github"
 	gometrics "github.com/rcrowley/go-metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -749,4 +754,219 @@ func TestInstallationRegistry_CheckByRepoEdgeCases(t *testing.T) {
 			assert.NotEqual(t, InstallationExists, status)
 		}
 	})
+}
+// Tests for consolidated VerifyInstallation method
+
+func TestInstallationRegistry_VerifyInstallation_CacheHit_Positive(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+	installationID := int64(12345)
+
+	// Pre-populate cache with positive entry
+	registry.MarkInstalled(installationID)
+
+	// Verify should return true without API call (appClient can be nil)
+	exists, err := registry.VerifyInstallation(ctx, installationID, nil)
+
+	assert.NoError(t, err)
+	assert.True(t, exists)
+}
+
+func TestInstallationRegistry_VerifyInstallation_CacheHit_Negative(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+	installationID := int64(99999)
+
+	// Pre-populate cache with negative entry
+	registry.MarkNotInstalled(installationID)
+
+	// Verify should return false without API call
+	exists, err := registry.VerifyInstallation(ctx, installationID, nil)
+
+	assert.NoError(t, err)
+	assert.False(t, exists)
+}
+
+func TestInstallationRegistry_VerifyInstallation_CacheMiss_NoClient(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+	installationID := int64(54321)
+
+	// Cache miss with no API client should return false
+	exists, err := registry.VerifyInstallation(ctx, installationID, nil)
+
+	assert.NoError(t, err)
+	assert.False(t, exists)
+}
+
+func TestInstallationRegistry_VerifyInstallation_APISuccess(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+	installationID := int64(12345)
+
+	// Create mock server that returns successful installation
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/app/installations/12345", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": 12345,
+			"account": map[string]interface{}{
+				"login": "test-org",
+			},
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	// Create GitHub client pointing to mock server
+	client, err := github.NewEnterpriseClient(server.URL, server.URL, nil)
+	require.NoError(t, err)
+
+	// Verify installation via API
+	exists, err := registry.VerifyInstallation(ctx, installationID, client)
+
+	assert.NoError(t, err)
+	assert.True(t, exists)
+
+	// Check that it was cached
+	status, cached := registry.Check(installationID)
+	assert.True(t, cached)
+	assert.Equal(t, InstallationExists, status)
+}
+
+func TestInstallationRegistry_VerifyInstallation_API404(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+	installationID := int64(99999)
+
+	// Create mock server that returns 404
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/app/installations/99999", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"message": "Not Found",
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	// Create GitHub client pointing to mock server
+	client, err := github.NewEnterpriseClient(server.URL, server.URL, nil)
+	require.NoError(t, err)
+
+	// Verify installation via API - should return false, no error (404 is expected)
+	exists, err := registry.VerifyInstallation(ctx, installationID, client)
+
+	assert.NoError(t, err)
+	assert.False(t, exists)
+
+	// Check that negative result was cached
+	status, cached := registry.Check(installationID)
+	assert.True(t, cached)
+	assert.Equal(t, InstallationNotFound, status)
+}
+
+func TestInstallationRegistry_VerifyInstallation_APIError(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+	installationID := int64(12345)
+
+	// Create mock server that returns 500 error
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/app/installations/12345", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"message": "Internal Server Error",
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	// Create GitHub client pointing to mock server
+	client, err := github.NewEnterpriseClient(server.URL, server.URL, nil)
+	require.NoError(t, err)
+
+	// Verify installation via API - should return error
+	exists, err := registry.VerifyInstallation(ctx, installationID, client)
+
+	assert.Error(t, err)
+	assert.False(t, exists)
+
+	// Check that error result was NOT cached
+	status, cached := registry.Check(installationID)
+	assert.False(t, cached)
+	assert.Equal(t, InstallationUnknown, status)
+}
+
+func TestInstallationRegistry_VerifyInstallation_ConcurrentAccess(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+	installationID := int64(12345)
+
+	// Pre-populate cache
+	registry.MarkInstalled(installationID)
+
+	// Concurrent verification calls
+	var wg sync.WaitGroup
+	errors := make(chan error, 100)
+	results := make(chan bool, 100)
+
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			exists, err := registry.VerifyInstallation(ctx, installationID, nil)
+			if err != nil {
+				errors <- err
+			}
+			results <- exists
+		}()
+	}
+
+	wg.Wait()
+	close(errors)
+	close(results)
+
+	// Check no errors occurred
+	for err := range errors {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	// Check all results are consistent
+	for exists := range results {
+		assert.True(t, exists, "All concurrent calls should return true")
+	}
+}
+
+func TestInstallationRegistry_VerifyInstallation_MetricsRecorded(t *testing.T) {
+	ctx := context.Background()
+	metricsRegistry := gometrics.NewRegistry()
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, metricsRegistry)
+	installationID := int64(12345)
+
+	// Create mock server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/12345", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{"id": 12345})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client, err := github.NewEnterpriseClient(server.URL, server.URL, nil)
+	require.NoError(t, err)
+
+	// First call - cache miss, API call
+	_, _ = registry.VerifyInstallation(ctx, installationID, client)
+
+	// Verify API call metric was incremented
+	apiCallCounter := metricsRegistry.Get(MetricsKeyRegistryAPICalls).(gometrics.Counter)
+	assert.Equal(t, int64(1), apiCallCounter.Count())
+
+	// Second call - cache hit
+	_, _ = registry.VerifyInstallation(ctx, installationID, nil)
+
+	// Verify cache hit metric was incremented
+	cacheHitCounter := metricsRegistry.Get(MetricsKeyRegistryCacheHits).(gometrics.Counter)
+	assert.Equal(t, int64(1), cacheHitCounter.Count())
 }

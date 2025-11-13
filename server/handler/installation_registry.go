@@ -15,11 +15,15 @@
 package handler
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/go-github/v47/github"
+	"github.com/rs/zerolog"
 	gometrics "github.com/rcrowley/go-metrics"
 )
 
@@ -150,6 +154,105 @@ func (r *InstallationRegistry) Check(installationID int64) (InstallationStatus, 
 	r.cacheHits.Add(1)
 	r.recordCacheHit()
 	return record.Status, true
+}
+
+// VerifyInstallation checks if the GitHub App is installed for the given installation ID.
+// This is the single source of truth for installation verification, consolidating logic
+// that was previously duplicated in Base and InstallationManager.
+//
+// It first checks the cache, and if not found or expired, optionally makes an API call
+// (if appClient is provided) to verify the installation and update the cache.
+//
+// Returns:
+//   - bool: true if installation exists, false if not found or error occurred
+//   - error: nil on success, error if API call failed (not including 404)
+//
+// Thread-safe: Uses RWMutex for cache access and atomic operations for metrics.
+func (r *InstallationRegistry) VerifyInstallation(ctx context.Context, installationID int64, appClient *github.Client) (bool, error) {
+	logger := zerolog.Ctx(ctx)
+
+	// Check cache first
+	status, cached := r.Check(installationID)
+	if cached {
+		switch status {
+		case InstallationExists:
+			logger.Debug().
+				Int64("installation_id", installationID).
+				Msg("Installation found in cache (positive)")
+			return true, nil
+		case InstallationNotFound:
+			logger.Debug().
+				Int64("installation_id", installationID).
+				Msg("Installation found in cache (negative - not installed)")
+			return false, nil
+		}
+	}
+
+	// Cache miss - need to verify via API
+	if appClient == nil {
+		// No API client provided, can't verify
+		logger.Debug().
+			Int64("installation_id", installationID).
+			Msg("Installation cache miss, no API client for verification")
+		return false, nil
+	}
+
+	// Verify installation via GitHub API
+	logger.Debug().
+		Int64("installation_id", installationID).
+		Msg("Installation cache miss - verifying via API")
+
+	r.RecordAPICall()
+	installation, resp, err := appClient.Apps.GetInstallation(ctx, installationID)
+
+	if err != nil {
+		// Check if it's a 404 (installation not found)
+		if resp != nil && resp.StatusCode == 404 || strings.Contains(err.Error(), "404") {
+			logger.Info().
+				Int64("installation_id", installationID).
+				Msg("Installation not found - app may not be installed")
+
+			// Cache negative result to avoid repeated API calls
+			r.MarkNotInstalled(installationID)
+			return false, nil
+		}
+
+		// Other errors are unexpected
+		logger.Warn().Err(err).
+			Int64("installation_id", installationID).
+			Msg("Failed to verify installation")
+		return false, err
+	}
+
+	// Check response status code even when err is nil
+	// The GitHub client may not return errors for all non-200 responses
+	if resp != nil && resp.StatusCode >= 400 {
+		if resp.StatusCode == 404 {
+			logger.Info().
+				Int64("installation_id", installationID).
+				Msg("Installation not found (404 status code)")
+			r.MarkNotInstalled(installationID)
+			return false, nil
+		}
+
+		// Other 4xx/5xx errors
+		err := fmt.Errorf("unexpected status code %d for installation %d", resp.StatusCode, installationID)
+		logger.Warn().
+			Int("status_code", resp.StatusCode).
+			Int64("installation_id", installationID).
+			Msg("Failed to verify installation - unexpected status code")
+		return false, err
+	}
+
+	// Cache the valid installation (positive result)
+	r.MarkInstalled(installationID)
+
+	logger.Debug().
+		Int64("installation_id", installationID).
+		Int64("github_installation_id", installation.GetID()).
+		Msg("Installation verified and cached")
+
+	return true, nil
 }
 
 // MarkInstalled marks an installation as installed (positive cache)
