@@ -341,6 +341,12 @@ func New(c *Config) (*Server, error) {
 				continue
 			}
 
+			// Phase 8 Step 4: Create filter config from server config
+			filterConfig := &handler.FilterConfig{
+				WebhookFilteringEnabled: c.InstallationFilter.WebhookEnabledValue(),
+				SQSFilteringEnabled:     c.InstallationFilter.SQSEnabledValue(),
+			}
+
 			handlers = append(handlers, handler.NewInstallationFilterHandler(
 				h,
 				baseHandler.InstallationRegistry,
@@ -349,6 +355,7 @@ func New(c *Config) (*Server, error) {
 				baseHandler.RepoMappingCache,
 				baseHandler.OrgMappingCache,
 				baseHandler.InstallationLocator,
+				filterConfig,
 			))
 		}
 		return handlers

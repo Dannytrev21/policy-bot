@@ -25,15 +25,15 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// LookupStrategy determines which lookup approach to use
-type LookupStrategy int
+// EventSource indicates where the event originated from
+type EventSource int
 
 const (
-	// StrategyWebhook uses direct ID lookup only (fail fast for webhooks)
-	StrategyWebhook LookupStrategy = iota
+	// EventSourceWebhook indicates event came from GitHub webhook
+	EventSourceWebhook EventSource = iota
 
-	// StrategySQS uses full smart lookup (ID → owner:repo → API)
-	StrategySQS
+	// EventSourceSQS indicates event came from SQS queue
+	EventSourceSQS
 )
 
 // InstallationLocator provides efficient installation lookup with
@@ -81,8 +81,8 @@ type LookupRequest struct {
 	Owner string
 	Repo  string
 
-	// Strategy to use for this lookup
-	Strategy LookupStrategy
+	// Source of the event (webhook or SQS)
+	EventSource EventSource
 
 	// Event type (for logging and metrics)
 	EventType string
@@ -120,11 +120,14 @@ const (
 	SourceNotFound
 )
 
-// NewInstallationLocator creates an installation locator with optimized settings
+// NewInstallationLocator creates an installation locator with optimized settings.
+// Phase 8 Step 3: Now accepts a shared circuit breaker to ensure consistent failure tracking
+// across all GitHub API calls (Manager and Locator).
 func NewInstallationLocator(
 	registry *InstallationRegistry,
 	logger zerolog.Logger,
 	clientFactory func(ctx context.Context) (*github.Client, error),
+	circuitBreaker *CircuitBreaker,
 ) *InstallationLocator {
 	// Create channel-based semaphore for API concurrency control (max 10 concurrent)
 	apiSem := make(chan struct{}, 10)
@@ -136,7 +139,7 @@ func NewInstallationLocator(
 		registry:       registry,
 		logger:         logger.With().Str("component", "installation_locator").Logger(),
 		clientFactory:  clientFactory,
-		circuitBreaker: NewCircuitBreaker(),
+		circuitBreaker: circuitBreaker, // Phase 8 Step 3: Use shared circuit breaker
 		apiSemaphore:   apiSem,
 		lookupInFlight: make(map[string]chan lookupResult),
 		keyBuilderPool: sync.Pool{
@@ -148,7 +151,10 @@ func NewInstallationLocator(
 	}
 }
 
-// Lookup attempts to find an installation using the appropriate strategy
+// Lookup attempts to find an installation using a simplified, direct approach.
+// The lookup behavior differs based on event source:
+// - Webhooks: Direct ID lookup only (fail fast)
+// - SQS: Smart multi-method lookup (ID → repo cache → API)
 func (l *InstallationLocator) Lookup(ctx context.Context, req LookupRequest) LookupResult {
 	// Early return if context is already cancelled
 	select {
@@ -170,35 +176,21 @@ func (l *InstallationLocator) Lookup(ctx context.Context, req LookupRequest) Loo
 		Str("event_type", req.EventType).
 		Logger()
 
-	// Apply strategy-specific behavior
-	switch req.Strategy {
-	case StrategyWebhook:
-		return l.lookupWebhook(ctx, req, logger)
-	case StrategySQS:
-		return l.lookupSQS(ctx, req, logger)
-	default:
-		logger.Error().Msg("Unknown lookup strategy")
-		return LookupResult{
-			InstallationID: req.InstallationID,
-			Exists:         false,
-			Source:         SourceNotFound,
-			Error:          errors.New("unknown lookup strategy"),
-		}
-	}
-}
+	// For webhooks: Simple, fast path - only check direct installation ID
+	if req.EventSource == EventSourceWebhook {
+		if req.InstallationID > 0 {
+			status, cached := l.registry.Check(req.InstallationID)
+			if cached && status == InstallationExists {
+				atomic.AddInt64(&l.metrics.DirectHits, 1)
+				logger.Debug().Msg("Installation found via direct ID (webhook)")
+				return LookupResult{
+					InstallationID: req.InstallationID,
+					Exists:         true,
+					Source:         SourceCacheID,
+				}
+			}
 
-// lookupWebhook implements webhook-specific lookup (ID only, fail fast)
-func (l *InstallationLocator) lookupWebhook(
-	ctx context.Context,
-	req LookupRequest,
-	logger zerolog.Logger,
-) LookupResult {
-	// Webhook strategy: Only use direct installation ID
-	if req.InstallationID > 0 {
-		status, cached := l.registry.Check(req.InstallationID)
-		if cached && status == InstallationExists {
-			atomic.AddInt64(&l.metrics.DirectHits, 1)
-			logger.Debug().Msg("Installation found via direct ID")
+			// Not in cache, but we have an ID - return it (will be validated by client creation)
 			return LookupResult{
 				InstallationID: req.InstallationID,
 				Exists:         true,
@@ -206,29 +198,16 @@ func (l *InstallationLocator) lookupWebhook(
 			}
 		}
 
-		// Not in cache, but we have an ID - return it (will be validated by client creation)
+		// No installation ID - pass through (webhook behavior)
 		return LookupResult{
-			InstallationID: req.InstallationID,
-			Exists:         true,
-			Source:         SourceCacheID,
+			InstallationID: 0,
+			Exists:         false,
+			Source:         SourceNotFound,
+			Error:          ErrNoInstallation,
 		}
 	}
 
-	// No installation ID - pass through (webhook behavior)
-	return LookupResult{
-		InstallationID: 0,
-		Exists:         false,
-		Source:         SourceNotFound,
-		Error:          ErrNoInstallation,
-	}
-}
-
-// lookupSQS implements SQS-specific smart lookup with all fallbacks
-func (l *InstallationLocator) lookupSQS(
-	ctx context.Context,
-	req LookupRequest,
-	logger zerolog.Logger,
-) LookupResult {
+	// For SQS: Smart multi-method lookup with all fallbacks
 	// Check if event should bypass cache
 	classifier := &EventClassifier{
 		classifications: map[string]EventClassification{
@@ -249,12 +228,12 @@ func (l *InstallationLocator) lookupSQS(
 		}
 	}
 
-	// Method 1: Direct installation ID
+	// Method 1: Direct installation ID lookup
 	if req.InstallationID > 0 {
 		if status, hit := l.registry.Check(req.InstallationID); hit {
 			if status == InstallationExists {
 				atomic.AddInt64(&l.metrics.DirectHits, 1)
-				logger.Debug().Msg("Installation found via direct ID")
+				logger.Debug().Msg("Installation found via direct ID (SQS)")
 				return LookupResult{
 					InstallationID: req.InstallationID,
 					Exists:         true,

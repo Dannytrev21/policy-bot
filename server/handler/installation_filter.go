@@ -62,6 +62,15 @@ type InstallationFilterHandler struct {
 	// Enhanced components for improved filtering
 	locator    *InstallationLocator
 	classifier *EventClassifier
+
+	// Phase 8 Step 4: Configuration to control filtering behavior per event source
+	filterConfig *FilterConfig
+}
+
+// FilterConfig controls whether installation filtering is applied per event source
+type FilterConfig struct {
+	WebhookFilteringEnabled bool // Enable filtering for webhook events (default: false)
+	SQSFilteringEnabled     bool // Enable filtering for SQS events (default: true)
 }
 
 // InstallationFilterMetrics tracks filtering statistics
@@ -76,6 +85,8 @@ type InstallationFilterMetrics struct {
 // The repoCache and orgCache parameters are the shared mapping caches from Base - if nil, new caches will be created.
 // The metricsRegistry parameter can be nil for testing, but should be provided in production
 // for metrics export via OTEL.
+// The filterConfig parameter controls filtering behavior per event source (webhook vs SQS).
+// If nil, default behavior is: webhook filtering disabled, SQS filtering enabled.
 func NewInstallationFilterHandler(
 	handler githubapp.EventHandler,
 	registry *InstallationRegistry,
@@ -84,6 +95,7 @@ func NewInstallationFilterHandler(
 	repoCache *MappingCache,
 	orgCache *MappingCache,
 	locator *InstallationLocator,
+	filterConfig *FilterConfig,
 ) *InstallationFilterHandler {
 	// Use provided caches or create new ones for testing
 	if repoCache == nil {
@@ -91,6 +103,14 @@ func NewInstallationFilterHandler(
 	}
 	if orgCache == nil {
 		orgCache = NewMappingCache(1*time.Hour, 5*time.Minute)
+	}
+
+	// Use default filter config if not provided
+	if filterConfig == nil {
+		filterConfig = &FilterConfig{
+			WebhookFilteringEnabled: false, // Default: no filtering for webhooks
+			SQSFilteringEnabled:     true,  // Default: filtering enabled for SQS
+		}
 	}
 
 	h := &InstallationFilterHandler{
@@ -103,6 +123,7 @@ func NewInstallationFilterHandler(
 		metricsRegistry:      metricsRegistry,
 		locator:              locator,
 		classifier:           NewEventClassifier(),
+		filterConfig:         filterConfig,
 	}
 
 	// Register metrics counters if registry is provided
@@ -132,6 +153,37 @@ func (h *InstallationFilterHandler) Handles() []string {
 // Handle processes an event, filtering it first based on installation status
 func (h *InstallationFilterHandler) Handle(ctx context.Context, eventType, deliveryID string, payload []byte) error {
 	logger := zerolog.Ctx(ctx)
+
+	// Phase 8 Step 4: Check if filtering is enabled for this event source
+	isSQS := false
+	if eventSource, ok := ctx.Value(SQSEventSourceKey).(string); ok && eventSource == "sqs" {
+		isSQS = true
+	}
+
+	// Check if filtering is enabled for this event source
+	filteringEnabled := (isSQS && h.filterConfig.SQSFilteringEnabled) ||
+		(!isSQS && h.filterConfig.WebhookFilteringEnabled)
+
+	if !filteringEnabled {
+		// Filtering disabled for this event source - pass through directly
+		logger.Debug().
+			Str("event_type", eventType).
+			Str("delivery_id", deliveryID).
+			Bool("is_sqs", isSQS).
+			Bool("webhook_filtering_enabled", h.filterConfig.WebhookFilteringEnabled).
+			Bool("sqs_filtering_enabled", h.filterConfig.SQSFilteringEnabled).
+			Msg("Installation filtering disabled for this event source - passing through")
+
+		h.recordPassedEvent()
+		return h.wrapped.Handle(ctx, eventType, deliveryID, payload)
+	}
+
+	// Filtering is enabled - proceed with normal filtering logic
+	logger.Debug().
+		Str("event_type", eventType).
+		Str("delivery_id", deliveryID).
+		Bool("is_sqs", isSQS).
+		Msg("Installation filtering enabled - proceeding with lookup")
 
 	// Use enhanced handling if locator is available
 	if h.locator != nil && h.classifier != nil {
@@ -229,11 +281,11 @@ func (h *InstallationFilterHandler) handleEnhanced(ctx context.Context, eventTyp
 	}
 	defer putIdentifiers(ids)
 
-	// Step 4: Determine strategy based on event source
-	strategy := StrategyWebhook
-	if eventSource, ok := ctx.Value(SQSEventSourceKey).(string); ok && eventSource == "sqs" {
-		strategy = StrategySQS
-		logger.Debug().Msg("Using SQS strategy for event processing")
+	// Step 4: Determine event source
+	eventSource := EventSourceWebhook
+	if sqsSource, ok := ctx.Value(SQSEventSourceKey).(string); ok && sqsSource == "sqs" {
+		eventSource = EventSourceSQS
+		logger.Debug().Msg("Processing SQS event")
 	}
 
 	// Step 5: Create lookup request
@@ -241,7 +293,7 @@ func (h *InstallationFilterHandler) handleEnhanced(ctx context.Context, eventTyp
 		InstallationID: ids.InstallationID,
 		Owner:          ids.OwnerLogin,
 		Repo:           ids.RepoName,
-		Strategy:       strategy,
+		EventSource:    eventSource,
 		EventType:      eventType,
 	}
 
@@ -447,116 +499,7 @@ func putIdentifiers(ids *ExtractedIdentifiers) {
 	identifiersPool.Put(ids)
 }
 
-// MappingCache handles caching of repository/organization to installation ID mappings.
-// It supports both positive caching (successful lookups) and negative caching (not found).
-// Thread-safe for concurrent access.
-type MappingCache struct {
-	mu          sync.RWMutex
-	entries     map[string]mappingEntry
-	positiveTTL time.Duration // TTL for successful lookups (1 hour)
-	negativeTTL time.Duration // TTL for failed lookups (5 minutes)
-}
-
-// mappingEntry represents a cached mapping with expiration
-type mappingEntry struct {
-	installationID int64 // 0 means "not found"
-	isNotFound     bool  // Explicitly tracks negative cache
-	expiresAt      time.Time
-}
-
-// NewMappingCache creates a new mapping cache with specified TTLs
-func NewMappingCache(positiveTTL, negativeTTL time.Duration) *MappingCache {
-	return &MappingCache{
-		entries:     make(map[string]mappingEntry),
-		positiveTTL: positiveTTL,
-		negativeTTL: negativeTTL,
-	}
-}
-
-// Get returns installation ID and whether it was found in cache.
-// Returns (0, false) if not in cache or expired.
-// Returns (0, true) if negative cache entry (installation doesn't exist).
-// Returns (installationID, true) if positive cache entry.
-func (c *MappingCache) Get(key string) (installationID int64, found bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	entry, exists := c.entries[key]
-	if !exists || time.Now().After(entry.expiresAt) {
-		return 0, false
-	}
-
-	// Check if this is a negative cache entry
-	if entry.isNotFound {
-		return 0, true // Found in cache, but installation doesn't exist
-	}
-
-	return entry.installationID, true
-}
-
-// Set caches a successful lookup (positive cache)
-func (c *MappingCache) Set(key string, installationID int64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.entries[key] = mappingEntry{
-		installationID: installationID,
-		isNotFound:     false,
-		expiresAt:      time.Now().Add(c.positiveTTL),
-	}
-}
-
-// SetNotFound caches a failed lookup (negative cache)
-func (c *MappingCache) SetNotFound(key string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.entries[key] = mappingEntry{
-		installationID: 0,
-		isNotFound:     true,
-		expiresAt:      time.Now().Add(c.negativeTTL),
-	}
-}
-
-// Remove invalidates a cache entry
-func (c *MappingCache) Remove(key string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	delete(c.entries, key)
-}
-
-// Clear removes all entries
-func (c *MappingCache) Clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.entries = make(map[string]mappingEntry)
-}
-
-// GetSize returns the current number of cached entries
-func (c *MappingCache) GetSize() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return len(c.entries)
-}
-
-// GetStats returns cache statistics (positive, negative, total)
-func (c *MappingCache) GetStats() (positive, negative, total int) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	total = len(c.entries)
-	for _, entry := range c.entries {
-		if entry.isNotFound {
-			negative++
-		} else {
-			positive++
-		}
-	}
-	return
-}
+// MappingCache has been extracted to mapping_cache.go for better code organization
 
 // buildRepoCacheKey builds a cache key for repository mapping lookups.
 // Format: "owner/repo"

@@ -73,7 +73,7 @@ func TestNewInstallationFilterHandler(t *testing.T) {
 	mockHandler := &MockEventHandler{eventTypes: []string{"pull_request"}}
 	metricsRegistry := gometrics.NewRegistry()
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, nil, nil, nil, nil)
 
 	require.NotNil(t, filter)
 	assert.Equal(t, mockHandler, filter.wrapped)
@@ -92,7 +92,7 @@ func TestInstallationFilterHandler_Handles(t *testing.T) {
 	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 	mockHandler := &MockEventHandler{eventTypes: []string{"pull_request", "issue_comment"}}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, nil)
 
 	handles := filter.Handles()
 
@@ -117,7 +117,7 @@ func TestInstallationFilterHandler_PassThroughOnPositiveCacheHit(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, nil)
 
 	payload := createTestPayload(installationID)
 	err := filter.Handle(ctx, "pull_request", "test-delivery-1", payload)
@@ -147,7 +147,13 @@ func TestInstallationFilterHandler_FilterOnNegativeCacheHit(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil)
+	// Enable webhook filtering for this test
+	filterConfig := &FilterConfig{
+		WebhookFilteringEnabled: true,
+		SQSFilteringEnabled:     true,
+	}
+
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, filterConfig)
 
 	payload := createTestPayload(installationID)
 	err := filter.Handle(ctx, "pull_request", "test-delivery-2", payload)
@@ -177,7 +183,7 @@ func TestInstallationFilterHandler_PassThroughOnCacheMiss(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, nil)
 
 	payload := createTestPayload(installationID)
 	err := filter.Handle(ctx, "pull_request", "test-delivery-3", payload)
@@ -203,7 +209,7 @@ func TestInstallationFilterHandler_PassThroughWhenNoInstallationInPayload(t *tes
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, nil)
 
 	payload := createTestPayloadNoInstallation()
 	err := filter.Handle(ctx, "ping", "test-delivery-4", payload)
@@ -231,7 +237,7 @@ func TestInstallationFilterHandler_PropagatesHandlerErrors(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, nil)
 
 	payload := createTestPayload(installationID)
 	err := filter.Handle(ctx, "pull_request", "test-delivery-5", payload)
@@ -263,7 +269,13 @@ func TestInstallationFilterHandler_MultipleEvents(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil)
+	// Enable webhook filtering for this test
+	filterConfig := &FilterConfig{
+		WebhookFilteringEnabled: true,
+		SQSFilteringEnabled:     true,
+	}
+
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, filterConfig)
 
 	// Process events
 	filter.Handle(ctx, "pull_request", "d1", createTestPayload(1)) // Should pass (installed)
@@ -317,7 +329,7 @@ func TestInstallationFilterHandler_ConcurrentAccess(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, nil)
 
 	// Process events concurrently
 	done := make(chan bool)
@@ -357,7 +369,13 @@ func TestInstallationFilterHandler_GoMetrics_FilteredEvents(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, nil, nil, nil)
+	// Enable webhook filtering for this test
+	filterConfig := &FilterConfig{
+		WebhookFilteringEnabled: true,
+		SQSFilteringEnabled:     true,
+	}
+
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, nil, nil, nil, filterConfig)
 
 	payload := createTestPayload(installationID)
 	err := filter.Handle(ctx, "pull_request", "test-delivery-1", payload)
@@ -392,7 +410,13 @@ func TestInstallationFilterHandler_GoMetrics_PassedEvents(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, nil, nil, nil)
+	// Enable webhook filtering for this test
+	filterConfig := &FilterConfig{
+		WebhookFilteringEnabled: true,
+		SQSFilteringEnabled:     true,
+	}
+
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, nil, nil, nil, filterConfig)
 
 	payload := createTestPayload(installationID)
 	err := filter.Handle(ctx, "pull_request", "test-delivery-2", payload)
@@ -426,7 +450,7 @@ func TestInstallationFilterHandler_GoMetrics_WithNilRegistry(t *testing.T) {
 	}
 
 	// Test with nil metrics registry - should not crash
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, nil)
 
 	payload := createTestPayload(installationID)
 	err := filter.Handle(ctx, "pull_request", "test-delivery", payload)
@@ -465,7 +489,7 @@ func TestInstallationFilterHandler_ZeroInstallationID(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, nil)
 
 	// Create payload with installation ID = 0 (should be treated as no installation)
 	payload := createTestPayload(0)
@@ -617,7 +641,13 @@ func TestInstallationFilterHandler_RepositoryFallback_Success(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil)
+	// Enable webhook filtering for this test
+	filterConfig := &FilterConfig{
+		WebhookFilteringEnabled: true,
+		SQSFilteringEnabled:     true,
+	}
+
+	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil, filterConfig)
 
 	// Create payload with NO installation ID, but with repository
 	payload := createTestPayloadRepositoryOnly("octocat", "Hello-World")
@@ -656,7 +686,7 @@ func TestInstallationFilterHandler_RepositoryFallback_NotFound(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil, nil)
 
 	// Create payload with NO installation ID, but with repository
 	payload := createTestPayloadRepositoryOnly("unknown", "unknown-repo")
@@ -684,7 +714,7 @@ func TestInstallationFilterHandler_RepositoryFallback_NilService(t *testing.T) {
 	}
 
 	// No InstallationsService provided
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, nil)
 
 	// Create payload with NO installation ID, but with repository
 	payload := createTestPayloadRepositoryOnly("octocat", "Hello-World")
@@ -718,7 +748,13 @@ func TestInstallationFilterHandler_Layer1_ThenLayer2(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil)
+	// Enable webhook filtering for this test
+	filterConfig := &FilterConfig{
+		WebhookFilteringEnabled: true,
+		SQSFilteringEnabled:     true,
+	}
+
+	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil, filterConfig)
 
 	// Event 1: Has installation ID (Layer 1 - direct extraction)
 	// The filter extracts the ID but doesn't cache it (handler is responsible for caching)
@@ -1126,7 +1162,7 @@ func TestInstallationFilterHandler_OrganizationLookup_Success(t *testing.T) {
 		eventTypes: []string{"organization"},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil, nil)
 
 	// Test organization lookup
 	installationID, err := filter.lookupInstallationByOrganization(ctx, "cof-primary")
@@ -1151,7 +1187,7 @@ func TestInstallationFilterHandler_OrganizationLookup_NotFound(t *testing.T) {
 	}
 
 	mockHandler := &MockEventHandler{eventTypes: []string{"organization"}}
-	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil, nil)
 
 	installationID, err := filter.lookupInstallationByOrganization(ctx, "nonexistent-org")
 
@@ -1187,7 +1223,7 @@ func TestInstallationFilterHandler_SQSEvent_SmartLookup_RepositoryCache(t *testi
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil, nil)
 
 	// Event with missing installation ID but has repository
 	payload := []byte(`{
@@ -1243,7 +1279,7 @@ func TestInstallationFilterHandler_SQSEvent_SmartLookup_OrganizationCache(t *tes
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil, nil)
 
 	// Org-level event without repository
 	payload := []byte(`{
@@ -1279,7 +1315,7 @@ func TestInstallationFilterHandler_WebhookEvent_NoSmartLookup(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil, nil)
 
 	// Webhook event (no SQS context) with missing installation ID
 	payload := []byte(`{
@@ -1323,7 +1359,7 @@ func TestInstallationFilterHandler_SQSEvent_MultiMethodLookup(t *testing.T) {
 	}
 
 	mockHandler := &MockEventHandler{eventTypes: []string{"pull_request"}}
-	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, nil, nil, nil, nil, nil)
 
 	// Event from non-installed org
 	payload := []byte(`{
@@ -1365,7 +1401,7 @@ func TestLookupMethodMetrics_DirectID(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, nil, nil, nil, nil)
 
 	// Mark installation as existing
 	registry.MarkInstalled(12345)
@@ -1402,7 +1438,7 @@ func TestLookupMethodMetrics_RepoCacheHit(t *testing.T) {
 	repoCache := NewMappingCache(1*time.Hour, 5*time.Minute)
 	orgCache := NewMappingCache(1*time.Hour, 5*time.Minute)
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, repoCache, orgCache, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, repoCache, orgCache, nil, nil)
 
 	// Pre-populate repo cache
 	repoCache.Set("test-org/test-repo", 67890)
@@ -1439,7 +1475,7 @@ func TestLookupMethodMetrics_OrgCacheHit(t *testing.T) {
 	repoCache := NewMappingCache(1*time.Hour, 5*time.Minute)
 	orgCache := NewMappingCache(1*time.Hour, 5*time.Minute)
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, repoCache, orgCache, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, repoCache, orgCache, nil, nil)
 
 	// Pre-populate org cache
 	orgCache.Set("org:test-org", 99999)
@@ -1479,7 +1515,7 @@ func TestLookupMethodMetrics_RepoAPILookup(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, metricsRegistry, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, metricsRegistry, nil, nil, nil, nil)
 
 	// Payload with NO installation ID (will trigger API lookup)
 	payload := []byte(`{
@@ -1521,7 +1557,7 @@ func TestLookupMethodMetrics_OrgAPILookup(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, metricsRegistry, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, metricsRegistry, nil, nil, nil, nil)
 
 	// Org-level event (no repo)
 	payload := []byte(`{
@@ -1567,7 +1603,7 @@ func TestLookupMethodMetrics_AllFailed(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, metricsRegistry, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, mockService, metricsRegistry, nil, nil, nil, nil)
 
 	// Payload from non-installed org
 	payload := []byte(`{
@@ -1608,7 +1644,7 @@ func TestLookupMethodMetrics_WebhookNotRecorded(t *testing.T) {
 		},
 	}
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, nil, nil, nil, nil)
 
 	// Mark installation as existing
 	registry.MarkInstalled(12345)
@@ -1647,7 +1683,7 @@ func TestLookupMethodMetrics_MultipleEvents(t *testing.T) {
 	repoCache := NewMappingCache(1*time.Hour, 5*time.Minute)
 	orgCache := NewMappingCache(1*time.Hour, 5*time.Minute)
 
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, repoCache, orgCache, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, repoCache, orgCache, nil, nil)
 
 	// Event 1: Direct ID
 	registry.MarkInstalled(111)
@@ -1679,7 +1715,7 @@ func TestMetricsRegistration(t *testing.T) {
 
 	mockHandler := &MockEventHandler{eventTypes: []string{"pull_request"}}
 
-	_ = NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, nil, nil, nil)
+	_ = NewInstallationFilterHandler(mockHandler, registry, nil, metricsRegistry, nil, nil, nil, nil)
 
 	// Verify all lookup method metrics are registered
 	assert.NotNil(t, metricsRegistry.Get(MetricsKeyLookupMethodDirect), "Direct lookup metric should be registered")
@@ -1705,7 +1741,7 @@ func TestNilMetricsRegistry(t *testing.T) {
 	}
 
 	// Nil metrics registry - should not crash
-	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, nil)
 
 	registry.MarkInstalled(12345)
 	payload := []byte(`{"installation": {"id": 12345}, "repository": {"owner": {"login": "org"}, "name": "repo"}}`)
@@ -1713,4 +1749,293 @@ func TestNilMetricsRegistry(t *testing.T) {
 	// Should not panic
 	err := filter.Handle(ctx, "pull_request", "test-delivery", payload)
 	require.NoError(t, err)
+}
+
+// ============================================================================
+// Phase 8 Step 4: Configurable Filtering Tests
+// ============================================================================
+
+// TestFilterConfig_WebhookFilteringDisabled tests that webhook events pass through
+// when webhook filtering is disabled (default behavior)
+func TestFilterConfig_WebhookFilteringDisabled(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+
+	// Mark installation as NOT installed (negative cache)
+	registry.MarkNotInstalled(12345)
+
+	handlerCalled := false
+	mockHandler := &MockEventHandler{
+		eventTypes: []string{"pull_request"},
+		handlerFunc: func(ctx context.Context, eventType, deliveryID string, payload []byte) error {
+			handlerCalled = true
+			return nil
+		},
+	}
+
+	// Create filter with webhook filtering DISABLED (default)
+	filterConfig := &FilterConfig{
+		WebhookFilteringEnabled: false,
+		SQSFilteringEnabled:     true,
+	}
+
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, filterConfig)
+
+	// Webhook event (no SQS context) for non-installed installation
+	payload := createTestPayload(12345)
+	err := filter.Handle(ctx, "pull_request", "test-webhook-disabled", payload)
+
+	assert.NoError(t, err)
+	assert.True(t, handlerCalled, "Webhook event should pass through when webhook filtering is disabled")
+
+	// Verify it was counted as "passed"
+	filtered, passed := filter.GetMetrics()
+	assert.Equal(t, int64(0), filtered, "No events should be filtered")
+	assert.Equal(t, int64(1), passed, "Event should be counted as passed")
+}
+
+// TestFilterConfig_WebhookFilteringEnabled tests that webhook events are filtered
+// when webhook filtering is enabled
+func TestFilterConfig_WebhookFilteringEnabled(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+
+	// Mark installation as NOT installed (negative cache)
+	registry.MarkNotInstalled(12345)
+
+	handlerCalled := false
+	mockHandler := &MockEventHandler{
+		eventTypes: []string{"pull_request"},
+		handlerFunc: func(ctx context.Context, eventType, deliveryID string, payload []byte) error {
+			handlerCalled = true
+			return nil
+		},
+	}
+
+	// Create filter with webhook filtering ENABLED
+	filterConfig := &FilterConfig{
+		WebhookFilteringEnabled: true,
+		SQSFilteringEnabled:     true,
+	}
+
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, filterConfig)
+
+	// Webhook event (no SQS context) for non-installed installation
+	payload := createTestPayload(12345)
+	err := filter.Handle(ctx, "pull_request", "test-webhook-enabled", payload)
+
+	assert.NoError(t, err)
+	assert.False(t, handlerCalled, "Webhook event should be filtered when webhook filtering is enabled and installation not found")
+
+	// Verify it was counted as "filtered"
+	filtered, passed := filter.GetMetrics()
+	assert.Equal(t, int64(1), filtered, "Event should be filtered")
+	assert.Equal(t, int64(0), passed, "No events should pass")
+}
+
+// TestFilterConfig_SQSFilteringEnabled tests that SQS events are filtered
+// when SQS filtering is enabled (default behavior)
+func TestFilterConfig_SQSFilteringEnabled(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+
+	// Mark installation as NOT installed (negative cache)
+	registry.MarkNotInstalled(12345)
+
+	handlerCalled := false
+	mockHandler := &MockEventHandler{
+		eventTypes: []string{"pull_request"},
+		handlerFunc: func(ctx context.Context, eventType, deliveryID string, payload []byte) error {
+			handlerCalled = true
+			return nil
+		},
+	}
+
+	// Create filter with SQS filtering ENABLED (default)
+	filterConfig := &FilterConfig{
+		WebhookFilteringEnabled: false,
+		SQSFilteringEnabled:     true,
+	}
+
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, filterConfig)
+
+	// SQS event (with SQS context marker) for non-installed installation
+	sqsCtx := context.WithValue(ctx, SQSEventSourceKey, "sqs")
+	payload := createTestPayload(12345)
+	err := filter.Handle(sqsCtx, "pull_request", "test-sqs-enabled", payload)
+
+	assert.NoError(t, err)
+	assert.False(t, handlerCalled, "SQS event should be filtered when SQS filtering is enabled and installation not found")
+
+	// Verify it was counted as "filtered"
+	filtered, passed := filter.GetMetrics()
+	assert.Equal(t, int64(1), filtered, "Event should be filtered")
+	assert.Equal(t, int64(0), passed, "No events should pass")
+}
+
+// TestFilterConfig_SQSFilteringDisabled tests that SQS events pass through
+// when SQS filtering is disabled
+func TestFilterConfig_SQSFilteringDisabled(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+
+	// Mark installation as NOT installed (negative cache)
+	registry.MarkNotInstalled(12345)
+
+	handlerCalled := false
+	mockHandler := &MockEventHandler{
+		eventTypes: []string{"pull_request"},
+		handlerFunc: func(ctx context.Context, eventType, deliveryID string, payload []byte) error {
+			handlerCalled = true
+			return nil
+		},
+	}
+
+	// Create filter with SQS filtering DISABLED
+	filterConfig := &FilterConfig{
+		WebhookFilteringEnabled: false,
+		SQSFilteringEnabled:     false,
+	}
+
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, filterConfig)
+
+	// SQS event (with SQS context marker) for non-installed installation
+	sqsCtx := context.WithValue(ctx, SQSEventSourceKey, "sqs")
+	payload := createTestPayload(12345)
+	err := filter.Handle(sqsCtx, "pull_request", "test-sqs-disabled", payload)
+
+	assert.NoError(t, err)
+	assert.True(t, handlerCalled, "SQS event should pass through when SQS filtering is disabled")
+
+	// Verify it was counted as "passed"
+	filtered, passed := filter.GetMetrics()
+	assert.Equal(t, int64(0), filtered, "No events should be filtered")
+	assert.Equal(t, int64(1), passed, "Event should be counted as passed")
+}
+
+// TestFilterConfig_DefaultBehavior tests the default nil config behavior
+func TestFilterConfig_DefaultBehavior(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+	registry.MarkNotInstalled(12345)
+
+	webhookHandlerCalled := false
+	sqsHandlerCalled := false
+
+	mockHandler := &MockEventHandler{
+		eventTypes: []string{"pull_request"},
+		handlerFunc: func(ctx context.Context, eventType, deliveryID string, payload []byte) error {
+			// Check if this is SQS or webhook
+			if eventSource, ok := ctx.Value(SQSEventSourceKey).(string); ok && eventSource == "sqs" {
+				sqsHandlerCalled = true
+			} else {
+				webhookHandlerCalled = true
+			}
+			return nil
+		},
+	}
+
+	// Create filter with nil config (should use defaults)
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, nil)
+
+	// Test webhook event - should pass through (webhook filtering disabled by default)
+	payload := createTestPayload(12345)
+	err := filter.Handle(ctx, "pull_request", "test-webhook-default", payload)
+	assert.NoError(t, err)
+	assert.True(t, webhookHandlerCalled, "Webhook should pass through with default config")
+
+	// Test SQS event - should be filtered (SQS filtering enabled by default)
+	sqsCtx := context.WithValue(ctx, SQSEventSourceKey, "sqs")
+	err = filter.Handle(sqsCtx, "pull_request", "test-sqs-default", payload)
+	assert.NoError(t, err)
+	assert.False(t, sqsHandlerCalled, "SQS should be filtered with default config")
+
+	// Verify metrics: 1 passed (webhook), 1 filtered (SQS)
+	filtered, passed := filter.GetMetrics()
+	assert.Equal(t, int64(1), filtered, "SQS event should be filtered")
+	assert.Equal(t, int64(1), passed, "Webhook event should pass")
+}
+
+// TestFilterConfig_BothEnabled tests behavior when both webhook and SQS filtering are enabled
+func TestFilterConfig_BothEnabled(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+	registry.MarkNotInstalled(12345)
+
+	handlerCallCount := 0
+	mockHandler := &MockEventHandler{
+		eventTypes: []string{"pull_request"},
+		handlerFunc: func(ctx context.Context, eventType, deliveryID string, payload []byte) error {
+			handlerCallCount++
+			return nil
+		},
+	}
+
+	// Create filter with BOTH filtering enabled
+	filterConfig := &FilterConfig{
+		WebhookFilteringEnabled: true,
+		SQSFilteringEnabled:     true,
+	}
+
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, filterConfig)
+
+	// Test webhook event - should be filtered
+	payload := createTestPayload(12345)
+	err := filter.Handle(ctx, "pull_request", "test-webhook-both", payload)
+	assert.NoError(t, err)
+
+	// Test SQS event - should be filtered
+	sqsCtx := context.WithValue(ctx, SQSEventSourceKey, "sqs")
+	err = filter.Handle(sqsCtx, "pull_request", "test-sqs-both", payload)
+	assert.NoError(t, err)
+
+	// Neither should have called the handler
+	assert.Equal(t, 0, handlerCallCount, "No events should reach handler when both are filtered")
+
+	// Verify metrics: both filtered
+	filtered, passed := filter.GetMetrics()
+	assert.Equal(t, int64(2), filtered, "Both events should be filtered")
+	assert.Equal(t, int64(0), passed, "No events should pass")
+}
+
+// TestFilterConfig_BothDisabled tests behavior when both webhook and SQS filtering are disabled
+func TestFilterConfig_BothDisabled(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
+	registry.MarkNotInstalled(12345)
+
+	handlerCallCount := 0
+	mockHandler := &MockEventHandler{
+		eventTypes: []string{"pull_request"},
+		handlerFunc: func(ctx context.Context, eventType, deliveryID string, payload []byte) error {
+			handlerCallCount++
+			return nil
+		},
+	}
+
+	// Create filter with BOTH filtering disabled
+	filterConfig := &FilterConfig{
+		WebhookFilteringEnabled: false,
+		SQSFilteringEnabled:     false,
+	}
+
+	filter := NewInstallationFilterHandler(mockHandler, registry, nil, nil, nil, nil, nil, filterConfig)
+
+	// Test webhook event - should pass through
+	payload := createTestPayload(12345)
+	err := filter.Handle(ctx, "pull_request", "test-webhook-none", payload)
+	assert.NoError(t, err)
+
+	// Test SQS event - should pass through
+	sqsCtx := context.WithValue(ctx, SQSEventSourceKey, "sqs")
+	err = filter.Handle(sqsCtx, "pull_request", "test-sqs-none", payload)
+	assert.NoError(t, err)
+
+	// Both should have called the handler
+	assert.Equal(t, 2, handlerCallCount, "Both events should reach handler when filtering is disabled")
+
+	// Verify metrics: both passed
+	filtered, passed := filter.GetMetrics()
+	assert.Equal(t, int64(0), filtered, "No events should be filtered")
+	assert.Equal(t, int64(2), passed, "Both events should pass")
 }

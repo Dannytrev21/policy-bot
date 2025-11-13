@@ -45,13 +45,6 @@ const (
 	InstallationNotFound
 )
 
-// installationCacheEntry represents a cached installation status with expiration
-// Deprecated: Use InstallationRecord for new code
-type installationCacheEntry struct {
-	status    InstallationStatus
-	expiresAt time.Time
-}
-
 // InstallationRegistry manages a cache of installation verification results
 // to reduce API calls to GitHub. It caches both positive (installed) and
 // negative (not installed) results with different TTLs.
@@ -61,17 +54,18 @@ type installationCacheEntry struct {
 //
 // Thread Safety: Uses RWMutex for cache access and atomic operations for counters
 // to minimize lock contention under high load (200 events/sec target).
+//
+// Phase 8: Migrated to use only InstallationRecord system, removing legacy cache
+// redundancy that was causing 2x memory usage and 2x writes.
 type InstallationRegistry struct {
 	mu sync.RWMutex
 
 	// installations maps installation ID to enhanced installation records
+	// This is the single source of truth for installation data
 	installations map[int64]*InstallationRecord
 
 	// repoIndex maps "owner:repo" to installation ID for quick lookups
 	repoIndex map[string]int64
-
-	// cache maps installation ID to its cached status (legacy compatibility)
-	cache map[int64]installationCacheEntry
 
 	// TTL for positive results (app is installed)
 	positiveTTL time.Duration
@@ -95,7 +89,6 @@ func NewInstallationRegistry(positiveTTL, negativeTTL time.Duration, metricsRegi
 	r := &InstallationRegistry{
 		installations:   make(map[int64]*InstallationRecord),
 		repoIndex:       make(map[string]int64),
-		cache:           make(map[int64]installationCacheEntry),
 		positiveTTL:     positiveTTL,
 		negativeTTL:     negativeTTL,
 		metricsRegistry: metricsRegistry,
@@ -119,9 +112,11 @@ func NewInstallationRegistry(positiveTTL, negativeTTL time.Duration, metricsRegi
 //
 // Performance: Uses atomic operations for counter updates to avoid lock contention.
 // Only takes write lock when modifying cache entries (expired cleanup).
+//
+// Phase 8: Migrated to read from InstallationRecord instead of legacy cache.
 func (r *InstallationRegistry) Check(installationID int64) (InstallationStatus, bool) {
 	r.mu.RLock()
-	entry, exists := r.cache[installationID]
+	record, exists := r.installations[installationID]
 	r.mu.RUnlock()
 
 	if !exists {
@@ -132,10 +127,16 @@ func (r *InstallationRegistry) Check(installationID int64) (InstallationStatus, 
 	}
 
 	// Check if entry has expired
-	if time.Now().After(entry.expiresAt) {
+	if record.IsExpired() {
 		// Entry expired, remove it
 		r.mu.Lock()
-		delete(r.cache, installationID)
+		delete(r.installations, installationID)
+		// Also clean up repo index entries for this installation
+		for repoKey, instID := range r.repoIndex {
+			if instID == installationID {
+				delete(r.repoIndex, repoKey)
+			}
+		}
 		r.updateCacheGauges()
 		r.mu.Unlock()
 
@@ -148,30 +149,60 @@ func (r *InstallationRegistry) Check(installationID int64) (InstallationStatus, 
 	// Valid cache hit - use atomic increment
 	r.cacheHits.Add(1)
 	r.recordCacheHit()
-	return entry.status, true
+	return record.Status, true
 }
 
 // MarkInstalled marks an installation as installed (positive cache)
+//
+// Phase 8: Migrated to write to InstallationRecord instead of legacy cache.
 func (r *InstallationRegistry) MarkInstalled(installationID int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.cache[installationID] = installationCacheEntry{
-		status:    InstallationExists,
-		expiresAt: time.Now().Add(r.positiveTTL),
+	// Check if record exists, create or update it
+	record, exists := r.installations[installationID]
+	if !exists {
+		record = &InstallationRecord{
+			InstallationID: installationID,
+			Status:         InstallationExists,
+			ExpiresAt:      time.Now().Add(r.positiveTTL),
+			Repositories:   make(map[string]bool),
+			LastUpdated:    time.Now(),
+		}
+		r.installations[installationID] = record
+	} else {
+		// Update existing record
+		record.Status = InstallationExists
+		record.ExpiresAt = time.Now().Add(r.positiveTTL)
+		record.LastUpdated = time.Now()
 	}
 
 	r.updateCacheGauges()
 }
 
 // MarkNotInstalled marks an installation as not installed (negative cache)
+//
+// Phase 8: Migrated to write to InstallationRecord instead of legacy cache.
 func (r *InstallationRegistry) MarkNotInstalled(installationID int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.cache[installationID] = installationCacheEntry{
-		status:    InstallationNotFound,
-		expiresAt: time.Now().Add(r.negativeTTL),
+	// Check if record exists, create or update it
+	record, exists := r.installations[installationID]
+	if !exists {
+		record = &InstallationRecord{
+			InstallationID: installationID,
+			Status:         InstallationNotFound,
+			ExpiresAt:      time.Now().Add(r.negativeTTL),
+			Repositories:   make(map[string]bool),
+			LastUpdated:    time.Now(),
+		}
+		r.installations[installationID] = record
+	} else {
+		// Update existing record
+		record.Status = InstallationNotFound
+		record.ExpiresAt = time.Now().Add(r.negativeTTL)
+		record.LastUpdated = time.Now()
 	}
 
 	r.updateCacheGauges()
@@ -179,11 +210,22 @@ func (r *InstallationRegistry) MarkNotInstalled(installationID int64) {
 
 // Remove removes an installation from the cache.
 // This should be called when an installation is deleted or repositories are removed.
+//
+// Phase 8: Migrated to remove from InstallationRecord instead of legacy cache.
 func (r *InstallationRegistry) Remove(installationID int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	delete(r.cache, installationID)
+	// Remove installation record
+	delete(r.installations, installationID)
+
+	// Also clean up repo index entries for this installation
+	for repoKey, instID := range r.repoIndex {
+		if instID == installationID {
+			delete(r.repoIndex, repoKey)
+		}
+	}
+
 	r.updateCacheGauges()
 }
 
@@ -211,21 +253,24 @@ func (r *InstallationRegistry) GetMetrics() (cacheHits, cacheMisses, apiCalls in
 }
 
 // GetCacheSize returns the current number of entries in the cache
+//
+// Phase 8: Migrated to count InstallationRecord entries instead of legacy cache.
 func (r *InstallationRegistry) GetCacheSize() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	return len(r.cache)
+	return len(r.installations)
 }
 
 // Clear removes all entries from the cache
+//
+// Phase 8: Migrated to clear only InstallationRecord, legacy cache removed.
 func (r *InstallationRegistry) Clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.installations = make(map[int64]*InstallationRecord)
 	r.repoIndex = make(map[string]int64)
-	r.cache = make(map[int64]installationCacheEntry)
 	r.updateCacheGauges()
 }
 
@@ -255,15 +300,22 @@ func (r *InstallationRegistry) recordCacheMiss() {
 
 // updateCacheGauges updates the gauge metrics for cache size and composition
 // NOTE: This method assumes the mutex is already held by the caller
+//
+// Phase 8: Migrated to count from InstallationRecord instead of legacy cache.
 func (r *InstallationRegistry) updateCacheGauges() {
 	if r.metricsRegistry == nil {
 		return
 	}
 
-	// Count positive and negative entries
+	// Count positive and negative entries from InstallationRecord
 	var positiveCount, negativeCount int64
-	for _, entry := range r.cache {
-		switch entry.status {
+	for _, record := range r.installations {
+		// Skip expired entries in count (they'll be cleaned up on next access)
+		if record.IsExpired() {
+			continue
+		}
+
+		switch record.Status {
 		case InstallationExists:
 			positiveCount++
 		case InstallationNotFound:
@@ -271,10 +323,10 @@ func (r *InstallationRegistry) updateCacheGauges() {
 		}
 	}
 
-	// Update cache size gauge
+	// Update cache size gauge (count of non-expired entries)
 	if gauge := r.metricsRegistry.Get(MetricsKeyRegistryCacheSize); gauge != nil {
 		if g, ok := gauge.(gometrics.Gauge); ok {
-			g.Update(int64(len(r.cache)))
+			g.Update(positiveCount + negativeCount)
 		}
 	}
 
@@ -324,18 +376,14 @@ func (r *InstallationRegistry) CheckByRepo(owner, repo string) (int64, Installat
 }
 
 // UpdateInstallation updates or creates an enhanced installation record
+//
+// Phase 8: Removed legacy cache update - now only updates InstallationRecord.
 func (r *InstallationRegistry) UpdateInstallation(record *InstallationRecord) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Update the installations map
+	// Update the installations map (single source of truth)
 	r.installations[record.InstallationID] = record
-
-	// Update the legacy cache for compatibility
-	r.cache[record.InstallationID] = installationCacheEntry{
-		status:    record.Status,
-		expiresAt: record.ExpiresAt,
-	}
 
 	// Rebuild repo index for this installation
 	if record.Repositories != nil {
@@ -348,6 +396,8 @@ func (r *InstallationRegistry) UpdateInstallation(record *InstallationRecord) {
 }
 
 // AddRepositories adds repositories to an existing installation
+//
+// Phase 8: Removed legacy cache update - now only updates InstallationRecord.
 func (r *InstallationRegistry) AddRepositories(installationID int64, repos []struct{ Owner, Repo string }) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -373,12 +423,6 @@ func (r *InstallationRegistry) AddRepositories(installationID int64, repos []str
 	}
 
 	record.LastUpdated = time.Now()
-
-	// Update legacy cache
-	r.cache[installationID] = installationCacheEntry{
-		status:    InstallationExists,
-		expiresAt: record.ExpiresAt,
-	}
 }
 
 // RemoveRepositories removes repositories from an installation

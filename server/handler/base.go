@@ -56,6 +56,7 @@ type Base struct {
 	PullOpts                    *PullEvaluationOptions
 	InstallationIdMap           map[int64]int64 // Legacy cache, kept for backwards compatibility
 	InstallationRegistry        *InstallationRegistry
+	CircuitBreaker              *CircuitBreaker      // Phase 8 Step 3: Shared circuit breaker for Manager and Locator
 	InstallationManager         *InstallationManager // Centralized manager for installation client creation
 	InstallationLocator         *InstallationLocator // Installation locator shared by filters and caches
 	RepoMappingCache            *MappingCache        // Phase 3: Repository → Installation ID mapping cache
@@ -94,14 +95,20 @@ func (base *Base) Initialize() {
 		base.InstallationRegistry = NewInstallationRegistry(1*time.Hour, 5*time.Minute, base.MetricsRegistry)
 	}
 
+	// Phase 8 Step 3: Initialize shared circuit breaker for both Manager and Locator
+	// This ensures consistent failure tracking across all GitHub API calls
+	if base.CircuitBreaker == nil {
+		base.CircuitBreaker = NewCircuitBreaker()
+	}
+
 	// Initialize installation manager if not already set
-	// The manager centralizes client creation logic and will be extended with
-	// retry and circuit breaker patterns in future phases
+	// The manager centralizes client creation logic with retry and circuit breaker patterns
 	if base.InstallationManager == nil {
 		base.InstallationManager = NewInstallationManager(
 			base.ClientCreator,
 			base.InstallationRegistry,
 			base.MetricsRegistry,
+			base.CircuitBreaker, // Phase 8 Step 3: Pass shared circuit breaker
 		)
 	}
 
@@ -122,6 +129,7 @@ func (base *Base) Initialize() {
 			func(ctx context.Context) (*github.Client, error) {
 				return base.ClientCreator.NewAppClient()
 			},
+			base.CircuitBreaker, // Phase 8 Step 3: Pass shared circuit breaker
 		)
 	}
 

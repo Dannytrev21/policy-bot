@@ -29,7 +29,7 @@ func TestInstallationRegistry_NewRegistry(t *testing.T) {
 	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 
 	require.NotNil(t, registry)
-	assert.NotNil(t, registry.cache)
+	assert.NotNil(t, registry.installations)
 	assert.Equal(t, 1*time.Hour, registry.positiveTTL)
 	assert.Equal(t, 5*time.Minute, registry.negativeTTL)
 	assert.Equal(t, 0, registry.GetCacheSize())
@@ -659,16 +659,17 @@ func TestInstallationRegistry_GetInstallation(t *testing.T) {
 		assert.Nil(t, record)
 	})
 
-	t.Run("get installation marked as not found via legacy cache", func(t *testing.T) {
-		// MarkNotInstalled uses the legacy cache, not the installations map
-		// So GetInstallation won't find it
+	t.Run("get installation marked as not found", func(t *testing.T) {
+		// Phase 8: MarkNotInstalled now creates an InstallationRecord
 		registry.MarkNotInstalled(54321)
 
+		// GetInstallation should now find it
 		record, exists := registry.GetInstallation(54321)
-		assert.False(t, exists)
-		assert.Nil(t, record)
+		assert.True(t, exists, "MarkNotInstalled now creates InstallationRecord")
+		assert.NotNil(t, record)
+		assert.Equal(t, InstallationNotFound, record.Status)
 
-		// But the legacy Check method will find it
+		// Check method should also find it
 		status, hit := registry.Check(54321)
 		assert.True(t, hit)
 		assert.Equal(t, InstallationNotFound, status)

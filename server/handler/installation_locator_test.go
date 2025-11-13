@@ -45,7 +45,8 @@ func TestNewInstallationLocator(t *testing.T) {
 		return nil, nil
 	}
 
-	locator := NewInstallationLocator(registry, logger, clientFactory)
+	circuitBreaker := NewCircuitBreaker()
+	locator := NewInstallationLocator(registry, logger, clientFactory, circuitBreaker)
 
 	assert.NotNil(t, locator)
 	assert.NotNil(t, locator.registry)
@@ -63,7 +64,8 @@ func TestInstallationLocator_LookupWebhook(t *testing.T) {
 		return nil, nil
 	}
 
-	locator := NewInstallationLocator(registry, logger, clientFactory)
+	circuitBreaker := NewCircuitBreaker()
+	locator := NewInstallationLocator(registry, logger, clientFactory, circuitBreaker)
 
 	tests := []struct {
 		name           string
@@ -103,7 +105,7 @@ func TestInstallationLocator_LookupWebhook(t *testing.T) {
 
 			req := LookupRequest{
 				InstallationID: tt.installationID,
-				Strategy:       StrategyWebhook,
+				EventSource:    EventSourceWebhook,
 				EventType:      "pull_request",
 			}
 
@@ -127,7 +129,8 @@ func TestInstallationLocator_BuildCompoundKey(t *testing.T) {
 		return nil, nil
 	}
 
-	locator := NewInstallationLocator(registry, logger, clientFactory)
+	circuitBreaker := NewCircuitBreaker()
+	locator := NewInstallationLocator(registry, logger, clientFactory, circuitBreaker)
 
 	tests := []struct {
 		name     string
@@ -176,13 +179,14 @@ func TestInstallationLocator_HandleAPISuccess(t *testing.T) {
 		return nil, nil
 	}
 
-	locator := NewInstallationLocator(registry, logger, clientFactory)
+	circuitBreaker := NewCircuitBreaker()
+	locator := NewInstallationLocator(registry, logger, clientFactory, circuitBreaker)
 
 	req := LookupRequest{
 		InstallationID: 0,
 		Owner:          "test-owner",
 		Repo:           "test-repo",
-		Strategy:       StrategySQS,
+		EventSource:    EventSourceSQS,
 		EventType:      "push",
 	}
 
@@ -212,7 +216,8 @@ func TestInstallationLocator_HandleAPIError(t *testing.T) {
 		return nil, nil
 	}
 
-	locator := NewInstallationLocator(registry, logger, clientFactory)
+	circuitBreaker := NewCircuitBreaker()
+	locator := NewInstallationLocator(registry, logger, clientFactory, circuitBreaker)
 
 	tests := []struct {
 		name         string
@@ -237,7 +242,7 @@ func TestInstallationLocator_HandleAPIError(t *testing.T) {
 				InstallationID: 0,
 				Owner:          "test-owner",
 				Repo:           "test-repo",
-				Strategy:       StrategySQS,
+				EventSource:    EventSourceSQS,
 				EventType:      "push",
 			}
 
@@ -264,7 +269,8 @@ func TestInstallationLocator_GetMetrics(t *testing.T) {
 		return nil, nil
 	}
 
-	locator := NewInstallationLocator(registry, logger, clientFactory)
+	circuitBreaker := NewCircuitBreaker()
+	locator := NewInstallationLocator(registry, logger, clientFactory, circuitBreaker)
 
 	// Perform some operations to generate metrics
 	registry.MarkInstalled(12345)
@@ -274,7 +280,7 @@ func TestInstallationLocator_GetMetrics(t *testing.T) {
 
 	req := LookupRequest{
 		InstallationID: 12345,
-		Strategy:       StrategySQS,
+		EventSource:    EventSourceSQS,
 		EventType:      "push",
 	}
 

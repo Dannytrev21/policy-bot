@@ -207,16 +207,19 @@ type InstallationClients struct {
 
 // NewInstallationManager creates a new InstallationManager with the provided dependencies.
 // It initializes the client cache with default TTL (10 minutes) and max size (1000 clients).
+// Phase 8 Step 3: Now accepts a shared circuit breaker to ensure consistent failure tracking
+// across all GitHub API calls (Manager and Locator).
 func NewInstallationManager(
 	clientCreator githubapp.ClientCreator,
 	installationRegistry *InstallationRegistry,
 	metricsRegistry gometrics.Registry,
+	circuitBreaker *CircuitBreaker,
 ) *InstallationManager {
 	return &InstallationManager{
 		clientCreator:        clientCreator,
 		installationRegistry: installationRegistry,
 		metricsRegistry:      metricsRegistry,
-		circuitBreaker:       NewCircuitBreaker(),
+		circuitBreaker:       circuitBreaker, // Phase 8 Step 3: Use shared circuit breaker
 		clientCache:          NewClientCache(defaultClientCacheTTL, defaultClientCacheMaxSize),
 	}
 }
