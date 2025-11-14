@@ -107,20 +107,22 @@ func (h *MergeGroup) Handle(ctx context.Context, eventType, devlieryID string, p
 
 	logger := zerolog.Ctx(ctx)
 	installationID := githubapp.GetInstallationIDFromEvent(&event)
-	client, err := h.NewInstallationClient(installationID)
+	owner := event.GetRepo().GetOwner().GetLogin()
+
+	// Use cached client lookup instead of creating uncached client
+	clients, err := h.GetClientsForEvent(ctx, owner, installationID)
 	if err != nil {
 		return err
 	}
 
 	repository := event.GetRepo().GetName()
-	owner := event.GetRepo().GetOwner().GetLogin()
 	mergeGroup := event.GetMergeGroup()
 	baseBranch := strings.TrimPrefix(mergeGroup.GetBaseRef(), "refs/heads/")
 	headSHA := mergeGroup.GetHeadSHA()
 
 	// If a PR is added to the merge queue, presumably the policy existed and was valid at the time of merge,
 	// so we're just checking for the existance of a policy here and don't care about its validity.
-	fetchedConfig := h.ConfigFetcher.ConfigForRepositoryBranch(ctx, client, owner, repository, baseBranch)
+	fetchedConfig := h.ConfigFetcher.ConfigForRepositoryBranch(ctx, clients.V3Client, owner, repository, baseBranch)
 	if fetchedConfig.Config == nil {
 		return nil
 	}
@@ -134,13 +136,13 @@ func (h *MergeGroup) Handle(ctx context.Context, eventType, devlieryID string, p
 		Description: &message,
 	}
 
-	if err := PostStatus(ctx, client, owner, repository, headSHA, status); err != nil {
+	if err := PostStatus(ctx, clients.V3Client, owner, repository, headSHA, status); err != nil {
 		logger.Err(errors.WithStack(err)).Msg("Failed to post status check for merge group")
 	}
 
 	if h.PullOpts.PostInsecureStatusChecks {
 		status.Context = github.String(h.PullOpts.StatusCheckContext)
-		if err := PostStatus(ctx, client, owner, repository, headSHA, status); err != nil {
+		if err := PostStatus(ctx, clients.V3Client, owner, repository, headSHA, status); err != nil {
 			logger.Err(err).Msg("Failed to post insecure repo status")
 		}
 	}

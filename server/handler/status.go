@@ -60,7 +60,8 @@ func (h *Status) processOwn(ctx context.Context, event github.StatusEvent) error
 	commitSHA := event.GetCommit().GetSHA()
 	installationID := githubapp.GetInstallationIDFromEvent(&event)
 
-	client, err := h.NewInstallationClient(installationID)
+	// Use cached client lookup instead of creating uncached client
+	clients, err := h.GetClientsForEvent(ctx, ownerName, installationID)
 	if err != nil {
 		return err
 	}
@@ -96,7 +97,7 @@ func (h *Status) processOwn(ctx context.Context, event github.StatusEvent) error
 		Description: &desc,
 	}
 
-	_, _, err = client.Repositories.CreateStatus(ctx, ownerName, repoName, commitSHA, status)
+	_, _, err = clients.V3Client.Repositories.CreateStatus(ctx, ownerName, repoName, commitSHA, status)
 	return err
 }
 
@@ -107,7 +108,8 @@ func (h *Status) processOthers(ctx context.Context, event github.StatusEvent) er
 	commitSHA := event.GetCommit().GetSHA()
 	installationID := githubapp.GetInstallationIDFromEvent(&event)
 
-	client, err := h.NewInstallationClient(installationID)
+	// Use cached client lookup instead of creating uncached client
+	clients, err := h.GetClientsForEvent(ctx, ownerName, installationID)
 	if err != nil {
 		return err
 	}
@@ -116,7 +118,7 @@ func (h *Status) processOthers(ctx context.Context, event github.StatusEvent) er
 
 	// In practice, there should be well under 100 PRs for a given commit. In exceptional cases, if there are
 	// more than 100 PRs, only process the most recent 100.
-	prs, _, err := client.PullRequests.ListPullRequestsWithCommit(
+	prs, _, err := clients.V3Client.PullRequests.ListPullRequestsWithCommit(
 		ctx,
 		ownerName,
 		repoName,

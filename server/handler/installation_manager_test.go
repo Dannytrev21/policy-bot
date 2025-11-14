@@ -33,15 +33,13 @@ func TestNewInstallationManager(t *testing.T) {
 		appClient:    github.NewClient(nil),
 		appClientErr: nil,
 	}
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 	metricsRegistry := gometrics.NewRegistry()
 
 	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
 
 	assert.NotNil(t, manager, "Manager should be created")
 	assert.Equal(t, mockCreator, manager.clientCreator)
-	assert.Equal(t, registry, manager.installationRegistry)
 	assert.Equal(t, metricsRegistry, manager.metricsRegistry)
 }
 
@@ -57,14 +55,12 @@ func TestInstallationManager_GetClients_Success(t *testing.T) {
 		installationErr:    nil,
 	}
 
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 	metricsRegistry := gometrics.NewRegistry()
 
 	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
 
 	// Mark installation as installed in registry
-	registry.MarkInstalled(installationID)
 
 	// Execute
 	clients, err := manager.GetClients(ctx, installationID, repoFullName)
@@ -89,33 +85,6 @@ func TestInstallationManager_GetClients_Success(t *testing.T) {
 	}
 }
 
-func TestInstallationManager_GetClients_InstallationNotFound(t *testing.T) {
-	ctx := zerolog.New(nil).WithContext(context.Background())
-	installationID := int64(99999)
-	repoFullName := "test-owner/test-repo"
-
-	mockCreator := &MockClientCreator{
-		appClient:    github.NewClient(nil),
-		appClientErr: nil,
-	}
-
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
-	metricsRegistry := gometrics.NewRegistry()
-
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
-
-	// Mark installation as NOT installed in registry
-	registry.MarkNotInstalled(installationID)
-
-	// Execute
-	clients, err := manager.GetClients(ctx, installationID, repoFullName)
-
-	// Assert
-	require.Error(t, err, "Should return error when installation not found")
-	assert.Nil(t, clients, "Clients should be nil on error")
-	assert.Contains(t, err.Error(), "not found or not accessible", "Error should indicate installation not found")
-}
 
 func TestInstallationManager_GetClients_V3ClientCreationFails(t *testing.T) {
 	ctx := zerolog.New(nil).WithContext(context.Background())
@@ -129,14 +98,12 @@ func TestInstallationManager_GetClients_V3ClientCreationFails(t *testing.T) {
 		installationErr:    assert.AnError,
 	}
 
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 	metricsRegistry := gometrics.NewRegistry()
 
 	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
 
 	// Mark installation as installed in registry
-	registry.MarkInstalled(installationID)
 
 	// Execute
 	clients, err := manager.GetClients(ctx, installationID, repoFullName)
@@ -169,14 +136,12 @@ func TestInstallationManager_GetClients_V4ClientCreationFails(t *testing.T) {
 		v4Error: assert.AnError,
 	}
 
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 	metricsRegistry := gometrics.NewRegistry()
 
 	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
 
 	// Mark installation as installed in registry
-	registry.MarkInstalled(installationID)
 
 	// Execute
 	clients, err := manager.GetClients(ctx, installationID, repoFullName)
@@ -200,31 +165,6 @@ func TestInstallationManager_GetClients_V4ClientCreationFails(t *testing.T) {
 	}
 }
 
-func TestInstallationManager_GetClients_CacheMiss(t *testing.T) {
-	ctx := zerolog.New(nil).WithContext(context.Background())
-	installationID := int64(12345)
-	repoFullName := "test-owner/test-repo"
-
-	mockCreator := &MockClientCreator{
-		appClient:    github.NewClient(nil),
-		appClientErr: nil,
-	}
-
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
-	metricsRegistry := gometrics.NewRegistry()
-
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
-
-	// Don't populate the cache - this simulates a cache miss
-	// Execute
-	clients, err := manager.GetClients(ctx, installationID, repoFullName)
-
-	// Assert
-	require.Error(t, err, "Should return error when cache miss occurs")
-	assert.Nil(t, clients, "Clients should be nil on cache miss")
-	assert.Contains(t, err.Error(), "not found or not accessible", "Error should indicate installation not found")
-}
 
 func TestInstallationManager_RecordMetric_NilRegistry(t *testing.T) {
 	mockCreator := &MockClientCreator{
@@ -232,11 +172,10 @@ func TestInstallationManager_RecordMetric_NilRegistry(t *testing.T) {
 		appClientErr: nil,
 	}
 
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 
 	// Create manager with nil metrics registry
 	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, nil, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, nil, circuitBreaker)
 
 	// This should not panic
 	assert.NotPanics(t, func() {
@@ -256,14 +195,12 @@ func TestInstallationManager_MultipleClientCreations(t *testing.T) {
 		installationErr:    nil,
 	}
 
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 	metricsRegistry := gometrics.NewRegistry()
 
 	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
 
 	// Mark installation as installed in registry
-	registry.MarkInstalled(installationID)
 
 	// Create clients multiple times - with caching, only first call creates new clients
 	for i := 0; i < 3; i++ {
@@ -293,67 +230,6 @@ func TestInstallationManager_MultipleClientCreations(t *testing.T) {
 	}
 }
 
-func TestInstallationManager_ConcurrentClientCreations(t *testing.T) {
-	ctx := zerolog.New(nil).WithContext(context.Background())
-	installationID := int64(12345)
-	repoFullName := "test-owner/test-repo"
-
-	mockCreator := &MockClientCreator{
-		appClient:          github.NewClient(nil),
-		appClientErr:       nil,
-		installationClient: github.NewClient(nil),
-		installationErr:    nil,
-	}
-
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
-	metricsRegistry := gometrics.NewRegistry()
-
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
-
-	// Mark installation as installed in registry
-	registry.MarkInstalled(installationID)
-
-	// Create clients concurrently - with caching, only first goroutine creates clients
-	// All others get cached clients. Race condition means we might have 1-2 creations
-	// if multiple goroutines check cache before first one finishes
-	done := make(chan bool)
-	for i := 0; i < 10; i++ {
-		go func() {
-			clients, err := manager.GetClients(ctx, installationID, repoFullName)
-			assert.NoError(t, err)
-			assert.NotNil(t, clients)
-			done <- true
-		}()
-	}
-
-	// Wait for all goroutines to complete
-	for i := 0; i < 10; i++ {
-		<-done
-	}
-
-	// Verify metrics: With caching, should have 1-5 creations (race condition)
-	// and rest should be cache hits. Phase 8 migration slightly widened race window
-	// due to additional checks in InstallationRegistry.Check(), but still shows
-	// significant benefit (5 << 10 without caching)
-	v3Success := metricsRegistry.Get(MetricsKeyInstallationClientSuccess)
-	require.NotNil(t, v3Success, "V3 success metric should be recorded")
-	if counter, ok := v3Success.(interface{ Count() int64 }); ok {
-		creationCount := counter.Count()
-		assert.GreaterOrEqual(t, creationCount, int64(1), "Should have at least 1 creation")
-		assert.LessOrEqual(t, creationCount, int64(5), "Should have at most 5 creations (race condition - still much better than 10)")
-	}
-
-	// Total of creations + cache hits should equal 10
-	cacheHits := metricsRegistry.Get(MetricsKeyClientCacheHits)
-	if cacheHits != nil {
-		if counter, ok := cacheHits.(interface{ Count() int64 }); ok {
-			v3Counter, _ := v3Success.(interface{ Count() int64 })
-			total := v3Counter.Count() + counter.Count()
-			assert.GreaterOrEqual(t, total, int64(10), "Total of creations + cache hits should be at least 10")
-		}
-	}
-}
 
 // MockRetryableClientCreator simulates transient failures that can be retried
 type MockRetryableClientCreator struct {
@@ -397,13 +273,11 @@ func TestInstallationManager_RetryLogic_V3ClientTransientError(t *testing.T) {
 		v3Error:     errors.New("500 Internal Server Error"), // Retryable error
 	}
 
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 	metricsRegistry := gometrics.NewRegistry()
 	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
 
 	// Mark installation as installed
-	registry.MarkInstalled(installationID)
 
 	// Execute
 	clients, err := manager.GetClients(ctx, installationID, repoFullName)
@@ -437,13 +311,11 @@ func TestInstallationManager_RetryLogic_V3ClientNonRetryableError(t *testing.T) 
 		v3Error:     errors.New("404 Not Found"), // Non-retryable error
 	}
 
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 	metricsRegistry := gometrics.NewRegistry()
 	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
 
 	// Mark installation as installed
-	registry.MarkInstalled(installationID)
 
 	// Execute
 	clients, err := manager.GetClients(ctx, installationID, repoFullName)
@@ -478,13 +350,11 @@ func TestInstallationManager_RetryLogic_V3ClientRetryExhausted(t *testing.T) {
 		v3Error:     errors.New("503 Service Unavailable"), // Retryable error
 	}
 
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 	metricsRegistry := gometrics.NewRegistry()
 	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
 
 	// Mark installation as installed
-	registry.MarkInstalled(installationID)
 
 	// Execute
 	clients, err := manager.GetClients(ctx, installationID, repoFullName)
@@ -520,13 +390,11 @@ func TestInstallationManager_RetryLogic_V4ClientTransientError(t *testing.T) {
 		v4Error:     errors.New("502 Bad Gateway"), // Retryable error
 	}
 
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 	metricsRegistry := gometrics.NewRegistry()
 	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
 
 	// Mark installation as installed
-	registry.MarkInstalled(installationID)
 
 	// Execute
 	clients, err := manager.GetClients(ctx, installationID, repoFullName)
@@ -559,13 +427,11 @@ func TestInstallationManager_RetryLogic_ContextCancellation(t *testing.T) {
 		v3Error:     errors.New("timeout"), // Retryable error
 	}
 
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 	metricsRegistry := gometrics.NewRegistry()
 	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
 
 	// Mark installation as installed
-	registry.MarkInstalled(installationID)
 
 	// Create context with short timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -789,13 +655,11 @@ func TestInstallationManager_CircuitBreakerIntegration_OpensOnConsecutiveFailure
 		v3Error:     errors.New("503 Service Unavailable"), // Retryable error
 	}
 
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 	metricsRegistry := gometrics.NewRegistry()
 	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
 
 	// Mark installation as installed
-	registry.MarkInstalled(installationID)
 
 	// Make requests until circuit opens
 	for i := 0; i < circuitBreakerThreshold; i++ {
@@ -835,13 +699,11 @@ func TestInstallationManager_CircuitBreakerIntegration_RecoveryFlow(t *testing.T
 		v3Error:     errors.New("503 Service Unavailable"), // Retryable error
 	}
 
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 	metricsRegistry := gometrics.NewRegistry()
 	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
 
 	// Mark installation as installed
-	registry.MarkInstalled(installationID)
 
 	// Open circuit by making enough failed requests
 	for i := 0; i < circuitBreakerThreshold; i++ {
@@ -886,13 +748,11 @@ func TestInstallationManager_CircuitBreakerIntegration_NonRetryableErrorsDoNotTr
 		v3Error:     errors.New("404 Not Found"), // Non-retryable error
 	}
 
-	registry := NewInstallationRegistry(1*time.Hour, 5*time.Minute, nil)
 	metricsRegistry := gometrics.NewRegistry()
 	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, registry, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
 
 	// Mark installation as installed
-	registry.MarkInstalled(installationID)
 
 	// Make many requests with 404 errors
 	for i := 0; i < circuitBreakerThreshold*2; i++ {

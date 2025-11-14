@@ -117,48 +117,6 @@ case, we prefer predicates. Policies that use predicates may define more rules,
 but tend to be flatter and use fewer logical operators. With well-chosen rule
 names, we find this style of policy easier to read and reason about.
 
-### Selective Webhook Filtering <!-- omit in toc -->
-
-Policy Bot supports environment-aware webhook filtering to enable gradual migration from HTTP webhooks to SQS event processing. This is particularly useful during transitions to event-driven architecture.
-
-**Channel switches:** set `installation_filter.webhook_enabled` / `installation_filter.sqs_enabled` in `policy-bot.yml` to decide which ingress path uses the installation-aware filter. Defaults keep webhooks in pass-through mode and SQS filtered.
-
-**Configuration Example:**
-```yaml
-installation_filter:
-  webhook_enabled: false
-  sqs_enabled: true
-
-sqs:
-  enabled: true
-  queues:
-    # Status events: SQS for GHEC, HTTP for GHES
-    status:
-      east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-status"
-      ghec_enabled: false  # Disables status webhooks for GHEC (SQS handles them)
-      ghes_enabled: true   # GHES webhooks continue processing normally
-      queue_workers: 15
-
-    # Pull request events: HTTP for both environments
-    pull_request:
-      ghec_enabled: true   # Webhooks enabled
-      ghes_enabled: true   # Webhooks enabled
-```
-
-**How it works:**
-- `ghec_enabled: false` = Webhooks DISABLED for GitHub.com (SQS handles events)
-- `ghes_enabled: true` = Webhooks ENABLED for GitHub Enterprise Server (HTTP handles events)
-- Events not in the SQS config default to enabled for all environments
-
-**Benefits:**
-- 30-50% reduction in internal scheduler queue pressure
-- Gradual rollout capability (enable/disable per event type and environment)
-- Fast rollback (simple config change)
-- Zero SQS processing impact
-- < 0.0002ms overhead per webhook
-
-See [TESTING.md](TESTING.md) for test coverage details and [.claude/todo/feature_flag.md](.claude/todo/feature_flag.md) for implementation documentation.
-
 ## Configuration
 
 By default, policies are defined in a `.policy.yml` file at the root of the
@@ -1273,9 +1231,11 @@ migration, A/B testing, or hybrid deployments based on your requirements.
 
 ### GitHub API Rate Limiting <!-- omit in toc -->
 
-`policy-bot` includes proactive rate limiting for GitHub API calls during SQS event processing to prevent exceeding GitHub's API rate limits (15,000 requests/hour per installation ≈ 4.16 req/sec).
+`policy-bot` includes rate limiting for GitHub API calls to prevent exceeding GitHub's API rate limits.
 
-**Important**: Rate limiting applies ONLY to SQS event processing. Webhook (HTTP) events are NOT rate limited to maintain low latency.
+**GHEC (GitHub.com)**: Uses per-organization rate limiting since there is typically one installation per organization (max 2). This provides better isolation and more accurate quota tracking.
+
+**GHES (GitHub Enterprise Server)**: Uses per-installation rate limiting since multiple installations can exist per organization.
 
 #### Configuration
 
@@ -1283,16 +1243,16 @@ Add the following to your server configuration file:
 
 ```yaml
 rate_limit:
-  # Enable rate limiting for SQS events (default: true)
+  # Enable rate limiting (default: true)
   enabled: true
 
-  # Per-installation rate limit (requests per second)
+  # Per-organization rate limit for GHEC (requests per second)
   # Default: 3.0 req/sec (conservative for GitHub's 15k/hr limit)
-  installation_rate: 3.0
+  org_rate: 3.0
 
-  # Per-installation burst allowance (requests)
+  # Per-organization burst allowance for GHEC (requests)
   # Default: 10 requests
-  installation_burst: 10
+  org_burst: 10
 
   # Global rate limit across all installations (requests per second)
   # Default: 100.0 req/sec
@@ -1306,25 +1266,25 @@ rate_limit:
 #### How It Works
 
 - **Token Bucket Algorithm**: Uses `golang.org/x/time/rate` for efficient, precise rate limiting
-- **Per-Installation Isolation**: Separate rate limiters for each GitHub App installation
-- **Global Safety Limit**: Overall limit across all installations to prevent overwhelming GitHub API
-- **SQS-Only Application**: Webhook handlers bypass rate limiting entirely for low latency
+- **Per-Organization Isolation (GHEC)**: Separate rate limiters and client caches per organization for better quota tracking
+- **Per-Installation Isolation (GHES)**: Separate rate limiters per installation for multi-installation environments
+- **Global Safety Limit**: Overall limit across all installations/organizations to prevent overwhelming GitHub API
 - **Metrics Integration**: Exports wait time, throttling events, and quota usage via Prometheus and go-metrics
 
 #### Benefits
 
 - **Proactive Protection**: Prevents 429 (Too Many Requests) errors before they occur
+- **Better Quota Tracking (GHEC)**: Per-org caching and rate limiting aligns with GitHub's quota model
 - **Defense in Depth**: Works alongside existing circuit breaker and exponential backoff for reactive protection
-- **No Webhook Impact**: HTTP webhooks maintain full performance with zero rate limiting overhead
 - **Automatic Tuning**: Token bucket algorithm naturally adapts to traffic patterns
 - **Observable**: Built-in metrics for monitoring rate limit effectiveness
 
 #### Recommended Settings
 
-- **Low-volume installations**: Use defaults (3.0 req/sec, burst 10)
-- **High-volume installations**: Increase to 4.0 req/sec with burst 15-20
-- **Multi-tenant environments**: Keep defaults for safety across many installations
-- **Single-tenant with few installations**: Can increase to 4.0-4.5 req/sec
+- **GHEC environments**: Use defaults (`org_rate: 3.0`, `org_burst: 10`)
+- **High-volume GHEC orgs**: Increase to `org_rate: 4.0` with `org_burst: 15-20`
+- **GHES multi-installation**: Use defaults for safety across many installations
+- **GHES single-installation**: Can increase to 4.0-4.5 req/sec
 
 Monitor the `handler.rate_limit.throttled` metric to determine if limits are too aggressive or if they need tightening.
 

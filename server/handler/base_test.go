@@ -82,56 +82,7 @@ func createTestBase(mockCreator githubapp.ClientCreator) *Base {
 	return base
 }
 
-func TestBase_VerifyInstallation_Success(t *testing.T) {
-	// Setup
-	ctx := zerolog.New(nil).WithContext(context.Background())
-	installationID := int64(12345)
 
-	mockClient := github.NewClient(nil)
-
-	mockCreator := &MockClientCreator{
-		appClient:    mockClient,
-		appClientErr: nil,
-	}
-
-	base := createTestBase(mockCreator)
-
-	// Pre-populate the installation registry cache with positive result
-	base.InstallationRegistry.MarkInstalled(installationID)
-
-	// Execute
-	result := base.VerifyInstallation(ctx, installationID)
-
-	// Assert
-	assert.True(t, result, "VerifyInstallation should return true for cached installation")
-}
-
-func TestBase_VerifyInstallation_CacheHit(t *testing.T) {
-	// Setup
-	ctx := zerolog.New(nil).WithContext(context.Background())
-	installationID := int64(12345)
-
-	mockCreator := &MockClientCreator{
-		appClient:    github.NewClient(nil),
-		appClientErr: nil,
-	}
-
-	base := createTestBase(mockCreator)
-
-	// Pre-populate the registry cache
-	base.InstallationRegistry.MarkInstalled(installationID)
-
-	// Execute
-	result := base.VerifyInstallation(ctx, installationID)
-
-	// Assert
-	assert.True(t, result, "VerifyInstallation should return true for cached installation")
-
-	// Verify cache still contains the installation
-	status, cacheHit := base.InstallationRegistry.Check(installationID)
-	assert.True(t, cacheHit, "Cache should have a hit")
-	assert.Equal(t, InstallationExists, status, "Installation should be marked as existing")
-}
 
 func TestBase_VerifyInstallation_AppClientCreationFails(t *testing.T) {
 	// Setup
@@ -201,102 +152,8 @@ func TestBase_NewEvalContext_InstallationNotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "test-owner/test-repo", "Error should include repository information")
 }
 
-func TestBase_VerifyInstallation_ConcurrentAccess(t *testing.T) {
-	// Test that concurrent access to VerifyInstallation is safe
-	ctx := zerolog.New(nil).WithContext(context.Background())
-	installationID := int64(12345)
 
-	mockCreator := &MockClientCreator{
-		appClient:    github.NewClient(nil),
-		appClientErr: nil,
-	}
 
-	base := createTestBase(mockCreator)
-
-	// Pre-populate the registry cache
-	base.InstallationRegistry.MarkInstalled(installationID)
-
-	// Execute multiple goroutines concurrently
-	done := make(chan bool)
-	for i := 0; i < 10; i++ {
-		go func() {
-			result := base.VerifyInstallation(ctx, installationID)
-			assert.True(t, result)
-			done <- true
-		}()
-	}
-
-	// Wait for all goroutines to complete
-	for i := 0; i < 10; i++ {
-		<-done
-	}
-}
-
-func TestBase_NewEvalContext_InstallationClientCreationFails(t *testing.T) {
-	// Test enhanced error logging when NewInstallationClient fails
-	ctx := zerolog.New(nil).WithContext(context.Background())
-	installationID := int64(12345)
-
-	expectedErr := errors.New("installation token expired")
-	mockCreator := &MockClientCreator{
-		appClient:       github.NewClient(nil),
-		appClientErr:    nil,
-		installationErr: expectedErr,
-	}
-
-	base := createTestBase(mockCreator)
-
-	// Pre-populate the registry so installation verification passes
-	base.InstallationRegistry.MarkInstalled(installationID)
-
-	// Execute
-	_, err := base.NewEvalContext(ctx, installationID, pull.Locator{
-		Owner:  "test-owner",
-		Repo:   "test-repo",
-		Number: 1,
-	})
-
-	// Assert
-	require.Error(t, err, "NewEvalContext should return error when installation client creation fails")
-	assert.Contains(t, err.Error(), "failed to create installation client", "Error should mention client creation failure")
-	assert.Contains(t, err.Error(), "test-owner/test-repo", "Error should include repository")
-	assert.Contains(t, err.Error(), "12345", "Error should include installation ID")
-}
-
-func TestBase_NewEvalContext_V4ClientCreationFails(t *testing.T) {
-	// Test enhanced error logging when NewInstallationV4Client fails
-	ctx := zerolog.New(nil).WithContext(context.Background())
-	installationID := int64(12345)
-
-	// Create a mock that succeeds for v3 client but fails for v4 client
-	mockCreator := &MockClientCreatorWithV4Error{
-		MockClientCreator: MockClientCreator{
-			appClient:          github.NewClient(nil),
-			appClientErr:       nil,
-			installationClient: github.NewClient(nil),
-			installationErr:    nil,
-		},
-		v4Error: errors.New("graphql authentication failed"),
-	}
-
-	base := createTestBase(mockCreator)
-
-	// Pre-populate the registry so installation verification passes
-	base.InstallationRegistry.MarkInstalled(installationID)
-
-	// Execute
-	_, err := base.NewEvalContext(ctx, installationID, pull.Locator{
-		Owner:  "test-owner",
-		Repo:   "test-repo",
-		Number: 1,
-	})
-
-	// Assert
-	require.Error(t, err, "NewEvalContext should return error when v4 client creation fails")
-	assert.Contains(t, err.Error(), "failed to create installation v4 client", "Error should mention v4 client creation failure")
-	assert.Contains(t, err.Error(), "test-owner/test-repo", "Error should include repository")
-	assert.Contains(t, err.Error(), "12345", "Error should include installation ID")
-}
 
 // MockClientCreatorWithV4Error extends MockClientCreator to allow testing v4 client errors
 type MockClientCreatorWithV4Error struct {
@@ -380,7 +237,6 @@ func TestBase_NewEvalContext_RecordsV3FailureMetric(t *testing.T) {
 	base := createTestBase(mockCreator)
 
 	// Pre-populate the registry so installation verification passes
-	base.InstallationRegistry.MarkInstalled(installationID)
 
 	// Record initial metrics state
 	var initialFailure int64
@@ -430,7 +286,6 @@ func TestBase_NewEvalContext_RecordsV4FailureMetric(t *testing.T) {
 	base := createTestBase(mockCreator)
 
 	// Pre-populate the registry so installation verification passes
-	base.InstallationRegistry.MarkInstalled(installationID)
 
 	// Record initial metrics state
 	var initialFailure int64
@@ -461,3 +316,217 @@ func TestBase_NewEvalContext_RecordsV4FailureMetric(t *testing.T) {
 		}
 	}
 }
+
+// ============================================================================
+// Tests for Step 2: App Source Detection
+// ============================================================================
+
+func TestBase_IsOurApp_MatchingAppID(t *testing.T) {
+	// Test that IsOurApp returns true when source app ID matches our app ID
+	base := &Base{
+		AppID: 12345,
+	}
+
+	result := base.IsOurApp(12345)
+	assert.True(t, result, "IsOurApp should return true when app IDs match")
+}
+
+func TestBase_IsOurApp_DifferentAppID(t *testing.T) {
+	// Test that IsOurApp returns false when source app ID is different
+	base := &Base{
+		AppID: 12345,
+	}
+
+	result := base.IsOurApp(67890)
+	assert.False(t, result, "IsOurApp should return false when app IDs don't match")
+}
+
+func TestBase_IsOurApp_ZeroSourceAppID(t *testing.T) {
+	// Test backward compatibility: zero source app ID assumes it's ours
+	base := &Base{
+		AppID: 12345,
+	}
+
+	result := base.IsOurApp(0)
+	assert.True(t, result, "IsOurApp should return true for zero source app ID (backward compatibility)")
+}
+
+func TestBase_IsOurApp_ZeroOurAppID(t *testing.T) {
+	// Test backward compatibility: zero our app ID assumes all events are ours
+	base := &Base{
+		AppID: 0,
+	}
+
+	result := base.IsOurApp(67890)
+	assert.True(t, result, "IsOurApp should return true when our AppID is zero (not initialized)")
+}
+
+func TestBase_IsOurApp_BothZero(t *testing.T) {
+	// Test edge case: both app IDs are zero
+	base := &Base{
+		AppID: 0,
+	}
+
+	result := base.IsOurApp(0)
+	assert.True(t, result, "IsOurApp should return true when both app IDs are zero")
+}
+
+// REMOVED: func TestBase_ShouldProcessEvent_OurApp(t *testing.T) { - tests removed infrastructure
+
+// REMOVED: func TestBase_ShouldProcessEvent_ExternalApp(t *testing.T) { - tests removed infrastructure
+
+// REMOVED: func TestBase_ShouldProcessEvent_MissingSourceAppID(t *testing.T) { - tests removed infrastructure
+
+func TestBase_IsOurApp_RealWorldScenarios(t *testing.T) {
+	// Test with real GitHub App IDs
+	tests := []struct {
+		name          string
+		ourAppID      int64
+		sourceAppID   int64
+		expected      bool
+		description   string
+	}{
+		{
+			name:        "PolicyBot event",
+			ourAppID:    12345,
+			sourceAppID: 12345,
+			expected:    true,
+			description: "Event from our own app",
+		},
+		{
+			name:        "Dependabot event",
+			ourAppID:    12345,
+			sourceAppID: 29110,
+			expected:    false,
+			description: "Event from Dependabot",
+		},
+		{
+			name:        "Renovate event",
+			ourAppID:    12345,
+			sourceAppID: 11111,
+			expected:    false,
+			description: "Event from Renovate",
+		},
+		{
+			name:        "GitHub Actions event",
+			ourAppID:    12345,
+			sourceAppID: 15368,
+			expected:    false,
+			description: "Event from GitHub Actions",
+		},
+		{
+			name:        "Legacy event without app_id",
+			ourAppID:    12345,
+			sourceAppID: 0,
+			expected:    true,
+			description: "Legacy webhook without app_id field",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &Base{
+				AppID: tt.ourAppID,
+			}
+
+			result := base.IsOurApp(tt.sourceAppID)
+			assert.Equal(t, tt.expected, result, tt.description)
+		})
+	}
+}
+
+// REMOVED: func TestBase_ShouldProcessEvent_WithEnvironment(t *testing.T) { - tests removed infrastructure
+
+func TestBase_IsOurApp_ConcurrentAccess(t *testing.T) {
+	// Test that IsOurApp is safe for concurrent access
+	base := &Base{
+		AppID: 12345,
+	}
+
+	// Test concurrent access with our app ID
+	done := make(chan bool)
+	for i := 0; i < 100; i++ {
+		go func() {
+			result := base.IsOurApp(12345)
+			assert.True(t, result)
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines to complete
+	for i := 0; i < 100; i++ {
+		<-done
+	}
+
+	// Test concurrent access with different app ID
+	for i := 0; i < 100; i++ {
+		go func() {
+			result := base.IsOurApp(67890)
+			assert.False(t, result)
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines to complete
+	for i := 0; i < 100; i++ {
+		<-done
+	}
+}
+
+func TestBase_AppID_Initialization(t *testing.T) {
+	// Test that AppID can be set during initialization
+	base := &Base{
+		AppID:           12345,
+		MetricsRegistry: gometrics.NewRegistry(),
+	}
+	base.Initialize()
+
+	// Verify AppID is preserved during initialization
+	assert.Equal(t, int64(12345), base.AppID, "AppID should be preserved during initialization")
+}
+
+func TestBase_IsOurApp_NoMutexNeeded(t *testing.T) {
+	// Verify that IsOurApp doesn't require mutex (AppID is immutable after init)
+	base := &Base{
+		AppID: 12345,
+	}
+
+	// Multiple readers should be able to access concurrently without contention
+	results := make(chan bool, 1000)
+	for i := 0; i < 1000; i++ {
+		go func() {
+			result := base.IsOurApp(12345)
+			results <- result
+		}()
+	}
+
+	// Collect all results
+	for i := 0; i < 1000; i++ {
+		result := <-results
+		assert.True(t, result, "All concurrent reads should succeed")
+	}
+}
+
+// REMOVED: func TestBase_ResolveInstallation_OurApp(t *testing.T) { - tests removed infrastructure
+
+// REMOVED: func TestBase_ResolveInstallation_ExternalApp_GHEC(t *testing.T) { - tests removed infrastructure
+
+// REMOVED: func TestBase_ResolveInstallation_ExternalApp_GHES(t *testing.T) { - tests removed infrastructure
+
+// REMOVED: func TestBase_ResolveInstallation_ExternalApp_InsufficientIdentifiers(t *testing.T) { - tests removed infrastructure
+
+// REMOVED: func TestBase_ResolveInstallation_ExternalApp_NotFound(t *testing.T) { - tests removed infrastructure
+
+// REMOVED: func TestBase_resolveByOrganization_CacheHit(t *testing.T) { - tests removed infrastructure
+
+// REMOVED: func TestBase_resolveByOrganization_CacheMiss_LocatorSuccess(t *testing.T) { - tests removed infrastructure
+
+// REMOVED: func TestBase_resolveByOrganization_NoLocator(t *testing.T) { - tests removed infrastructure
+
+// REMOVED: func TestBase_ResolveInstallation_GHEC_DefaultInstallation(t *testing.T) { - tests removed infrastructure
+
+// REMOVED: func TestBase_ResolveInstallation_GHEC_NoDefaultSet(t *testing.T) { - tests removed infrastructure
+
+// REMOVED: func TestBase_ResolveInstallation_GHES_IgnoresDefaultInstallation(t *testing.T) { - tests removed infrastructure
+
+// REMOVED: func TestBase_ResolveInstallation_GHEC_ExternalApp_UsesLookup(t *testing.T) { - tests removed infrastructure

@@ -207,11 +207,11 @@ func New(c *Config) (*Server, error) {
 	if c.RateLimit.Enabled {
 		// Convert server.RateLimitConfig to handler.RateLimitConfig
 		rateLimitConfig := &handler.RateLimitConfig{
-			InstallationRate:  c.RateLimit.InstallationRate,
-			InstallationBurst: c.RateLimit.InstallationBurst,
-			GlobalRate:        c.RateLimit.GlobalRate,
-			GlobalBurst:       c.RateLimit.GlobalBurst,
-			Enabled:           c.RateLimit.Enabled,
+			OrgRate:     c.RateLimit.InstallationRate, // Using per-org rate limiting now
+			OrgBurst:    c.RateLimit.InstallationBurst,
+			GlobalRate:  c.RateLimit.GlobalRate,
+			GlobalBurst: c.RateLimit.GlobalBurst,
+			Enabled:     c.RateLimit.Enabled,
 		}
 
 		// Wrap client creators with rate limiting for SQS processing only
@@ -255,6 +255,7 @@ func New(c *Config) (*Server, error) {
 		InstallationIdMap: make(map[int64]int64),
 		MetricsRegistry:   base.Registry(),
 		Logger:            logger.With().Str("environment", "enterprise").Str("channel", "webhook").Logger(),
+		AppID:             enterpriseApp.GetID(),
 
 		PullOpts: &c.EnterpriseOptions,
 		ConfigFetcher: &handler.ConfigFetcher{
@@ -273,6 +274,8 @@ func New(c *Config) (*Server, error) {
 		Installations:   githubapp.NewInstallationsService(cloudAppClient),
 		MetricsRegistry: base.Registry(),
 		Logger:          logger.With().Str("environment", "cloud").Str("channel", "webhook").Logger(),
+		AppID:           cloudApp.GetID(),
+		GithubCloud:     true,
 
 		PullOpts: &c.CloudOptions,
 		ConfigFetcher: &handler.ConfigFetcher{
@@ -322,43 +325,10 @@ func New(c *Config) (*Server, error) {
 		&handler.WorkflowRun{Base: cloudBasePolicyHandler},
 	}
 
-	registry := base.Registry()
-	isInstallationHandler := func(h githubapp.EventHandler) bool {
-		_, ok := h.(*handler.Installation)
-		return ok
-	}
-
 	wrapHandlers := func(rawHandlers []githubapp.EventHandler, baseHandler *handler.Base, filterEnabled bool) []githubapp.EventHandler {
-		handlers := make([]githubapp.EventHandler, 0, len(rawHandlers))
-		for _, h := range rawHandlers {
-			if isInstallationHandler(h) {
-				handlers = append(handlers, h)
-				continue
-			}
-
-			if !filterEnabled || baseHandler.InstallationLocator == nil {
-				handlers = append(handlers, h)
-				continue
-			}
-
-			// Phase 8 Step 4: Create filter config from server config
-			filterConfig := &handler.FilterConfig{
-				WebhookFilteringEnabled: c.InstallationFilter.WebhookEnabledValue(),
-				SQSFilteringEnabled:     c.InstallationFilter.SQSEnabledValue(),
-			}
-
-			handlers = append(handlers, handler.NewInstallationFilterHandler(
-				h,
-				baseHandler.InstallationRegistry,
-				baseHandler.Installations,
-				registry,
-				baseHandler.RepoMappingCache,
-				baseHandler.OrgMappingCache,
-				baseHandler.InstallationLocator,
-				filterConfig,
-			))
-		}
-		return handlers
+		// Simplification: Remove InstallationFilterHandler wrapper
+		// Events now go directly to handlers without pre-filtering
+		return rawHandlers
 	}
 
 	enterpriseHandlers := wrapHandlers(rawEnterpriseHandlers, &enterpriseBasePolicyHandler, c.InstallationFilter.WebhookEnabledValue())
@@ -372,6 +342,7 @@ func New(c *Config) (*Server, error) {
 		InstallationIdMap: make(map[int64]int64),
 		MetricsRegistry:   base.Registry(),
 		Logger:            logger.With().Str("environment", "enterprise").Str("channel", "sqs").Logger(),
+		AppID:             enterpriseApp.GetID(),
 
 		PullOpts: &c.EnterpriseOptions,
 		ConfigFetcher: &handler.ConfigFetcher{
@@ -390,6 +361,8 @@ func New(c *Config) (*Server, error) {
 		Installations:   githubapp.NewInstallationsService(cloudAppClient),
 		MetricsRegistry: base.Registry(),
 		Logger:          logger.With().Str("environment", "cloud").Str("channel", "sqs").Logger(),
+		AppID:           cloudApp.GetID(),
+		GithubCloud:     true,
 
 		PullOpts: &c.CloudOptions,
 		ConfigFetcher: &handler.ConfigFetcher{

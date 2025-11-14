@@ -200,8 +200,9 @@ go test ./server/handler -run TestRateLimitedClientCreator_ConcurrentAccess -v
 **Test Scenarios:**
 - **Basic Functionality**: Initialization, configuration, client creation
 - **Rate Limit Enforcement**: Verifies timing - 3rd request delayed ~400-600ms at 2 req/sec
-- **Per-Installation Isolation**: Independent limiters don't interfere with each other
-- **Global Rate Limiting**: Global safety limit applies across all installations
+- **Per-Organization Isolation (GHEC)**: Independent limiters per organization don't interfere with each other
+- **Per-Installation Isolation (GHES)**: Backward compatible installation-based rate limiting for GHES
+- **Global Rate Limiting**: Global safety limit applies across all organizations/installations
 - **Context Cancellation**: Respects context timeouts during rate limit waits
 - **Concurrent Access**: Thread-safety with race detector validation
 - **Metrics Recording**: Wait time, throttled counts properly recorded
@@ -1473,15 +1474,21 @@ docker rm policy-bot-localstack
 
 Proactive rate limiting for GitHub API calls during SQS event processing to prevent exceeding GitHub's rate limits (15,000 requests/hour per installation).
 
-**Key Feature**: Rate limiting applies ONLY to SQS event processing. Webhook (HTTP) events bypass rate limiting entirely for low latency.
+**Key Features**:
+- Rate limiting applies ONLY to SQS event processing. Webhook (HTTP) events bypass rate limiting entirely for low latency.
+- **GHEC Architecture**: Per-organization rate limiting and caching (1 installation per org, max 2)
+- **GHES Architecture**: Per-installation rate limiting and caching (multiple installations per org supported)
 
 ### Implementation
 
 - **Architecture**: Separate client creators for SQS vs webhooks
   - Webhook handlers: Use non-rate-limited client creators
   - SQS handlers: Use rate-limited client creators (when enabled)
+- **Caching Strategy**:
+  - **GHEC**: Per-organization caching (cache key: organization name string)
+  - **GHES**: Per-installation caching (cache key: installation ID)
 - **Algorithm**: Token bucket via `golang.org/x/time/rate`
-- **Isolation**: Per-installation rate limiters + global safety limit
+- **Isolation**: Per-organization (GHEC) or per-installation (GHES) rate limiters + global safety limit
 - **Metrics**: Wait time, throttling events, quota usage via Prometheus/go-metrics
 
 ### Configuration Tests
@@ -1512,8 +1519,8 @@ go test -v ./server/handler -run RateLimit
 **Key Tests**:
 - ✅ `TestNewRateLimitedClientCreator` - Initialization
 - ✅ `TestRateLimitedClientCreator_RateLimitEnforcement` - Enforces limits (3 req/sec)
-- ✅ `TestRateLimitedClientCreator_PerInstallationIsolation` - Separate limiters per installation
-- ✅ `TestRateLimitedClientCreator_GlobalRateLimit` - Global safety limit
+- ✅ `TestRateLimitedClientCreator_PerInstallationIsolation` - Separate limiters per org (GHEC) or installation (GHES)
+- ✅ `TestRateLimitedClientCreator_GlobalRateLimit` - Global safety limit across all orgs/installations
 - ✅ `TestRateLimitedClientCreator_Disabled` - Bypass when disabled
 - ✅ `TestRateLimitedClientCreator_MetricsRecording` - Metrics integration
 - ✅ `TestRateLimitedClientCreator_ConcurrentAccess` - Thread safety
@@ -1535,6 +1542,8 @@ go test -v ./server/...
 - ✅ Separate `sqsEnterpriseClientCreator` and `sqsCloudClientCreator` created
 - ✅ Rate-limited clients only used for SQS handlers
 - ✅ Webhook handlers use non-rate-limited clients
+- ✅ GHEC uses per-organization caching (`GetClientsByOwner`)
+- ✅ GHES uses per-installation caching (backward compatible)
 - ✅ Configuration properly passed through from server config
 - ✅ All existing tests pass (zero regressions)
 
@@ -1545,9 +1554,9 @@ From `config/policy-bot.example.yml`:
 ```yaml
 rate_limit:
   enabled: true                # Enable SQS-only rate limiting
-  installation_rate: 3.0       # 3 req/sec per installation
-  installation_burst: 10       # Burst allowance
-  global_rate: 100.0           # Global limit across installations
+  org_rate: 3.0                # 3 req/sec per organization (GHEC) or installation (GHES)
+  org_burst: 10                # Burst allowance
+  global_rate: 100.0           # Global limit across organizations/installations
   global_burst: 50             # Global burst allowance
 ```
 
@@ -1560,7 +1569,7 @@ Monitor rate limiting effectiveness:
 | `handler.rate_limit.wait_time` | Time spent waiting for rate limit tokens |
 | `handler.rate_limit.throttled` | Count of throttling events |
 | `handler.rate_limit.quota_used` | Quota utilization |
-| `handler.rate_limit.installations` | Number of tracked installations |
+| `handler.rate_limit.organizations` | Number of tracked organizations (GHEC) or installations (GHES) |
 
 ### Benefits
 

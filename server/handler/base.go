@@ -29,6 +29,7 @@ import (
 	"github.com/pkg/errors"
 	gometrics "github.com/rcrowley/go-metrics"
 	"github.com/rs/zerolog"
+	"github.com/shurcooL/githubv4"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -45,6 +46,13 @@ const (
 	MetricsKeyInstallationV4ClientFailure = "installation.v4client.failure"
 )
 
+// OrgClientCreator defines the interface for creating per-org rate-limited clients.
+// This allows for proper mocking in tests.
+type OrgClientCreator interface {
+	NewOrgClient(ctx context.Context, owner string, installationID int64) (*github.Client, error)
+	NewOrgV4Client(ctx context.Context, owner string, installationID int64) (*githubv4.Client, error)
+}
+
 type Base struct {
 	githubapp.ClientCreator
 
@@ -54,13 +62,13 @@ type Base struct {
 	BaseConfig                  *baseapp.HTTPConfig
 	PullOpts                    *PullEvaluationOptions
 	InstallationIdMap           map[int64]int64 // Legacy cache, kept for backwards compatibility
-	InstallationRegistry        *InstallationRegistry
-	CircuitBreaker              *CircuitBreaker      // Phase 8 Step 3: Shared circuit breaker for Manager and Locator
-	InstallationManager         *InstallationManager // Centralized manager for installation client creation
-	InstallationLocator         *InstallationLocator // Installation locator shared by filters and caches
-	RepoMappingCache            *MappingCache        // Phase 3: Repository → Installation ID mapping cache
-	OrgMappingCache             *MappingCache        // Phase 3: Organization → Installation ID mapping cache
+	CircuitBreaker              *CircuitBreaker      // Shared circuit breaker for tracking API failures
+	InstallationManager         *InstallationManager // GHES: Centralized manager for installation client creation (has retry/circuit breaker logic)
+	OrgMappingCache             *MappingCache        // Organization → Installation ID mapping cache (GHEC)
+	ClientCache                 *ClientCache         // Owner/org → InstallationClients cache (per-org caching for GHEC)
 	MetricsRegistry             gometrics.Registry   // Registry for recording metrics
+	AppID                       int64                // Our GitHub App ID for multi-app event detection
+	DefaultInstallationID       int64                // GHEC optimization: single installation ID (set during init)
 	GithubCloud                 bool
 	mu                          *sync.RWMutex
 	Logger                      zerolog.Logger
@@ -87,48 +95,47 @@ func (base *Base) Initialize() {
 		base.DefaultFetchedConfig = &FetchedConfig{}
 	}
 
-	// Initialize installation registry with TTL-based caching
-	// Positive cache: 1 hour (installations rarely change)
-	// Negative cache: 5 minutes (allow faster detection of new installations)
-	if base.InstallationRegistry == nil {
-		base.InstallationRegistry = NewInstallationRegistry(1*time.Hour, 5*time.Minute, base.MetricsRegistry)
-	}
-
-	// Phase 8 Step 3: Initialize shared circuit breaker for both Manager and Locator
-	// This ensures consistent failure tracking across all GitHub API calls
+	// Initialize shared circuit breaker for InstallationManager
+	// This ensures consistent failure tracking across GitHub API calls for GHES
 	if base.CircuitBreaker == nil {
 		base.CircuitBreaker = NewCircuitBreaker()
 	}
 
-	// Initialize installation manager if not already set
-	// The manager centralizes client creation logic with retry and circuit breaker patterns
+	// Initialize installation manager for GHES (has retry and circuit breaker logic)
+	// For GHEC, this is not used (we use GetClientsByOwner instead)
 	if base.InstallationManager == nil {
 		base.InstallationManager = NewInstallationManager(
 			base.ClientCreator,
-			base.InstallationRegistry,
+			nil, // No registry needed - simplified
 			base.MetricsRegistry,
-			base.CircuitBreaker, // Phase 8 Step 3: Pass shared circuit breaker
+			base.CircuitBreaker,
 		)
 	}
 
-	// Initialize mapping caches for Phase 3 cache lifecycle management
-	// These caches map repository/organization keys to installation IDs
-	if base.RepoMappingCache == nil {
-		base.RepoMappingCache = NewMappingCache(1*time.Hour, 5*time.Minute)
-	}
+	// Initialize mapping caches for organization lookups (used by GHEC)
+	// Repository mapping cache removed (no longer needed after filter removal)
+	// Integrated with MetricsRegistry for OTEL export to New Relic
 	if base.OrgMappingCache == nil {
-		base.OrgMappingCache = NewMappingCache(1*time.Hour, 5*time.Minute)
+		base.OrgMappingCache = NewMappingCacheWithMetrics(
+			1*time.Hour,  // positiveTTL
+			5*time.Minute, // negativeTTL
+			10000,         // maxSize
+			1*time.Minute, // cleanupInterval
+			base.MetricsRegistry,
+		)
 	}
 
-	// Initialize installation locator for cache-aware lookups shared by HTTP + SQS paths
-	if base.InstallationLocator == nil && base.InstallationRegistry != nil && base.ClientCreator != nil {
-		base.InstallationLocator = NewInstallationLocator(
-			base.InstallationRegistry,
-			base.Logger.With().Str("component", "installation_locator").Logger(),
-			func(ctx context.Context) (*github.Client, error) {
-				return base.ClientCreator.NewAppClient()
-			},
-			base.CircuitBreaker, // Phase 8 Step 3: Pass shared circuit breaker
+	// Initialize client cache for per-org client caching (correct for GHEC)
+	// TTL: 10 minutes (clients use 1-hour tokens, refresh earlier for safety)
+	// Negative TTL: 2 minutes (shorter for non-existent installations)
+	// MaxSize: 1000 orgs (reasonable for most deployments)
+	// Integrated with MetricsRegistry for OTEL export to New Relic
+	if base.ClientCache == nil {
+		base.ClientCache = NewClientCacheWithOptions(
+			10*time.Minute, // positiveTTL
+			2*time.Minute,  // negativeTTL
+			1000,           // maxSize
+			base.MetricsRegistry,
 		)
 	}
 
@@ -154,12 +161,13 @@ func (b *Base) recordInstallationClientMetric(metricKey string) {
 // This method helps prevent 404 errors by verifying installation status before attempting
 // to create installation clients for repositories where the app may not be installed.
 //
-// The method delegates to InstallationRegistry.VerifyInstallation which uses a TTL-based cache
-// that stores both positive (installed) and negative (not installed) results to minimize API calls.
+// SIMPLIFIED: Directly calls GitHub API to verify installation (no caching overhead).
+// For GHEC, this is rarely called since we use owner-based lookup.
+// For GHES, the occasional verification call is acceptable.
 func (b *Base) VerifyInstallation(ctx context.Context, installationID int64) bool {
 	logger := zerolog.Ctx(ctx)
 
-	// Create app client for API verification if cache misses
+	// Create app client for API verification
 	appClient, err := b.NewAppClient()
 	if err != nil {
 		logger.Warn().Err(err).
@@ -168,13 +176,14 @@ func (b *Base) VerifyInstallation(ctx context.Context, installationID int64) boo
 		return false
 	}
 
-	// Delegate to registry's consolidated verification method
-	exists, err := b.InstallationRegistry.VerifyInstallation(ctx, installationID, appClient)
+	// Call GitHub API directly to verify installation exists
+	_, _, err = appClient.Apps.GetInstallation(ctx, installationID)
+	exists := err == nil
+
 	if err != nil {
-		logger.Warn().Err(err).
+		logger.Debug().Err(err).
 			Int64("installation_id", installationID).
-			Msg("Installation verification failed")
-		return false
+			Msg("Installation verification failed or not found")
 	}
 
 	// Update legacy cache for backwards compatibility if installation exists
@@ -185,6 +194,28 @@ func (b *Base) VerifyInstallation(ctx context.Context, installationID int64) boo
 	}
 
 	return exists
+}
+
+// IsOurApp checks if the given source app ID matches our app ID.
+// This is used to distinguish events from our GitHub App vs external apps (Dependabot, Renovate, etc.).
+//
+// Special cases:
+//   - If sourceAppID is 0 (missing from payload), assumes it's ours for backward compatibility
+//   - If our AppID is 0 (not initialized), assumes all events are ours
+//
+// Performance: Simple int64 comparison, < 1ns, no allocations
+func (b *Base) IsOurApp(sourceAppID int64) bool {
+	// Backward compatibility: If sourceAppID is 0 (not in payload), assume it's ours
+	if sourceAppID == 0 {
+		return true
+	}
+
+	// If our AppID is not set, assume all events are ours (backward compatibility)
+	if b.AppID == 0 {
+		return true
+	}
+
+	return sourceAppID == b.AppID
 }
 
 // PostStatus posts a GitHub commit status with consistent logging.
@@ -203,6 +234,22 @@ func (b *Base) PreparePRContext(ctx context.Context, installationID int64, pr *g
 	return ctx, logger
 }
 
+// NewEvalContext creates an evaluation context for a pull request.
+// This is the main entry point for PR evaluation and policy checking.
+//
+// Flow:
+//  1. Get GitHub API clients (v3 + v4) based on environment:
+//     - GHEC: GetClientsByOwner() - owner-based lookup with per-org caching
+//     - GHES: InstallationManager.GetClients() - installation-based lookup
+//  2. Create pull.Context using the clients to fetch PR data (reviews, approvals, changes, etc.)
+//  3. Fetch repository policy configuration
+//  4. Return EvalContext containing clients, pull context, and config
+//
+// The returned EvalContext is then used to:
+//  - Parse and validate policy configuration
+//  - Evaluate policy rules against the PR
+//  - Post commit status to GitHub (success/failure/pending)
+//  - GitHub's automerge uses this status to auto-merge PRs that meet policy requirements
 func (b *Base) NewEvalContext(ctx context.Context, installationID int64, loc pull.Locator) (*EvalContext, error) {
 	// Start tracing span for eval context creation
 	tracer := otel.Tracer("github.com/palantir/policy-bot/handler")
@@ -218,24 +265,52 @@ func (b *Base) NewEvalContext(ctx context.Context, installationID int64, loc pul
 
 	repoFullName := fmt.Sprintf("%s/%s", loc.Owner, loc.Repo)
 
-	// Verify installation exists before attempting to create clients
-	// This populates the cache which the InstallationManager will use
-	if !b.VerifyInstallation(ctx, installationID) {
-		span.SetStatus(codes.Error, "installation not verified")
-		span.SetAttributes(attribute.Bool("installation.verified", false))
-		return nil, fmt.Errorf("installation %d not found or not accessible - app may not be installed on repository %s", installationID, repoFullName)
-	}
-	span.SetAttributes(attribute.Bool("installation.verified", true))
+	var clients *InstallationClients
+	var err error
 
-	// Use InstallationManager to create both v3 and v4 clients
-	// The manager handles verification, client creation, metrics, and error logging
-	// Note: GetClients will create its own child span
-	clients, err := b.InstallationManager.GetClients(ctx, installationID, repoFullName)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to get installation clients")
-		return nil, err
+	// SIMPLIFICATION: For GHEC, use owner-based client lookup (per-org caching)
+	// For GHES, use installation-based lookup (backward compatibility)
+	if b.GithubCloud && loc.Owner != "" {
+		// GHEC: Use simplified owner-based lookup with per-org caching
+		// This is correct since there's ONE installation per org in GHEC
+		span.SetAttributes(
+			attribute.String("lookup.type", "owner_based"),
+			attribute.String("lookup.owner", loc.Owner),
+		)
+
+		clients, err = b.GetClientsByOwner(ctx, loc.Owner)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to get clients by owner")
+			return nil, errors.Wrapf(err, "failed to get clients for owner %s", loc.Owner)
+		}
+		span.AddEvent("clients_retrieved_by_owner")
+
+	} else {
+		// GHES: Use installation-based lookup (requires installation ID)
+		span.SetAttributes(
+			attribute.String("lookup.type", "installation_based"),
+			attribute.Int64("lookup.installation_id", installationID),
+		)
+
+		// Verify installation exists before attempting to create clients
+		if !b.VerifyInstallation(ctx, installationID) {
+			span.SetStatus(codes.Error, "installation not verified")
+			span.SetAttributes(attribute.Bool("installation.verified", false))
+			return nil, fmt.Errorf("installation %d not found or not accessible - app may not be installed on repository %s", installationID, repoFullName)
+		}
+		span.SetAttributes(attribute.Bool("installation.verified", true))
+
+		// Use InstallationManager to create both v3 and v4 clients
+		clients, err = b.InstallationManager.GetClients(ctx, installationID, repoFullName)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to get installation clients")
+			return nil, err
+		}
+		span.AddEvent("clients_retrieved_by_installation")
 	}
+
 	span.AddEvent("clients_created")
 
 	mbrCtx := NewCrossOrgMembershipContext(ctx, clients.V3Client, loc.Owner, b.Installations, b.ClientCreator)
@@ -293,18 +368,14 @@ func (b *Base) InvalidateInstallationCaches(installationID int64, owner string, 
 			Msg("Removed organization mapping from cache")
 	}
 
-	// Remove repository mappings if provided
-	if b.RepoMappingCache != nil {
-		for _, repo := range repos {
-			if owner != "" && repo != "" {
-				repoKey := owner + "/" + repo
-				b.RepoMappingCache.Remove(repoKey)
-				logger.Debug().
-					Str("repo_key", repoKey).
-					Int64("installation_id", installationID).
-					Msg("Removed repository mapping from cache")
-			}
-		}
+	// Invalidate cached clients for this owner
+	// This prevents stale cached clients from being used after installation deletion/suspension
+	if owner != "" && b.ClientCache != nil {
+		b.ClientCache.Invalidate(owner)
+		logger.Debug().
+			Str("owner", owner).
+			Int64("installation_id", installationID).
+			Msg("Invalidated client cache for owner")
 	}
 
 	logger.Info().
@@ -328,25 +399,6 @@ func (b *Base) PopulateInstallationCaches(installationID int64, owner string, re
 			Msg("Populated organization mapping in cache")
 	}
 
-	// Add repository mappings if provided
-	if b.RepoMappingCache != nil {
-		for _, repo := range repos {
-			if owner != "" && repo != "" {
-				repoKey := owner + "/" + repo
-				b.RepoMappingCache.Set(repoKey, installationID)
-				logger.Debug().
-					Str("repo_key", repoKey).
-					Int64("installation_id", installationID).
-					Msg("Populated repository mapping in cache")
-			}
-		}
-	}
-
-	// Also mark the installation as existing in the registry
-	if b.InstallationRegistry != nil {
-		b.InstallationRegistry.MarkInstalled(installationID)
-	}
-
 	logger.Info().
 		Int64("installation_id", installationID).
 		Str("owner", owner).
@@ -355,47 +407,225 @@ func (b *Base) PopulateInstallationCaches(installationID int64, owner string, re
 }
 
 // RemoveRepositoriesFromCache removes specific repositories from the cache.
+// SIMPLIFIED: No-op after repo cache removal. Kept for backward compatibility.
 func (b *Base) RemoveRepositoriesFromCache(owner string, repos []string) {
-	logger := zerolog.Logger{}
-
-	if b.RepoMappingCache != nil {
-		for _, repo := range repos {
-			if owner != "" && repo != "" {
-				repoKey := owner + "/" + repo
-				b.RepoMappingCache.Remove(repoKey)
-				logger.Debug().
-					Str("repo_key", repoKey).
-					Msg("Removed repository from cache")
-			}
-		}
-	}
-
-	logger.Info().
-		Str("owner", owner).
-		Int("repos_count", len(repos)).
-		Msg("Removed repositories from cache")
+	// No-op: Repository mapping cache removed during simplification
 }
 
 // AddRepositoriesToCache adds specific repositories to the cache.
+// SIMPLIFIED: No-op after repo cache removal. Kept for backward compatibility.
 func (b *Base) AddRepositoriesToCache(installationID int64, owner string, repos []string) {
-	logger := zerolog.Logger{}
+	// No-op: Repository mapping cache removed during simplification
+}
 
-	if b.RepoMappingCache != nil {
-		for _, repo := range repos {
-			if owner != "" && repo != "" {
-				repoKey := owner + "/" + repo
-				b.RepoMappingCache.Set(repoKey, installationID)
-				logger.Debug().
-					Str("repo_key", repoKey).
-					Int64("installation_id", installationID).
-					Msg("Added repository to cache")
-			}
+// GetClientsByOwner retrieves installation clients for a given owner/org with caching.
+// This is the simplified, preferred method for GHEC where there's ONE installation per org (max 2).
+//
+// Lookup Strategy (flexible fallback):
+//  1. Check ClientCache by owner (fast path, ~100ns)
+//  2. Check OrgMappingCache for owner→installationID mapping
+//  3. Try Installations.GetByOwner(owner) - works for org or user
+//  4. Cache both the clients and the owner→installationID mapping
+//
+// For GHEC: Uses owner-level installation lookup (ONE installation per org)
+// For GHES: Returns error (use repository-based lookup instead)
+//
+// Performance: Cache hit returns in ~100ns. Cache miss requires 1 API call.
+func (b *Base) GetClientsByOwner(ctx context.Context, owner string) (*InstallationClients, error) {
+	logger := zerolog.Ctx(ctx)
+
+	// Validate input
+	if owner == "" {
+		return nil, fmt.Errorf("owner cannot be empty")
+	}
+
+	// Step 1: Check client cache first (fast path for GHEC)
+	// This includes both positive cache (clients exist) and negative cache (installation not found)
+	if b.ClientCache != nil {
+		if clients := b.ClientCache.Get(owner); clients != nil {
+			logger.Debug().
+				Str("owner", owner).
+				Msg("Client cache hit for owner")
+			return clients, nil
+		}
+
+		// Check for negative cache entry (cached "not found")
+		if b.ClientCache.IsNegativelyCached(owner) {
+			logger.Debug().
+				Str("owner", owner).
+				Msg("Negative cache hit - installation not found (cached)")
+			return nil, fmt.Errorf("installation not found for owner %s (negatively cached)", owner)
 		}
 	}
 
-	logger.Info().
+	logger.Debug().
 		Str("owner", owner).
-		Int("repos_count", len(repos)).
+		Msg("Client cache miss - looking up installation")
+
+	// Step 2: Check org mapping cache for owner→installationID
+	var installationID int64
+	var foundInOrgCache bool
+
+	if b.OrgMappingCache != nil {
+		orgKey := "org:" + owner
+		if cachedID, found := b.OrgMappingCache.Get(orgKey); found {
+			installationID = cachedID
+			foundInOrgCache = true
+			logger.Debug().
+				Str("owner", owner).
+				Int64("installation_id", installationID).
+				Msg("Found installation ID in org mapping cache")
+		}
+	}
+
+	// Step 3: If not in cache, look up via Installations service
+	if !foundInOrgCache {
+		if !b.GithubCloud {
+			// For GHES: Use repository-level lookup
+			// Note: This requires a repository name, which we don't have here.
+			// For GHES, callers should use the existing InstallationManager.GetClients() with installation ID
+			return nil, fmt.Errorf("GetClientsByOwner requires owner-level installation lookup (GHEC only). For GHES, use repository-based lookup")
+		}
+
+		// For GHEC: Use GetByOwner for org-level installation lookup
+		// This works for both organizations and users
+		// In GHEC, there's typically ONE installation per org (max 2)
+		installation, lookupErr := b.Installations.GetByOwner(ctx, owner)
+		if lookupErr != nil {
+			logger.Warn().Err(lookupErr).
+				Str("owner", owner).
+				Msg("Failed to find installation for owner (org or user)")
+
+			// Cache negative result to avoid repeated API calls for non-existent installations
+			if b.ClientCache != nil {
+				b.ClientCache.PutNegative(owner)
+				logger.Debug().
+					Str("owner", owner).
+					Msg("Cached negative result (installation not found)")
+			}
+
+			return nil, errors.Wrapf(lookupErr, "failed to find installation for owner %s (org or user)", owner)
+		}
+		installationID = installation.ID
+
+		logger.Info().
+			Str("owner", owner).
+			Int64("installation_id", installationID).
+			Str("lookup_method", "GetByOwner").
+			Msg("Found installation via owner lookup (GHEC)")
+
+		// Cache the owner→installationID mapping for faster future lookups
+		if b.OrgMappingCache != nil {
+			orgKey := "org:" + owner
+			b.OrgMappingCache.Set(orgKey, installationID)
+			logger.Debug().
+				Str("owner", owner).
+				Int64("installation_id", installationID).
+				Msg("Cached owner→installation mapping")
+		}
+	}
+
+	// Step 4: Create clients with per-org rate limiting
+	clients, err := b.createClientsForOwner(ctx, owner, installationID)
+	if err != nil {
+		logger.Error().Err(err).
+			Str("owner", owner).
+			Int64("installation_id", installationID).
+			Msg("Failed to create clients for owner")
+		return nil, errors.Wrapf(err, "failed to create clients for owner %s (installation %d)", owner, installationID)
+	}
+
+	// Step 5: Cache clients by owner (correct for GHEC where there's ONE installation per org)
+	if b.ClientCache != nil {
+		b.ClientCache.Put(owner, clients)
+		logger.Debug().
+			Str("owner", owner).
+			Int64("installation_id", installationID).
+			Msg("Cached clients by owner")
+	}
+
+	return clients, nil
+}
+
+// GetClientsForEvent retrieves installation clients using cached lookups when possible.
+// This method provides a unified interface for handlers to get clients efficiently.
+//
+// For GHEC: Uses owner-based lookup with ClientCache and OrgMappingCache
+// For GHES: Uses installation-based lookup with InstallationManager's cache
+//
+// This ensures all client creation benefits from the caching infrastructure.
+// Handlers should use this method instead of calling NewInstallationClient directly.
+func (b *Base) GetClientsForEvent(ctx context.Context, owner string, installationID int64) (*InstallationClients, error) {
+	// For GHEC, use owner-based lookup (benefits from ClientCache + OrgMappingCache)
+	if b.GithubCloud && owner != "" {
+		return b.GetClientsByOwner(ctx, owner)
+	}
+
+	// For GHES, use InstallationManager which has its own caching
+	if b.InstallationManager != nil {
+		repoFullName := fmt.Sprintf("%s/*", owner) // Placeholder - actual repo may not be known yet
+		return b.InstallationManager.GetClients(ctx, installationID, repoFullName)
+	}
+
+	// Fallback: Create clients directly (no caching - legacy path)
+	return b.createClientsForOwner(ctx, owner, installationID)
+}
+
+// createClientsForOwner creates both v3 and v4 installation clients for an owner/org
+// with per-org rate limiting (if RateLimitedClientCreator is being used).
+func (b *Base) createClientsForOwner(ctx context.Context, owner string, installationID int64) (*InstallationClients, error) {
+	logger := zerolog.Ctx(ctx)
+
+	// Check if the ClientCreator supports per-org rate limiting
+	// If so, use the new per-org rate limiting methods
+	if rlcc, ok := b.ClientCreator.(OrgClientCreator); ok {
+		// Use per-org rate limiting (correct for GHEC)
+		v3Client, err := rlcc.NewOrgClient(ctx, owner, installationID)
+		if err != nil {
+			b.recordInstallationClientMetric(MetricsKeyInstallationClientFailure)
+			return nil, errors.Wrapf(err, "failed to create v3 client for owner %s", owner)
+		}
+		b.recordInstallationClientMetric(MetricsKeyInstallationClientSuccess)
+
+		v4Client, err := rlcc.NewOrgV4Client(ctx, owner, installationID)
+		if err != nil {
+			b.recordInstallationClientMetric(MetricsKeyInstallationV4ClientFailure)
+			return nil, errors.Wrapf(err, "failed to create v4 client for owner %s", owner)
+		}
+		b.recordInstallationClientMetric(MetricsKeyInstallationV4ClientSuccess)
+
+		logger.Debug().
+			Str("owner", owner).
+			Int64("installation_id", installationID).
+			Msg("Created clients with per-org rate limiting")
+
+		return &InstallationClients{
+			V3Client: v3Client,
+			V4Client: v4Client,
+		}, nil
+	}
+
+	// Fallback: Use standard client creation (no per-org rate limiting)
+	v3Client, err := b.ClientCreator.NewInstallationClient(installationID)
+	if err != nil {
+		b.recordInstallationClientMetric(MetricsKeyInstallationClientFailure)
+		return nil, errors.Wrapf(err, "failed to create v3 client for installation %d", installationID)
+	}
+	b.recordInstallationClientMetric(MetricsKeyInstallationClientSuccess)
+
+	v4Client, err := b.ClientCreator.NewInstallationV4Client(installationID)
+	if err != nil {
+		b.recordInstallationClientMetric(MetricsKeyInstallationV4ClientFailure)
+		return nil, errors.Wrapf(err, "failed to create v4 client for installation %d", installationID)
+	}
+	b.recordInstallationClientMetric(MetricsKeyInstallationV4ClientSuccess)
+
+	logger.Debug().
 		Int64("installation_id", installationID).
-		Msg("Added repositories to cache")
+		Msg("Created clients with standard rate limiting")
+
+	return &InstallationClients{
+		V3Client: v3Client,
+		V4Client: v4Client,
+	}, nil
 }

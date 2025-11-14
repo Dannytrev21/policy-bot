@@ -19,6 +19,18 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	gometrics "github.com/rcrowley/go-metrics"
+)
+
+const (
+	// Metric keys for mapping cache (published to go-metrics registry for OTEL export)
+	MetricsKeyMappingCacheHits      = "installation.mapping_cache.hits"
+	MetricsKeyMappingCacheMisses    = "installation.mapping_cache.misses"
+	MetricsKeyMappingCacheSets      = "installation.mapping_cache.sets"
+	MetricsKeyMappingCacheEvictions = "installation.mapping_cache.evictions"
+	MetricsKeyMappingCacheSize      = "installation.mapping_cache.size"
+	MetricsKeyMappingCacheHitRate   = "installation.mapping_cache.hit_rate"
 )
 
 // MappingCacheMetrics tracks mapping cache statistics
@@ -61,21 +73,36 @@ type MappingCache struct {
 	// Metrics
 	metrics *MappingCacheMetrics
 
+	// Integration with go-metrics for OTEL export
+	metricsRegistry gometrics.Registry
+
 	// Cleanup coordination
 	stopCleanup chan struct{}
 	cleanupDone chan struct{}
+
+	// Metrics publishing coordination
+	stopMetrics chan struct{}
+	metricsDone chan struct{}
 
 	// String builder pool to reduce allocations
 	builderPool *sync.Pool
 }
 
-// NewMappingCache creates a new mapping cache with specified TTLs
+// NewMappingCache creates a new mapping cache with specified TTLs and no metrics integration.
+// Use NewMappingCacheWithMetrics to enable metrics publishing to go-metrics registry.
 func NewMappingCache(positiveTTL, negativeTTL time.Duration) *MappingCache {
-	return NewMappingCacheWithOptions(positiveTTL, negativeTTL, 10000, 1*time.Minute)
+	return NewMappingCacheWithMetrics(positiveTTL, negativeTTL, 10000, 1*time.Minute, nil)
 }
 
-// NewMappingCacheWithOptions creates a new mapping cache with full configuration
+// NewMappingCacheWithOptions creates a new mapping cache with full configuration but no metrics.
+// Use NewMappingCacheWithMetrics to enable metrics publishing.
 func NewMappingCacheWithOptions(positiveTTL, negativeTTL time.Duration, maxSize int, cleanupInterval time.Duration) *MappingCache {
+	return NewMappingCacheWithMetrics(positiveTTL, negativeTTL, maxSize, cleanupInterval, nil)
+}
+
+// NewMappingCacheWithMetrics creates a new mapping cache with full configuration including metrics integration.
+// If registry is nil, metrics publishing is disabled (backward compatible).
+func NewMappingCacheWithMetrics(positiveTTL, negativeTTL time.Duration, maxSize int, cleanupInterval time.Duration, registry gometrics.Registry) *MappingCache {
 	if positiveTTL <= 0 {
 		positiveTTL = 1 * time.Hour
 	}
@@ -90,13 +117,16 @@ func NewMappingCacheWithOptions(positiveTTL, negativeTTL time.Duration, maxSize 
 	}
 
 	cache := &MappingCache{
-		entries:     make(map[string]mappingEntry, 100), // Pre-allocate with initial capacity
-		positiveTTL: positiveTTL,
-		negativeTTL: negativeTTL,
-		maxSize:     maxSize,
-		metrics:     &MappingCacheMetrics{},
-		stopCleanup: make(chan struct{}),
-		cleanupDone: make(chan struct{}),
+		entries:         make(map[string]mappingEntry, 100), // Pre-allocate with initial capacity
+		positiveTTL:     positiveTTL,
+		negativeTTL:     negativeTTL,
+		maxSize:         maxSize,
+		metrics:         &MappingCacheMetrics{},
+		metricsRegistry: registry,
+		stopCleanup:     make(chan struct{}),
+		cleanupDone:     make(chan struct{}),
+		stopMetrics:     make(chan struct{}),
+		metricsDone:     make(chan struct{}),
 		builderPool: &sync.Pool{
 			New: func() interface{} {
 				return new(strings.Builder)
@@ -106,6 +136,14 @@ func NewMappingCacheWithOptions(positiveTTL, negativeTTL time.Duration, maxSize 
 
 	// Start background cleanup goroutine
 	go cache.cleanupLoop(cleanupInterval)
+
+	// Start background metrics publishing goroutine (if registry provided)
+	if registry != nil {
+		go cache.metricsLoop()
+	} else {
+		// Close metricsDone immediately if no metrics publishing
+		close(cache.metricsDone)
+	}
 
 	return cache
 }
@@ -234,10 +272,30 @@ func (c *MappingCache) GetMetrics() (hits, misses, sets, evictions, size int64) 
 		c.metrics.size.Load()
 }
 
-// Stop gracefully shuts down the cache and its cleanup goroutine
+// GetHitRate returns the cache hit rate as a percentage (0-100)
+// Returns 0 if no operations have been performed
+func (c *MappingCache) GetHitRate() float64 {
+	hits := c.metrics.hits.Load()
+	misses := c.metrics.misses.Load()
+	total := hits + misses
+
+	if total == 0 {
+		return 0
+	}
+
+	return (float64(hits) / float64(total)) * 100
+}
+
+// Stop gracefully shuts down the cache and its background goroutines
 func (c *MappingCache) Stop() {
 	close(c.stopCleanup)
 	<-c.cleanupDone
+
+	// Stop metrics publishing if it was started
+	if c.metricsRegistry != nil {
+		close(c.stopMetrics)
+		<-c.metricsDone
+	}
 }
 
 // BuildRepoCacheKey builds a cache key for repository mapping lookups.
@@ -364,5 +422,57 @@ func (c *MappingCache) evictOldest(count int) {
 
 		// Swap with last unprocessed element
 		ages[oldestIdx] = ages[len(ages)-i-1]
+	}
+}
+
+// metricsLoop runs periodically to publish cache metrics to the go-metrics registry.
+// Runs in a background goroutine until Stop() is called.
+// Only runs if a metrics registry was provided during construction.
+// Publishes metrics every 10 seconds (same interval as ClientCache).
+func (c *MappingCache) metricsLoop() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	defer close(c.metricsDone)
+
+	for {
+		select {
+		case <-c.stopMetrics:
+			return
+		case <-ticker.C:
+			c.publishMetrics()
+		}
+	}
+}
+
+// publishMetrics publishes current cache metrics to the go-metrics registry.
+// This allows metrics to be exported via OTEL to New Relic.
+func (c *MappingCache) publishMetrics() {
+	if c.metricsRegistry == nil {
+		return
+	}
+
+	// Update counters (clear and set to current value for accurate reporting)
+	gometrics.GetOrRegisterCounter(MetricsKeyMappingCacheHits, c.metricsRegistry).Clear()
+	gometrics.GetOrRegisterCounter(MetricsKeyMappingCacheHits, c.metricsRegistry).Inc(c.metrics.hits.Load())
+
+	gometrics.GetOrRegisterCounter(MetricsKeyMappingCacheMisses, c.metricsRegistry).Clear()
+	gometrics.GetOrRegisterCounter(MetricsKeyMappingCacheMisses, c.metricsRegistry).Inc(c.metrics.misses.Load())
+
+	gometrics.GetOrRegisterCounter(MetricsKeyMappingCacheSets, c.metricsRegistry).Clear()
+	gometrics.GetOrRegisterCounter(MetricsKeyMappingCacheSets, c.metricsRegistry).Inc(c.metrics.sets.Load())
+
+	gometrics.GetOrRegisterCounter(MetricsKeyMappingCacheEvictions, c.metricsRegistry).Clear()
+	gometrics.GetOrRegisterCounter(MetricsKeyMappingCacheEvictions, c.metricsRegistry).Inc(c.metrics.evictions.Load())
+
+	// Update gauges
+	gometrics.GetOrRegisterGauge(MetricsKeyMappingCacheSize, c.metricsRegistry).Update(c.metrics.size.Load())
+
+	// Calculate and update hit rate
+	hits := c.metrics.hits.Load()
+	misses := c.metrics.misses.Load()
+	total := hits + misses
+	if total > 0 {
+		hitRate := int64((float64(hits) / float64(total)) * 100)
+		gometrics.GetOrRegisterGauge(MetricsKeyMappingCacheHitRate, c.metricsRegistry).Update(hitRate)
 	}
 }

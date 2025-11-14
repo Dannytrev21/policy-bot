@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	gometrics "github.com/rcrowley/go-metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -102,6 +103,9 @@ func TestMappingCache_Metrics(t *testing.T) {
 	cache := NewMappingCache(1*time.Hour, 5*time.Minute)
 	defer cache.Stop()
 
+	// Initial hit rate should be 0
+	assert.Equal(t, float64(0), cache.GetHitRate(), "Initial hit rate should be 0")
+
 	// Generate some activity
 	cache.Set("test1", 100)
 	cache.Set("test2", 200)
@@ -115,6 +119,10 @@ func TestMappingCache_Metrics(t *testing.T) {
 	assert.Equal(t, int64(2), sets)
 	assert.Equal(t, int64(0), evictions) // No evictions yet
 	assert.Equal(t, int64(2), size)
+
+	// Hit rate should be 66.67% (2 hits / 3 total)
+	hitRate := cache.GetHitRate()
+	assert.InDelta(t, 66.67, hitRate, 0.01, "Hit rate should be approximately 66.67%")
 }
 
 func TestMappingCache_BuildKeys(t *testing.T) {
@@ -346,5 +354,197 @@ func TestMappingCache_StopCleanup(t *testing.T) {
 		// Success
 	case <-time.After(1 * time.Second):
 		t.Fatal("Stop() took too long")
+	}
+}
+
+// Metrics Integration Tests (Step 1.3)
+
+func TestMappingCache_MetricsIntegration(t *testing.T) {
+	registry := gometrics.NewRegistry()
+	cache := NewMappingCacheWithMetrics(
+		1*time.Hour,
+		5*time.Minute,
+		1000,
+		1*time.Minute,
+		registry,
+	)
+	defer cache.Stop()
+
+	// Generate some cache activity
+	cache.Set("test1", 100)
+	cache.Set("test2", 200)
+	cache.Get("test1")        // hit
+	cache.Get("test2")        // hit
+	cache.Get("nonexistent") // miss
+
+	// Publish metrics to registry
+	cache.publishMetrics()
+
+	// Verify metrics were published to registry
+	hits := gometrics.GetOrRegisterCounter(MetricsKeyMappingCacheHits, registry).Count()
+	misses := gometrics.GetOrRegisterCounter(MetricsKeyMappingCacheMisses, registry).Count()
+	sets := gometrics.GetOrRegisterCounter(MetricsKeyMappingCacheSets, registry).Count()
+	size := gometrics.GetOrRegisterGauge(MetricsKeyMappingCacheSize, registry).Value()
+	hitRate := gometrics.GetOrRegisterGauge(MetricsKeyMappingCacheHitRate, registry).Value()
+
+	assert.Equal(t, int64(2), hits, "Hits should be 2")
+	assert.Equal(t, int64(1), misses, "Misses should be 1")
+	assert.Equal(t, int64(2), sets, "Sets should be 2")
+	assert.Equal(t, int64(2), size, "Size should be 2")
+	assert.Equal(t, int64(66), hitRate, "Hit rate should be 66%")
+}
+
+func TestMappingCache_MetricsLoop(t *testing.T) {
+	registry := gometrics.NewRegistry()
+	cache := NewMappingCacheWithMetrics(
+		1*time.Hour,
+		5*time.Minute,
+		1000,
+		1*time.Minute,
+		registry,
+	)
+	defer cache.Stop()
+
+	// Generate activity
+	cache.Set("test", 100)
+	cache.Get("test") // hit
+
+	// Publish metrics (instead of waiting for loop)
+	cache.publishMetrics()
+
+	// Verify metrics are in registry
+	hits := gometrics.GetOrRegisterCounter(MetricsKeyMappingCacheHits, registry).Count()
+	assert.Equal(t, int64(1), hits)
+}
+
+func TestMappingCache_NilRegistry(t *testing.T) {
+	// Test that nil registry is handled gracefully (backward compatibility)
+	cache := NewMappingCacheWithMetrics(
+		1*time.Hour,
+		5*time.Minute,
+		1000,
+		1*time.Minute,
+		nil, // nil registry
+	)
+	defer cache.Stop()
+
+	// These should not panic
+	cache.Set("test", 100)
+	cache.Get("test")
+	cache.publishMetrics() // Should be no-op for nil registry
+
+	// Verify cache still works without metrics
+	hits, misses, sets, _, size := cache.GetMetrics()
+	assert.Equal(t, int64(1), hits)
+	assert.Equal(t, int64(0), misses)
+	assert.Equal(t, int64(1), sets)
+	assert.Equal(t, int64(1), size)
+}
+
+func TestMappingCache_HitRateCalculation(t *testing.T) {
+	registry := gometrics.NewRegistry()
+	cache := NewMappingCacheWithMetrics(
+		1*time.Hour,
+		5*time.Minute,
+		1000,
+		1*time.Minute,
+		registry,
+	)
+	defer cache.Stop()
+
+	// Test 100% hit rate
+	cache.Set("test", 100)
+	cache.Get("test") // hit
+	cache.publishMetrics()
+
+	hitRate := gometrics.GetOrRegisterGauge(MetricsKeyMappingCacheHitRate, registry).Value()
+	assert.Equal(t, int64(100), hitRate, "Hit rate should be 100%")
+
+	// Test 50% hit rate
+	cache.Get("nonexistent") // miss
+	cache.publishMetrics()
+
+	hitRate = gometrics.GetOrRegisterGauge(MetricsKeyMappingCacheHitRate, registry).Value()
+	assert.Equal(t, int64(50), hitRate, "Hit rate should be 50%")
+
+	// Test 0% hit rate (edge case - no operations)
+	cache2 := NewMappingCacheWithMetrics(1*time.Hour, 5*time.Minute, 1000, 1*time.Minute, registry)
+	defer cache2.Stop()
+	cache2.publishMetrics()
+	// Hit rate gauge should not be updated when total operations is 0
+}
+
+func TestMappingCache_ConcurrentMetricsPublishing(t *testing.T) {
+	registry := gometrics.NewRegistry()
+	cache := NewMappingCacheWithMetrics(
+		1*time.Hour,
+		5*time.Minute,
+		1000,
+		1*time.Minute,
+		registry,
+	)
+	defer cache.Stop()
+
+	const numGoroutines = 10
+	const numOperations = 100
+
+	var wg sync.WaitGroup
+	wg.Add(numGoroutines)
+
+	// Concurrent cache operations
+	for i := 0; i < numGoroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < numOperations; j++ {
+				key := fmt.Sprintf("test%d-%d", id, j)
+				cache.Set(key, int64(id*1000+j))
+				cache.Get(key)
+			}
+		}(i)
+	}
+
+	// Concurrent metrics publishing
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 10; i++ {
+			cache.publishMetrics()
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
+
+	// Verify metrics are consistent
+	hits, misses, sets, _, size := cache.GetMetrics()
+	assert.GreaterOrEqual(t, hits, int64(0))
+	assert.GreaterOrEqual(t, misses, int64(0))
+	assert.GreaterOrEqual(t, sets, int64(0))
+	assert.GreaterOrEqual(t, size, int64(0))
+}
+
+// Benchmark metrics publishing
+func BenchmarkMappingCache_PublishMetrics(b *testing.B) {
+	registry := gometrics.NewRegistry()
+	cache := NewMappingCacheWithMetrics(
+		1*time.Hour,
+		5*time.Minute,
+		1000,
+		1*time.Minute,
+		registry,
+	)
+	defer cache.Stop()
+
+	// Pre-populate cache
+	for i := 0; i < 100; i++ {
+		cache.Set(fmt.Sprintf("test%d", i), int64(i))
+		cache.Get(fmt.Sprintf("test%d", i))
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		cache.publishMetrics()
 	}
 }

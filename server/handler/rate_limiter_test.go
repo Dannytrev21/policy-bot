@@ -89,8 +89,8 @@ func TestNewRateLimitedClientCreator(t *testing.T) {
 	assert.True(t, rlcc.config.Enabled)
 
 	// Verify default config
-	assert.Equal(t, DefaultInstallationRateLimit, rlcc.config.InstallationRate)
-	assert.Equal(t, DefaultInstallationBurst, rlcc.config.InstallationBurst)
+	assert.Equal(t, DefaultOrgRateLimit, rlcc.config.OrgRate)
+	assert.Equal(t, DefaultOrgBurst, rlcc.config.OrgBurst)
 
 	// Verify metrics registered
 	assert.NotNil(t, registry.Get(MetricsKeyRateLimitWaitTime))
@@ -103,11 +103,11 @@ func TestRateLimitedClientCreator_NewInstallationClient_Success(t *testing.T) {
 	base := &MockRateLimitClientCreator{}
 
 	config := &RateLimitConfig{
-		InstallationRate:  10.0, // High rate for test
-		InstallationBurst: 10,
-		GlobalRate:        100.0,
-		GlobalBurst:       50,
-		Enabled:           true,
+		OrgRate:     10.0, // High rate for test
+		OrgBurst:    10,
+		GlobalRate:  100.0,
+		GlobalBurst: 50,
+		Enabled:     true,
 	}
 
 	rlcc := NewRateLimitedClientCreator(base, config, logger, registry)
@@ -125,11 +125,11 @@ func TestRateLimitedClientCreator_RateLimitEnforcement(t *testing.T) {
 
 	// Very low rate for testing: 2 requests/second
 	config := &RateLimitConfig{
-		InstallationRate:  2.0,
-		InstallationBurst: 2,
-		GlobalRate:        100.0,
-		GlobalBurst:       50,
-		Enabled:           true,
+		OrgRate:     2.0,
+		OrgBurst:    2,
+		GlobalRate:  100.0,
+		GlobalBurst: 50,
+		Enabled:     true,
 	}
 
 	rlcc := NewRateLimitedClientCreator(base, config, logger, registry)
@@ -166,11 +166,11 @@ func TestRateLimitedClientCreator_PerInstallationIsolation(t *testing.T) {
 
 	// Low rate to test isolation
 	config := &RateLimitConfig{
-		InstallationRate:  2.0,
-		InstallationBurst: 1,
-		GlobalRate:        100.0,
-		GlobalBurst:       50,
-		Enabled:           true,
+		OrgRate:     2.0,
+		OrgBurst:    1,
+		GlobalRate:  100.0,
+		GlobalBurst: 50,
+		Enabled:     true,
 	}
 
 	rlcc := NewRateLimitedClientCreator(base, config, logger, registry)
@@ -196,11 +196,11 @@ func TestRateLimitedClientCreator_GlobalRateLimit(t *testing.T) {
 
 	// High per-installation rate, but very low global rate
 	config := &RateLimitConfig{
-		InstallationRate:  100.0, // High
-		InstallationBurst: 10,
-		GlobalRate:        2.0,  // Very low
-		GlobalBurst:       2,    // Small burst
-		Enabled:           true,
+		OrgRate:     100.0, // High
+		OrgBurst:    10,
+		GlobalRate:  2.0, // Very low
+		GlobalBurst: 2,   // Small burst
+		Enabled:     true,
 	}
 
 	rlcc := NewRateLimitedClientCreator(base, config, logger, registry)
@@ -253,11 +253,11 @@ func TestRateLimitedClientCreator_MetricsRecording(t *testing.T) {
 
 	// Low rate to trigger throttling
 	config := &RateLimitConfig{
-		InstallationRate:  2.0,
-		InstallationBurst: 1,
-		GlobalRate:        100.0,
-		GlobalBurst:       50,
-		Enabled:           true,
+		OrgRate:     2.0,
+		OrgBurst:    1,
+		GlobalRate:  100.0,
+		GlobalBurst: 50,
+		Enabled:     true,
 	}
 
 	rlcc := NewRateLimitedClientCreator(base, config, logger, registry)
@@ -286,11 +286,11 @@ func TestRateLimitedClientCreator_ContextCancellation(t *testing.T) {
 
 	// Very low rate to ensure waiting
 	config := &RateLimitConfig{
-		InstallationRate:  0.5, // 1 request per 2 seconds
-		InstallationBurst: 1,   // Need at least 1 for burst
-		GlobalRate:        100.0,
-		GlobalBurst:       50,
-		Enabled:           true,
+		OrgRate:     0.5, // 1 request per 2 seconds
+		OrgBurst:    1,   // Need at least 1 for burst
+		GlobalRate:  100.0,
+		GlobalBurst: 50,
+		Enabled:     true,
 	}
 
 	rlcc := NewRateLimitedClientCreator(base, config, logger, registry)
@@ -315,11 +315,11 @@ func TestRateLimitedClientCreator_ConcurrentAccess(t *testing.T) {
 	base := &MockRateLimitClientCreator{}
 
 	config := &RateLimitConfig{
-		InstallationRate:  10.0,
-		InstallationBurst: 20,
-		GlobalRate:        100.0,
-		GlobalBurst:       50,
-		Enabled:           true,
+		OrgRate:     10.0,
+		OrgBurst:    20,
+		GlobalRate:  100.0,
+		GlobalBurst: 50,
+		Enabled:     true,
 	}
 
 	rlcc := NewRateLimitedClientCreator(base, config, logger, registry)
@@ -362,8 +362,8 @@ func TestRateLimitedClientCreator_GetStats(t *testing.T) {
 	stats := rlcc.GetInstallationStats(123)
 	require.NotNil(t, stats)
 	assert.Equal(t, int64(123), stats.InstallationID)
-	assert.Equal(t, DefaultInstallationRateLimit, float64(stats.Limit))
-	assert.Equal(t, DefaultInstallationBurst, stats.Burst)
+	assert.Equal(t, DefaultOrgRateLimit, float64(stats.Limit))
+	assert.Equal(t, DefaultOrgBurst, stats.Burst)
 
 	// Get global stats
 	globalStats := rlcc.GetGlobalStats()
@@ -393,11 +393,11 @@ func BenchmarkRateLimitedClientCreator_NoContention(b *testing.B) {
 
 	// High rate to avoid actual limiting
 	config := &RateLimitConfig{
-		InstallationRate:  10000.0,
-		InstallationBurst: 10000,
-		GlobalRate:        100000.0,
-		GlobalBurst:       10000,
-		Enabled:           true,
+		OrgRate:     10000.0,
+		OrgBurst:    10000,
+		GlobalRate:  100000.0,
+		GlobalBurst: 10000,
+		Enabled:     true,
 	}
 
 	rlcc := NewRateLimitedClientCreator(base, config, logger, registry)
@@ -443,11 +443,11 @@ func TestRateLimitedClientCreator_RealWorldScenario(t *testing.T) {
 	// GitHub GHEC: 15,000 req/hr = 4.16 req/sec
 	// Use conservative 3 req/sec
 	config := &RateLimitConfig{
-		InstallationRate:  3.0,
-		InstallationBurst: 10,
-		GlobalRate:        100.0,
-		GlobalBurst:       50,
-		Enabled:           true,
+		OrgRate:     3.0,
+		OrgBurst:    10,
+		GlobalRate:  100.0,
+		GlobalBurst: 50,
+		Enabled:     true,
 	}
 
 	rlcc := NewRateLimitedClientCreator(base, config, logger, registry)
@@ -481,8 +481,8 @@ func TestDefaultRateLimitConfig(t *testing.T) {
 	config := DefaultRateLimitConfig()
 
 	assert.NotNil(t, config)
-	assert.Equal(t, DefaultInstallationRateLimit, config.InstallationRate)
-	assert.Equal(t, DefaultInstallationBurst, config.InstallationBurst)
+	assert.Equal(t, DefaultOrgRateLimit, config.OrgRate)
+	assert.Equal(t, DefaultOrgBurst, config.OrgBurst)
 	assert.Equal(t, DefaultGlobalRateLimit, config.GlobalRate)
 	assert.Equal(t, DefaultGlobalBurst, config.GlobalBurst)
 	assert.True(t, config.Enabled)
@@ -658,11 +658,11 @@ func TestCalculateAdaptiveRate(t *testing.T) {
 
 func TestAdaptiveRateState(t *testing.T) {
 	config := &RateLimitConfig{
-		InstallationRate:  3.0,
-		InstallationBurst: 10,
-		GlobalRate:        100.0,
-		GlobalBurst:       50,
-		Enabled:           true,
+		OrgRate:     3.0,
+		OrgBurst:    10,
+		GlobalRate:  100.0,
+		GlobalBurst: 50,
+		Enabled:     true,
 		Adaptive: AdaptiveRateLimitConfig{
 			Enabled:         true,
 			SafetyFactor:    0.8,
@@ -679,19 +679,19 @@ func TestAdaptiveRateState(t *testing.T) {
 	creator := NewRateLimitedClientCreator(mockCreator, config, zerolog.Nop(), registry)
 	defer creator.Close()
 
-	// Get or create state for installation
-	installationID := int64(12345)
-	state := creator.getOrCreateAdaptiveState(installationID)
+	// Get or create state for org
+	owner := "test-org-12345"
+	state := creator.getOrCreateAdaptiveState(owner)
 
 	assert.NotNil(t, state)
-	assert.Equal(t, config.InstallationRate, state.currentRate, "Should start with configured rate")
+	assert.Equal(t, config.OrgRate, state.currentRate, "Should start with configured rate")
 
 	// Update with GitHub headers
 	remaining := 4000
 	limit := 5000
 	reset := time.Now().Add(1 * time.Hour)
 
-	creator.updateAdaptiveRate(installationID, remaining, limit, reset)
+	creator.updateAdaptiveRate(owner, remaining, limit, reset)
 
 	// Wait a bit for async update
 	time.Sleep(100 * time.Millisecond)
@@ -702,7 +702,7 @@ func TestAdaptiveRateState(t *testing.T) {
 	lastLimit := state.lastLimit
 	state.mu.RUnlock()
 
-	assert.NotEqual(t, config.InstallationRate, updatedRate, "Rate should have been adjusted")
+	assert.NotEqual(t, config.OrgRate, updatedRate, "Rate should have been adjusted")
 	assert.Equal(t, remaining, lastRemaining)
 	assert.Equal(t, limit, lastLimit)
 
@@ -716,9 +716,9 @@ func TestAdaptiveRateState(t *testing.T) {
 
 func TestAdaptiveRateEMASmoothing(t *testing.T) {
 	config := &RateLimitConfig{
-		InstallationRate:  3.0,
-		InstallationBurst: 10,
-		Enabled:           true,
+		OrgRate:   3.0,
+		OrgBurst:  10,
+		Enabled:   true,
 		Adaptive: AdaptiveRateLimitConfig{
 			Enabled:         true,
 			SafetyFactor:    0.8,
@@ -733,14 +733,14 @@ func TestAdaptiveRateEMASmoothing(t *testing.T) {
 	creator := NewRateLimitedClientCreator(mockCreator, config, zerolog.Nop(), metrics.NewRegistry())
 	defer creator.Close()
 
-	installationID := int64(123)
-	state := creator.getOrCreateAdaptiveState(installationID)
+	owner := "test-org-123"
+	state := creator.getOrCreateAdaptiveState(owner)
 
 	initialRate := state.currentRate
 
 	// First update
 	reset1 := time.Now().Add(1 * time.Hour)
-	creator.updateAdaptiveRate(installationID, 4500, 5000, reset1)
+	creator.updateAdaptiveRate(owner, 4500, 5000, reset1)
 	time.Sleep(50 * time.Millisecond)
 
 	state.mu.RLock()
@@ -749,7 +749,7 @@ func TestAdaptiveRateEMASmoothing(t *testing.T) {
 
 	// Second update with different value
 	reset2 := time.Now().Add(1 * time.Hour)
-	creator.updateAdaptiveRate(installationID, 3000, 5000, reset2)
+	creator.updateAdaptiveRate(owner, 3000, 5000, reset2)
 	time.Sleep(50 * time.Millisecond)
 
 	state.mu.RLock()
@@ -767,9 +767,9 @@ func TestAdaptiveRateEMASmoothing(t *testing.T) {
 
 func TestAdaptiveTransport(t *testing.T) {
 	config := &RateLimitConfig{
-		InstallationRate:  3.0,
-		InstallationBurst: 10,
-		Enabled:           true,
+		OrgRate:   3.0,
+		OrgBurst:  10,
+		Enabled:   true,
 		Adaptive: AdaptiveRateLimitConfig{
 			Enabled:         true,
 			SafetyFactor:    0.8,
@@ -785,17 +785,17 @@ func TestAdaptiveTransport(t *testing.T) {
 	creator := NewRateLimitedClientCreator(mockCreator, config, zerolog.Nop(), registry)
 	defer creator.Close()
 
-	installationID := int64(999)
+	owner := "test-org-999"
 
 	// Test updateAdaptiveRate directly (more reliable than testing async transport)
 	remaining := 4200
 	limit := 5000
 	reset := time.Now().Add(1 * time.Hour)
 
-	creator.updateAdaptiveRate(installationID, remaining, limit, reset)
+	creator.updateAdaptiveRate(owner, remaining, limit, reset)
 
 	// Verify state was updated
-	state := creator.getOrCreateAdaptiveState(installationID)
+	state := creator.getOrCreateAdaptiveState(owner)
 	state.mu.RLock()
 	updatedRemaining := state.lastRemaining
 	updatedLimit := state.lastLimit
@@ -816,9 +816,9 @@ func TestAdaptiveTransport(t *testing.T) {
 
 func TestAdaptiveTransportRoundTrip(t *testing.T) {
 	config := &RateLimitConfig{
-		InstallationRate:  3.0,
-		InstallationBurst: 10,
-		Enabled:           true,
+		OrgRate:   3.0,
+		OrgBurst:  10,
+		Enabled:   true,
 		Adaptive: AdaptiveRateLimitConfig{
 			Enabled:         true,
 			SafetyFactor:    0.8,
@@ -833,7 +833,7 @@ func TestAdaptiveTransportRoundTrip(t *testing.T) {
 	creator := NewRateLimitedClientCreator(mockCreator, config, zerolog.Nop(), metrics.NewRegistry())
 	defer creator.Close()
 
-	installationID := int64(999)
+	owner := "test-org-999"
 
 	// Create a mock round tripper that returns rate limit headers
 	mockRoundTripper := &mockRoundTripper{
@@ -849,7 +849,7 @@ func TestAdaptiveTransportRoundTrip(t *testing.T) {
 	}
 
 	// Wrap with adaptive transport
-	adaptiveTransport := creator.newAdaptiveTransport(mockRoundTripper, installationID)
+	adaptiveTransport := creator.newAdaptiveTransport(mockRoundTripper, owner)
 
 	// Make a request
 	req, _ := http.NewRequest("GET", "https://api.github.com/repos/test/test", nil)
@@ -885,9 +885,9 @@ func TestAdaptiveRateLimiting_DisabledByDefault(t *testing.T) {
 
 func TestAdaptiveRateAdjustmentLoop_Cleanup(t *testing.T) {
 	config := &RateLimitConfig{
-		InstallationRate:  3.0,
-		InstallationBurst: 10,
-		Enabled:           true,
+		OrgRate:   3.0,
+		OrgBurst:  10,
+		Enabled:   true,
 		Adaptive: AdaptiveRateLimitConfig{
 			Enabled:         true,
 			SafetyFactor:    0.8,
@@ -902,8 +902,8 @@ func TestAdaptiveRateAdjustmentLoop_Cleanup(t *testing.T) {
 	creator := NewRateLimitedClientCreator(mockCreator, config, zerolog.Nop(), metrics.NewRegistry())
 
 	// Add some state
-	creator.getOrCreateAdaptiveState(123)
-	creator.getOrCreateAdaptiveState(456)
+	creator.getOrCreateAdaptiveState("test-org-123")
+	creator.getOrCreateAdaptiveState("test-org-456")
 
 	// Let the loop run a bit
 	time.Sleep(250 * time.Millisecond)
