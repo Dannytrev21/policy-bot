@@ -130,18 +130,20 @@ func main() {
 			Level: "info",
 			Text:  true,
 		},
-		Github: githubapp.Config{
-			WebURL:   "https://github.com",
-			V3APIURL: "https://api.github.com",
-			V4APIURL: "https://api.github.com/graphql",
-			App: struct {
-				IntegrationID int64  `yaml:"integration_id" json:"integrationId"`
-				WebhookSecret string `yaml:"webhook_secret" json:"webhookSecret"`
-				PrivateKey    string `yaml:"private_key" json:"privateKey"`
-			}{
-				IntegrationID: 123456,
-				WebhookSecret: "test-webhook-secret-123",
-				PrivateKey:    testPrivateKey,
+		GithubCloud: server.GithubAppConfig{
+			Config: githubapp.Config{
+				WebURL:   "https://github.com",
+				V3APIURL: "https://api.github.com",
+				V4APIURL: "https://api.github.com/graphql",
+				App: struct {
+					IntegrationID int64  `yaml:"integration_id" json:"integrationId"`
+					WebhookSecret string `yaml:"webhook_secret" json:"webhookSecret"`
+					PrivateKey    string `yaml:"private_key" json:"privateKey"`
+				}{
+					IntegrationID: 123456,
+					WebhookSecret: "test-webhook-secret-123",
+					PrivateKey:    testPrivateKey,
+				},
 			},
 		},
 		Sessions: server.SessionsConfig{
@@ -152,16 +154,16 @@ func main() {
 			QueueSize: 10,
 		},
 		SQS: server.SQSConfig{
-			Enabled:     true,
+			Enabled:     false, // Disable SQS for testing without LocalStack
 			Region:      "us-east-1",
 			EndpointURL: "http://localhost:4566", // LocalStack
-			Queues: map[string]string{
-				"pull_request":        "http://localhost:4566/000000000000/github-pull-request",
-				"pull_request_review": "http://localhost:4566/000000000000/github-pull-request-review",
-				"issue_comment":       "http://localhost:4566/000000000000/github-issue-comment",
-				"status":              "http://localhost:4566/000000000000/github-status",
-				"check_run":           "http://localhost:4566/000000000000/github-check-run",
-				"installation":        "http://localhost:4566/000000000000/github-installation",
+			Queues: map[string]server.EventQueueConfig{
+				"pull_request":        {EastRegionURL: "http://localhost:4566/000000000000/github-pull-request"},
+				"pull_request_review": {EastRegionURL: "http://localhost:4566/000000000000/github-pull-request-review"},
+				"issue_comment":       {EastRegionURL: "http://localhost:4566/000000000000/github-issue-comment"},
+				"status":              {EastRegionURL: "http://localhost:4566/000000000000/github-status"},
+				"check_run":           {EastRegionURL: "http://localhost:4566/000000000000/github-check-run"},
+				"installation":        {EastRegionURL: "http://localhost:4566/000000000000/github-installation"},
 			},
 			WorkersPerQueue:   2,
 			MaxMessages:       5,
@@ -197,13 +199,21 @@ func main() {
 	fmt.Println("📡 Testing HTTP Webhook Events...")
 	testHTTPEvents(testHandler)
 
-	// Test SQS events
-	fmt.Println("\n📨 Testing SQS Events...")
-	testSQSEvents(testHandler)
+	// Test SQS events (only if SQS is enabled)
+	if serverConfig.SQS.Enabled {
+		fmt.Println("\n📨 Testing SQS Events...")
+		testSQSEvents(testHandler)
+	} else {
+		fmt.Println("\n📨 SQS Events disabled (LocalStack not available)")
+	}
 
-	// Test parallel events
-	fmt.Println("\n🔄 Testing Parallel HTTP and SQS Events...")
-	testParallelEvents(testHandler, srv.Address())
+	// Test parallel events (only if SQS is enabled)
+	if serverConfig.SQS.Enabled {
+		fmt.Println("\n🔄 Testing Parallel HTTP and SQS Events...")
+		testParallelEvents(testHandler, srv.Address())
+	} else {
+		fmt.Println("\n🔄 Parallel testing disabled (SQS not available)")
+	}
 
 	// Wait a bit for all events to be processed
 	time.Sleep(3 * time.Second)
@@ -353,7 +363,11 @@ func sendHTTPWebhook(event map[string]interface{}) {
 		fmt.Printf("❌ Failed to send HTTP webhook: %v\n", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			fmt.Printf("⚠️ Failed to close HTTP response body: %v\n", cerr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		fmt.Printf("❌ HTTP webhook failed with status: %d\n", resp.StatusCode)

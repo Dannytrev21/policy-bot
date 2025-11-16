@@ -16,14 +16,12 @@ package approval
 
 import (
 	"context"
-	"errors"
 	"os"
 	"regexp"
 	"testing"
 	"time"
 
 	"github.com/palantir/policy-bot/policy/common"
-	"github.com/palantir/policy-bot/policy/predicate"
 	"github.com/palantir/policy-bot/pull"
 	"github.com/palantir/policy-bot/pull/pulltest"
 	"github.com/rs/zerolog"
@@ -112,24 +110,24 @@ func TestIsApproved(t *testing.T) {
 					Body:         "I LIKE THIS",
 				},
 			},
-			HeadSHAValue: "97d5ea26da319a987d80f6db0b7ef759f2f2e441",
 			CommitsValue: []*pull.Commit{
 				{
-					SHA:       "c6ade256ecfc755d8bc877ef22cc9e01745d46bb",
-					Author:    "mhaypenny",
-					Committer: "mhaypenny",
+					CommittedDate: newTime(now.Add(5 * time.Second)),
+					SHA:           "c6ade256ecfc755d8bc877ef22cc9e01745d46bb",
+					Author:        "mhaypenny",
+					Committer:     "mhaypenny",
 				},
 				{
-					SHA:       "674832587eaaf416371b30f5bc5a47e377f534ec",
-					Author:    "contributor-author",
-					Committer: "mhaypenny",
-					Parents:   []string{"c6ade256ecfc755d8bc877ef22cc9e01745d46bb"},
+					CommittedDate: newTime(now.Add(15 * time.Second)),
+					SHA:           "674832587eaaf416371b30f5bc5a47e377f534ec",
+					Author:        "contributor-author",
+					Committer:     "mhaypenny",
 				},
 				{
-					SHA:       "97d5ea26da319a987d80f6db0b7ef759f2f2e441",
-					Author:    "mhaypenny",
-					Committer: "contributor-committer",
-					Parents:   []string{"674832587eaaf416371b30f5bc5a47e377f534ec"},
+					CommittedDate: newTime(now.Add(45 * time.Second)),
+					SHA:           "97d5ea26da319a987d80f6db0b7ef759f2f2e441",
+					Author:        "mhaypenny",
+					Committer:     "contributor-committer",
 				},
 			},
 			OrgMemberships: map[string][]string{
@@ -139,47 +137,30 @@ func TestIsApproved(t *testing.T) {
 				"comment-approver":      {"everyone", "cool-org"},
 				"review-approver":       {"everyone", "even-cooler-org"},
 			},
-			LatestStatusesValue: map[string]string{
-				"build":  "success",
-				"deploy": "pending",
-				"scan":   "success",
-			},
 		}
 	}
 
 	assertApproved := func(t *testing.T, prctx pull.Context, r *Rule, expected string) {
-		allowedCandidates, _, err := r.FilteredCandidates(ctx, prctx)
-		require.NoError(t, err)
-
-		approved, result, err := r.IsApproved(ctx, prctx, allowedCandidates)
+		approved, msg, err := r.IsApproved(ctx, prctx)
 		require.NoError(t, err)
 
 		if assert.True(t, approved, "pull request was not approved") {
-			msg := statusDescription(approved, result, allowedCandidates)
 			assert.Equal(t, expected, msg)
 		}
 	}
 
 	assertPending := func(t *testing.T, prctx pull.Context, r *Rule, expected string) {
-		allowedCandidates, _, err := r.FilteredCandidates(ctx, prctx)
-		require.NoError(t, err)
 
-		approved, result, err := r.IsApproved(ctx, prctx, allowedCandidates)
+		approved, msg, err := r.IsApproved(ctx, prctx)
 		require.NoError(t, err)
 
 		if assert.False(t, approved, "pull request was incorrectly approved") {
-			msg := statusDescription(approved, result, allowedCandidates)
 			assert.Equal(t, expected, msg)
 		}
 	}
 
 	t.Run("noApprovalRequired", func(t *testing.T) {
 		prctx := basePullContext()
-		// There are no approvers required, so `Comments()` should not be
-		// called, and therefore this error should not be returned. We are
-		// checking that we don't make an unnecessary call to the GitHub API.
-		prctx.CommentsError = errors.New("Comments() was called")
-
 		r := &Rule{}
 		assertApproved(t, prctx, r, "No approval required")
 	})
@@ -191,7 +172,7 @@ func TestIsApproved(t *testing.T) {
 				Count: 1,
 			},
 		}
-		assertPending(t, prctx, r, "0/1 required approvals. Ignored 7 approvals from disqualified users")
+		assertPending(t, prctx, r, "0/1 approvals required. Ignored 7 approvals from disqualified users")
 	})
 
 	t.Run("authorCannotApprove", func(t *testing.T) {
@@ -329,7 +310,7 @@ func TestIsApproved(t *testing.T) {
 				},
 			},
 		}
-		assertPending(t, prctx, r, "0/1 required approvals. Ignored 7 approvals from disqualified users")
+		assertPending(t, prctx, r, "0/1 approvals required. Ignored 7 approvals from disqualified users")
 	})
 
 	t.Run("specificOrgApproves", func(t *testing.T) {
@@ -352,7 +333,7 @@ func TestIsApproved(t *testing.T) {
 				},
 			},
 		}
-		assertPending(t, prctx, r, "0/1 required approvals. Ignored 7 approvals from disqualified users")
+		assertPending(t, prctx, r, "0/1 approvals required. Ignored 7 approvals from disqualified users")
 	})
 
 	t.Run("specificOrgsOrUserApproves", func(t *testing.T) {
@@ -371,15 +352,12 @@ func TestIsApproved(t *testing.T) {
 
 	t.Run("invalidateCommentOnPush", func(t *testing.T) {
 		prctx := basePullContext()
-		prctx.PushedAtValue = map[string]time.Time{
-			"c6ade256ecfc755d8bc877ef22cc9e01745d46bb": now.Add(25 * time.Second),
-		}
-		prctx.HeadSHAValue = "c6ade256ecfc755d8bc877ef22cc9e01745d46bb"
 		prctx.CommitsValue = []*pull.Commit{
 			{
-				SHA:       "c6ade256ecfc755d8bc877ef22cc9e01745d46bb",
-				Author:    "mhaypenny",
-				Committer: "mhaypenny",
+				CommittedDate: newTime(now.Add(25 * time.Second)),
+				SHA:           "c6ade256ecfc755d8bc877ef22cc9e01745d46bb",
+				Author:        "mhaypenny",
+				Committer:     "mhaypenny",
 			},
 		}
 
@@ -394,20 +372,17 @@ func TestIsApproved(t *testing.T) {
 		assertApproved(t, prctx, r, "Approved by comment-approver")
 
 		r.Options.InvalidateOnPush = true
-		assertPending(t, prctx, r, "0/1 required approvals. Ignored 6 approvals from disqualified users")
+		assertPending(t, prctx, r, "0/1 approvals required. Ignored 6 approvals from disqualified users")
 	})
 
 	t.Run("invalidateReviewOnPush", func(t *testing.T) {
 		prctx := basePullContext()
-		prctx.PushedAtValue = map[string]time.Time{
-			"c6ade256ecfc755d8bc877ef22cc9e01745d46bb": now.Add(85 * time.Second),
-		}
-		prctx.HeadSHAValue = "c6ade256ecfc755d8bc877ef22cc9e01745d46bb"
 		prctx.CommitsValue = []*pull.Commit{
 			{
-				SHA:       "c6ade256ecfc755d8bc877ef22cc9e01745d46bb",
-				Author:    "mhaypenny",
-				Committer: "mhaypenny",
+				CommittedDate: newTime(now.Add(85 * time.Second)),
+				SHA:           "c6ade256ecfc755d8bc877ef22cc9e01745d46bb",
+				Author:        "mhaypenny",
+				Committer:     "mhaypenny",
 			},
 		}
 
@@ -422,17 +397,13 @@ func TestIsApproved(t *testing.T) {
 		assertApproved(t, prctx, r, "Approved by review-approver")
 
 		r.Options.InvalidateOnPush = true
-		assertPending(t, prctx, r, "0/1 required approvals. Ignored 1 approval from disqualified users")
+		assertPending(t, prctx, r, "0/1 approvals required. Ignored 1 approval from disqualified users")
 	})
 
 	t.Run("ignoreUpdateMergeAfterReview", func(t *testing.T) {
 		prctx := basePullContext()
-		prctx.PushedAtValue = map[string]time.Time{
-			"c6ade256ecfc755d8bc877ef22cc9e01745d46bb": now,
-			"647c5078288f0ea9de27b5c280f25edaf2089045": now.Add(25 * time.Second),
-		}
-		prctx.HeadSHAValue = "647c5078288f0ea9de27b5c280f25edaf2089045"
 		prctx.CommitsValue = append(prctx.CommitsValue[:1], &pull.Commit{
+			CommittedDate:   newTime(now.Add(25 * time.Second)),
 			SHA:             "647c5078288f0ea9de27b5c280f25edaf2089045",
 			CommittedViaWeb: true,
 			Parents: []string{
@@ -453,7 +424,7 @@ func TestIsApproved(t *testing.T) {
 				InvalidateOnPush: true,
 			},
 		}
-		assertPending(t, prctx, r, "0/1 required approvals. Ignored 6 approvals from disqualified users")
+		assertPending(t, prctx, r, "0/1 approvals required. Ignored 6 approvals from disqualified users")
 
 		r.Options.IgnoreUpdateMerges = true
 		assertApproved(t, prctx, r, "Approved by comment-approver")
@@ -461,8 +432,8 @@ func TestIsApproved(t *testing.T) {
 
 	t.Run("ignoreUpdateMergeContributor", func(t *testing.T) {
 		prctx := basePullContext()
-		prctx.HeadSHAValue = "647c5078288f0ea9de27b5c280f25edaf2089045"
 		prctx.CommitsValue = append(prctx.CommitsValue[:1], &pull.Commit{
+			CommittedDate:   newTime(now.Add(25 * time.Second)),
 			SHA:             "647c5078288f0ea9de27b5c280f25edaf2089045",
 			CommittedViaWeb: true,
 			Parents: []string{
@@ -485,7 +456,7 @@ func TestIsApproved(t *testing.T) {
 				},
 			},
 		}
-		assertPending(t, prctx, r, "0/1 required approvals. Ignored 8 approvals from disqualified users")
+		assertPending(t, prctx, r, "0/1 approvals required. Ignored 8 approvals from disqualified users")
 
 		r.Options.IgnoreUpdateMerges = true
 		assertApproved(t, prctx, r, "Approved by merge-committer")
@@ -493,7 +464,6 @@ func TestIsApproved(t *testing.T) {
 
 	t.Run("ignoreCommits", func(t *testing.T) {
 		prctx := basePullContext()
-		prctx.HeadSHAValue = "ea9be5fcd016dc41d70dc457dfee2e64a8f951c1"
 		prctx.CommitsValue = append(prctx.CommitsValue, &pull.Commit{
 			SHA:       "ea9be5fcd016dc41d70dc457dfee2e64a8f951c1",
 			Author:    "comment-approver",
@@ -508,7 +478,7 @@ func TestIsApproved(t *testing.T) {
 				},
 			},
 		}
-		assertPending(t, prctx, r, "0/1 required approvals. Ignored 7 approvals from disqualified users")
+		assertPending(t, prctx, r, "0/1 approvals required. Ignored 7 approvals from disqualified users")
 
 		r.Options.IgnoreCommitsBy = common.Actors{
 			Users: []string{"comment-approver"},
@@ -532,20 +502,17 @@ func TestIsApproved(t *testing.T) {
 				},
 			},
 		}
-		assertPending(t, prctx, r, "0/1 required approvals. Ignored 7 approvals from disqualified users")
+		assertPending(t, prctx, r, "0/1 approvals required. Ignored 7 approvals from disqualified users")
 	})
 
 	t.Run("ignoreCommitsInvalidateOnPush", func(t *testing.T) {
 		prctx := basePullContext()
-		prctx.PushedAtValue = map[string]time.Time{
-			"c6ade256ecfc755d8bc877ef22cc9e01745d46bb": now.Add(25 * time.Second),
-		}
-		prctx.HeadSHAValue = "c6ade256ecfc755d8bc877ef22cc9e01745d46bb"
 		prctx.CommitsValue = []*pull.Commit{
 			{
-				SHA:       "c6ade256ecfc755d8bc877ef22cc9e01745d46bb",
-				Author:    "mhaypenny",
-				Committer: "mhaypenny",
+				CommittedDate: newTime(now.Add(25 * time.Second)),
+				SHA:           "c6ade256ecfc755d8bc877ef22cc9e01745d46bb",
+				Author:        "mhaypenny",
+				Committer:     "mhaypenny",
 			},
 		}
 
@@ -560,52 +527,6 @@ func TestIsApproved(t *testing.T) {
 		assertApproved(t, prctx, r, "Approved by comment-approver")
 
 		r.Options.InvalidateOnPush = true
-		r.Options.IgnoreCommitsBy = common.Actors{
-			Users: []string{"mhaypenny"},
-		}
-		assertApproved(t, prctx, r, "Approved by comment-approver")
-	})
-
-	t.Run("ignoreCommitsInvalidateOnPushBatches", func(t *testing.T) {
-		prctx := basePullContext()
-		prctx.PushedAtValue = map[string]time.Time{
-			"584b9232835ae85a2d8216fb55fd9cad8389092c": now.Add(25 * time.Second),
-			"7f4cd9d3999061605ce4cf261234e431b52e61ee": now,
-		}
-		prctx.HeadSHAValue = "584b9232835ae85a2d8216fb55fd9cad8389092c"
-		prctx.CommitsValue = []*pull.Commit{
-			{
-				SHA:       "584b9232835ae85a2d8216fb55fd9cad8389092c",
-				Author:    "mhaypenny",
-				Committer: "mhaypenny",
-				Parents:   []string{"7f4cd9d3999061605ce4cf261234e431b52e61ee"},
-			},
-			{
-				SHA:       "7f4cd9d3999061605ce4cf261234e431b52e61ee",
-				Author:    "mhaypenny",
-				Committer: "mhaypenny",
-				Parents:   []string{"b2b73abd18bbad3ee3c6d0055697177cf476bf67"},
-			},
-			{
-				SHA:       "b2b73abd18bbad3ee3c6d0055697177cf476bf67",
-				Author:    "nstrawnickel",
-				Committer: "nstrawnickel",
-			},
-		}
-
-		r := &Rule{
-			Requires: Requires{
-				Count: 1,
-				Actors: common.Actors{
-					Users: []string{"comment-approver"},
-				},
-			},
-		}
-		assertApproved(t, prctx, r, "Approved by comment-approver")
-
-		r.Options.InvalidateOnPush = true
-		assertPending(t, prctx, r, "0/1 required approvals. Ignored 6 approvals from disqualified users")
-
 		r.Options.IgnoreCommitsBy = common.Actors{
 			Users: []string{"mhaypenny"},
 		}
@@ -628,7 +549,7 @@ func TestIsApproved(t *testing.T) {
 
 		r.Options.IgnoreEditedComments = true
 
-		assertPending(t, prctx, r, "0/1 required approvals. Ignored 5 approvals from disqualified users")
+		assertPending(t, prctx, r, "0/1 approvals required. Ignored 5 approvals from disqualified users")
 	})
 
 	t.Run("ignoreEditedComments", func(t *testing.T) {
@@ -647,7 +568,7 @@ func TestIsApproved(t *testing.T) {
 
 		r.Options.IgnoreEditedComments = true
 
-		assertPending(t, prctx, r, "0/1 required approvals. Ignored 5 approvals from disqualified users")
+		assertPending(t, prctx, r, "0/1 approvals required. Ignored 5 approvals from disqualified users")
 	})
 
 	t.Run("ignoreEditedCommentsWithBodyPattern", func(t *testing.T) {
@@ -674,60 +595,7 @@ func TestIsApproved(t *testing.T) {
 
 		r.Options.IgnoreEditedComments = true
 
-		assertPending(t, prctx, r, "0/1 required approvals. Ignored 5 approvals from disqualified users")
-	})
-
-	t.Run("conditionsRequiredStatusPending", func(t *testing.T) {
-		prctx := basePullContext()
-		r := &Rule{
-			Requires: Requires{
-				Conditions: predicate.Predicates{
-					HasStatus: &predicate.HasStatus{Statuses: []string{"deploy"}},
-				},
-			},
-		}
-		assertPending(t, prctx, r, "0/1 required conditions")
-	})
-
-	t.Run("conditionsRequiredStatusSuccess", func(t *testing.T) {
-		prctx := basePullContext()
-		r := &Rule{
-			Requires: Requires{
-				Conditions: predicate.Predicates{
-					HasStatus: &predicate.HasStatus{Statuses: []string{"build"}},
-				},
-			},
-		}
-		assertApproved(t, prctx, r, "Approved by required conditions")
-	})
-
-	t.Run("conditionsRequiredStatusAndMissingApproval", func(t *testing.T) {
-		prctx := basePullContext()
-		r := &Rule{
-			Requires: Requires{
-				Count: 1,
-				Conditions: predicate.Predicates{
-					HasStatus: &predicate.HasStatus{Statuses: []string{"build"}},
-				},
-			},
-		}
-		assertPending(t, prctx, r, "0/1 required approvals and 1/1 required conditions. Ignored 7 approvals from disqualified users")
-	})
-
-	t.Run("conditionsRequiredStatusAndOrgApproval", func(t *testing.T) {
-		prctx := basePullContext()
-		r := &Rule{
-			Requires: Requires{
-				Count: 1,
-				Actors: common.Actors{
-					Organizations: []string{"everyone"},
-				},
-				Conditions: predicate.Predicates{
-					HasStatus: &predicate.HasStatus{Statuses: []string{"build"}},
-				},
-			},
-		}
-		assertApproved(t, prctx, r, "Approved by comment-approver, review-approver and required conditions")
+		assertPending(t, prctx, r, "0/1 approvals required. Ignored 5 approvals from disqualified users")
 	})
 }
 
@@ -826,101 +694,8 @@ func TestTrigger(t *testing.T) {
 
 		assert.True(t, r.Trigger().Matches(common.TriggerPullRequest), "expected %s to match %s", r.Trigger(), common.TriggerPullRequest)
 	})
-
-	t.Run("triggerStatusesForStatuses", func(t *testing.T) {
-		r := &Rule{
-			Requires: Requires{
-				Conditions: predicate.Predicates{
-					HasStatus: predicate.NewHasStatus([]string{"status1"}, []string{"skipped", "success"}),
-				},
-			},
-		}
-
-		assert.True(t, r.Trigger().Matches(common.TriggerStatus), "expected %s to match %s", r.Trigger(), common.TriggerStatus)
-	})
 }
 
-func TestSortCommits(t *testing.T) {
-	tests := map[string]struct {
-		Commits       []*pull.Commit
-		Head          string
-		ExpectedOrder []string
-	}{
-		"sorted": {
-			Commits: []*pull.Commit{
-				{SHA: "1", Parents: []string{"2"}},
-				{SHA: "2", Parents: []string{"3"}},
-				{SHA: "3", Parents: []string{"4"}},
-				{SHA: "4", Parents: []string{"5"}},
-				{SHA: "5"},
-			},
-			Head:          "1",
-			ExpectedOrder: []string{"1", "2", "3", "4", "5"},
-		},
-		"reverseSorted": {
-			Commits: []*pull.Commit{
-				{SHA: "5"},
-				{SHA: "4", Parents: []string{"5"}},
-				{SHA: "3", Parents: []string{"4"}},
-				{SHA: "2", Parents: []string{"3"}},
-				{SHA: "1", Parents: []string{"2"}},
-			},
-			Head:          "1",
-			ExpectedOrder: []string{"1", "2", "3", "4", "5"},
-		},
-		"unsorted": {
-			Commits: []*pull.Commit{
-				{SHA: "3", Parents: []string{"4"}},
-				{SHA: "4", Parents: []string{"5"}},
-				{SHA: "1", Parents: []string{"2"}},
-				{SHA: "5"},
-				{SHA: "2", Parents: []string{"3"}},
-			},
-			Head:          "1",
-			ExpectedOrder: []string{"1", "2", "3", "4", "5"},
-		},
-		"partialOrder": {
-			Commits: []*pull.Commit{
-				{SHA: "3", Parents: []string{"4"}},
-				{SHA: "4", Parents: []string{"5"}},
-				{SHA: "1", Parents: []string{"2"}},
-				{SHA: "5"},
-				{SHA: "2", Parents: []string{"3"}},
-			},
-			Head:          "3",
-			ExpectedOrder: []string{"3", "4", "5"},
-		},
-		"independentHistory": {
-			Commits: []*pull.Commit{
-				{SHA: "1", Parents: []string{"2"}},
-				{SHA: "2"},
-				{SHA: "3", Parents: []string{"4"}},
-				{SHA: "4", Parents: []string{"5"}},
-				{SHA: "5"},
-			},
-			Head:          "1",
-			ExpectedOrder: []string{"1", "2"},
-		},
-		"missingHead": {
-			Commits: []*pull.Commit{
-				{SHA: "1", Parents: []string{"2"}},
-				{SHA: "2", Parents: []string{"3"}},
-				{SHA: "3", Parents: []string{"4"}},
-				{SHA: "4", Parents: []string{"5"}},
-				{SHA: "5"},
-			},
-			Head:          "42",
-			ExpectedOrder: nil,
-		},
-	}
-
-	for name, test := range tests {
-		t.Run(name, func(t *testing.T) {
-			var actual []string
-			for _, c := range sortCommits(test.Commits, test.Head) {
-				actual = append(actual, c.SHA)
-			}
-			assert.Equal(t, test.ExpectedOrder, actual, "incorrect commit order")
-		})
-	}
+func newTime(t time.Time) *time.Time {
+	return &t
 }

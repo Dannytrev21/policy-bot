@@ -63,32 +63,170 @@ logging:
 # Options for consuming GitHub events from AWS SQS queues. This is an alternative
 # to receiving events via HTTP webhooks. Both can be enabled simultaneously.
 #
+# The ghec_enabled and ghes_enabled flags control webhook processing:
+# - true: Webhooks are ENABLED (processed via HTTP)
+# - false: Webhooks are DISABLED (skipped, SQS handles them)
+#
+# Common Configuration Patterns:
+#
+# Pattern 1: GHES uses HTTP only, GHEC uses SQS for specific events
+# (This is the recommended configuration for gradual SQS migration)
+#   sqs:
+#     enabled: true
+#     queues:
+#       status:
+#         east_region_url: "https://sqs.us-east-1.amazonaws.com/123/status"
+#         ghec_enabled: false  # GHEC: Webhook disabled, SQS handles it
+#         ghes_enabled: true   # GHES: Webhook enabled, no SQS
+#       # Other events not configured → webhooks pass through for both environments
+#
+# Pattern 2: All events via SQS (full migration)
+#   sqs:
+#     enabled: true
+#     queues:
+#       pull_request:
+#         east_region_url: "https://sqs.us-east-1.amazonaws.com/123/pull_request"
+#         ghec_enabled: false  # SQS only
+#         ghes_enabled: false  # SQS only
+#
+# Pattern 3: Hybrid approach (some via SQS, some via HTTP)
+#   sqs:
+#     enabled: true
+#     queues:
+#       status:
+#         ghec_enabled: false  # SQS only
+#         ghes_enabled: true   # HTTP only
+#       pull_request:
+#         ghec_enabled: true   # HTTP only
+#         ghes_enabled: true   # HTTP only
+#
 # sqs:
 #   # Enable SQS event consumption
 #   enabled: false
+#
 #   # AWS region where your SQS queues are located
 #   region: "us-east-1"
+#
 #   # AWS endpoint URL for LocalStack/testing (optional)
 #   # endpoint_url: "http://localhost:4566"
-#   # Map GitHub event types to SQS queue URLs
+#
+#   # ===========================================================================
+#   # Queue Configuration with Environment Control
+#   # ===========================================================================
+#   #
+#   # Each event type can be configured with environment-specific webhook behavior:
+#   # - ghec_enabled: Controls webhook processing for GitHub Enterprise Cloud
+#   # - ghes_enabled: Controls webhook processing for GitHub Enterprise Server
+#   #
+#   # Webhook Behavior:
+#   #   true  = Webhooks ENABLED (processed via HTTP)
+#   #   false = Webhooks DISABLED (skipped, SQS handles them)
+#   #
+#   # Default behavior: Events not configured pass through to webhooks
+#   #
 #   queues:
-#     installation: "https://sqs.us-east-1.amazonaws.com/123456789012/github-installation"
-#     pull_request: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request"
-#     pull_request_review: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request-review"
-#     issue_comment: "https://sqs.us-east-1.amazonaws.com/123456789012/github-issue-comment"
-#     status: "https://sqs.us-east-1.amazonaws.com/123456789012/github-status"
-#     check_run: "https://sqs.us-east-1.amazonaws.com/123456789012/github-check-run"
-#   # Event routing: control which events are processed via SQS vs HTTP vs both
-#   # Valid values: "sqs", "http", "both". If not specified, defaults to SQS for configured queues.
-#   # This enables gradual migration from HTTP to SQS.
+#     # Example: Status events via SQS for GHEC, HTTP for GHES
+#     status:
+#       east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-status"
+#       ghec_enabled: false  # GHEC: Webhook disabled, SQS handles it
+#       ghes_enabled: true   # GHES: Webhook enabled (HTTP only)
+#       queue_workers: 15    # High volume events need more workers
+#
+#     # Example: Pull requests via HTTP for both environments
+#     pull_request:
+#       east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request"
+#       ghec_enabled: true   # GHEC: Webhook enabled
+#       ghes_enabled: true   # GHES: Webhook enabled
+#       queue_workers: 10
+#
+#     # Additional event types can be configured similarly
+#     pull_request_review:
+#       east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request-review"
+#       ghec_enabled: true
+#       ghes_enabled: true
+#       queue_workers: 5
+#
+#     issue_comment:
+#       east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-issue-comment"
+#       ghec_enabled: true
+#       ghes_enabled: true
+#       queue_workers: 5
+#
+#     check_run:
+#       east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-check-run"
+#       ghec_enabled: true
+#       ghes_enabled: true
+#       queue_workers: 10
+#
+#   # OPTION 2: Enhanced queue mapping with per-queue configuration (recommended)
+#   # Provides fine-grained control over each queue's behavior
+#   # event_queues:
+#   #   pull_request:
+#   #     url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request"
+#   #     workers: 10              # Number of concurrent workers for this queue
+#   #     max_retries: 3           # Retries before sending to DLQ
+#   #     visibility_timeout: 60   # How long message is hidden after being received
+#   #
+#   #   status:
+#   #     url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-status"
+#   #     workers: 15              # High volume events need more workers
+#   #     max_retries: 2
+#   #     visibility_timeout: 30
+#   #
+#   #   pull_request_review:
+#   #     url: "https://sqs.us-east-1.amazonaws.com/123456789012/github-pull-request-review"
+#   #     workers: 5
+#   #     max_retries: 3
+#   #     visibility_timeout: 45
+#
+#   # ===========================================================================
+#   # Event Routing Configuration
+#   # ===========================================================================
+#
+#   # OPTION 1: Simple event routing (legacy, backward compatible)
+#   # Control which events are processed via SQS vs HTTP vs both
+#   # Valid values: "sqs", "http", "both"
+#   # This enables gradual migration from HTTP to SQS
 #   event_routing:
 #     pull_request: "both"      # Process via both HTTP and SQS (useful during migration)
 #     status: "sqs"             # Process only via SQS
 #     issue_comment: "http"     # Process only via HTTP
+#
+#   # OPTION 2: Per-environment event routing (recommended for dual-environment setups)
+#   # Allows different routing strategies for cloud vs enterprise
+#   # IMPORTANT: Enterprise GitHub currently only sends webhooks (no SQS)
+#   # environment_event_routing:
+#   #   cloud:
+#   #     # Cloud (GHEC) events - SQS available
+#   #     pull_request: "sqs"        # Cloud PR events via SQS only
+#   #     status: "both"             # Cloud status via both HTTP and SQS
+#   #     pull_request_review: "sqs" # Cloud reviews via SQS
+#   #     check_run: "http"          # Cloud check runs via HTTP only
+#   #     workflow_run: "sqs"        # Cloud workflows via SQS
+#   #     issue_comment: "http"      # Cloud comments via HTTP
+#   #     merge_group: "sqs"         # Cloud merge groups via SQS
+#   #
+#   #   enterprise:
+#   #     # Enterprise (GHES) events - currently webhook only
+#   #     # Can be changed to "sqs" or "both" when enterprise SQS is available
+#   #     pull_request: "http"        # Enterprise PR events via webhook only
+#   #     status: "http"              # Enterprise status via webhook only
+#   #     pull_request_review: "http" # Enterprise reviews via webhook only
+#   #     check_run: "http"           # Enterprise check runs via webhook only
+#   #     workflow_run: "http"        # Enterprise workflows via webhook only
+#   #     issue_comment: "http"       # Enterprise comments via webhook only
+#   #     merge_group: "http"         # Enterprise merge groups via webhook only
+#
+#   # ===========================================================================
+#   # Worker Configuration
+#   # ===========================================================================
+#
 #   # Default number of worker goroutines per queue (default: 5)
 #   workers_per_queue: 5
+#
 #   # Per-queue worker allocation (overrides workers_per_queue for specific events)
 #   # Allocate more workers to high-volume events like status, fewer to low-volume ones
+#   # Note: If using event_queues with per-queue workers, those take precedence
 #   queue_workers:
 #     installation: 2          # Low volume - app installs are rare
 #     pull_request: 8          # Medium-high volume
@@ -96,52 +234,269 @@ logging:
 #     issue_comment: 6         # Medium volume
 #     status: 15               # High volume - status checks are very frequent
 #     check_run: 10            # Medium-high volume
+#
+#   # ===========================================================================
+#   # SQS Behavior Configuration
+#   # ===========================================================================
+#
 #   # Maximum messages to receive in a single SQS request (1-10, default: 10)
 #   max_messages: 10
+#
 #   # Message visibility timeout in seconds (default: 30)
+#   # How long a message is hidden from other consumers after being received
 #   visibility_timeout: 30
+#
 #   # Long polling wait time in seconds (0-20, default: 20)
+#   # How long to wait for messages when the queue is empty
 #   wait_time_seconds: 20
+#
 #   # Maximum time to wait for graceful shutdown (default: 30s)
 #   shutdown_timeout: 30s
+#
 #   # Enable retry on message processing failure (default: false)
 #   enable_retry: true
+#
 #   # Maximum number of retries before giving up (default: 3)
 #   max_retries: 3
+#
+#   # ===========================================================================
+#   # Dead Letter Queue (DLQ) Configuration
+#   # ===========================================================================
+#
+#   # Dead Letter Queue configuration for handling failed messages
+#   # dlq:
+#   #   enabled: true
+#   #   max_receive_count: 3    # Messages go to DLQ after 3 failed attempts
+#   #   queue_suffix: "-dlq"    # Suffix for DLQ names (e.g., "github-pull-request-dlq")
 
-# Options for connecting to GitHub
-github:
-  # The URL of the GitHub homepage. Can also be set by the GITHUB_WEB_URL
-  # environment variable.
-  web_url: "https://github.com"
-  # The base URL for v3 (REST) API requests. Can also be set by the
-  # GITHUB_V3_API_URL environment variable.
-  v3_api_url: "https://api.github.com"
-  # The base URL for v4 (GraphQL) API requests. Can also be set by the
-  # GITHUB_V4_API_URL environment variable.
-  v4_api_url: "https://api.github.com/graphql"
+# ==============================================================================
+# GitHub API Rate Limiting (SQS Events Only)
+# ==============================================================================
+#
+# Proactive rate limiting for GitHub API calls during SQS event processing.
+# This prevents exceeding GitHub's rate limits before 429 errors occur.
+#
+# IMPORTANT: Rate limiting applies ONLY to SQS event processing.
+# Webhook (HTTP) events are NOT rate limited to maintain low latency.
+#
+# GitHub API Limits:
+# - GitHub Enterprise Cloud: 15,000 requests/hour per installation (~4.16 req/sec)
+# - The defaults below use conservative limits with safety margins
+#
+# Rate limiting uses token bucket algorithm with:
+# - Per-installation rate limiters (isolated per GitHub App installation)
+# - Global rate limiter (safety limit across all installations)
+# - Metrics exported via Prometheus and go-metrics
+#
+# rate_limit:
+#   # Enable rate limiting for SQS events (default: true)
+#   # Set to false to disable rate limiting entirely
+#   enabled: true
+#
+#   # Per-installation rate limit (requests per second)
+#   # Default: 3.0 req/sec (conservative for GitHub's 15k/hr = 4.16 req/sec limit)
+#   # Adjust based on your traffic patterns and GitHub's rate limit allowance
+#   installation_rate: 3.0
+#
+#   # Per-installation burst allowance (requests)
+#   # Default: 10 requests
+#   # Allows short bursts above the steady rate for bursty workloads
+#   installation_burst: 10
+#
+#   # Global rate limit across all installations (requests per second)
+#   # Default: 100.0 req/sec
+#   # Safety limit to prevent overwhelming GitHub API across all installations
+#   global_rate: 100.0
+#
+#   # Global burst allowance (requests)
+#   # Default: 50 requests
+#   # Allows global bursts for handling spikes across installations
+#   global_burst: 50
+#
+#   # Adaptive Rate Limiting (Phase 2 - FEATURE FLAG)
+#   # Dynamically adjusts rate limits based on GitHub's X-RateLimit-* response headers
+#   # IMPORTANT: Disabled by default. Enable only after validation in staging.
+#   adaptive:
+#     # Enable adaptive rate limiting (default: false - feature flag)
+#     # When enabled, rate limits dynamically adjust based on actual GitHub quota
+#     enabled: false
+#
+#     # Safety factor for rate calculation (0.0-1.0)
+#     # Calculated rate = (remaining / time_until_reset) * safety_factor
+#     # Default: 0.8 (use 80% of calculated safe rate for safety margin)
+#     safety_factor: 0.8
+#
+#     # Minimum rate limit floor (requests per second)
+#     # Never go below this rate even if GitHub headers suggest lower
+#     # Default: 1.0 req/sec (safety floor to prevent stalling)
+#     min_rate: 1.0
+#
+#     # Maximum rate limit ceiling (requests per second)
+#     # Never exceed this rate even if GitHub headers suggest higher
+#     # Default: 4.0 req/sec (close to GitHub's 4.16 req/sec limit)
+#     max_rate: 4.0
+#
+#     # Smoothing factor for exponential moving average (0.0-1.0)
+#     # Higher = more responsive to changes, Lower = more stable
+#     # Default: 0.3 (balanced between stability and responsiveness)
+#     smoothing_factor: 0.3
+#
+# ==============================================================================
+# Installation Filtering Controls
+# ==============================================================================
+#
+# Installation filtering drops events early when the GitHub App is not installed
+# on the target repository. Filtering is implemented as a decorator around the
+# existing handlers and can be toggled independently for HTTP webhooks and SQS
+# ingestion.
+#
+# installation_filter:
+#   # Enable filtering for webhook (HTTP) events.
+#   # Default: false (only SQS filtering is enabled out of the box).
+#   webhook_enabled: false
+#
+#   # Enable filtering for SQS events (recommended).
+#   # Default: true to keep queue ingestion efficient.
+#   sqs_enabled: true
+#
+#     # Update interval for periodic rate adjustments
+#     # Default: 10s (adjust rates every 10 seconds)
+#     update_interval: 10s
+
+# ==============================================================================
+# GitHub Configuration
+# ==============================================================================
+# Configure one or both GitHub app connections. The application supports:
+# - GitHub Enterprise Cloud (github.com or GitHub Enterprise Cloud accounts)
+# - GitHub Enterprise Server (self-hosted GitHub instances)
+#
+# You can configure one or both depending on your needs. When both are
+# configured, the application routes webhooks and API calls based on the
+# source (detected via headers or SQS message content).
+#
+# Environment variable prefix:
+# - GitHub Enterprise: GITHUB_ENTERPRISE_*
+# - GitHub Cloud: GITHUB_CLOUD_*
+# ==============================================================================
+
+# GitHub Enterprise Server Configuration
+# Use this for self-hosted GitHub Enterprise Server instances
+github_enterprise:
+  # The URL of the GitHub Enterprise homepage
+  # Environment variable: GITHUB_ENTERPRISE_GITHUB_WEB_URL
+  web_url: "https://github.enterprise.company.com"
+
+  # The base URL for v3 (REST) API requests
+  # Environment variable: GITHUB_ENTERPRISE_GITHUB_V3_API_URL
+  v3_api_url: "https://github.enterprise.company.com/api/v3"
+
+  # The base URL for v4 (GraphQL) API requests
+  # Environment variable: GITHUB_ENTERPRISE_GITHUB_V4_API_URL
+  v4_api_url: "https://github.enterprise.company.com/api/graphql"
+
+  # GitHub App configuration
   app:
-    # The integration ID of the GitHub app. Can also be set by the
-    # GITHUB_APP_INTEGRATION_ID environment variable.
-    integration_id: 1
-    # A random string used to validate webhooks. Can also be set by the
-    # GITHUB_APP_WEBHOOK_SECRET environment variable.
-    webhook_secret: "app_secret"
-    # The private key of the GitHub app. Can also be set by the
-    # GITHUB_APP_PRIVATE_KEY environment variable.
+    # The integration ID of your GitHub App
+    # Environment variable: GITHUB_ENTERPRISE_GITHUB_APP_INTEGRATION_ID
+    integration_id: 123
+
+    # Webhook secret for validating webhook requests
+    # Environment variable: GITHUB_ENTERPRISE_GITHUB_APP_WEBHOOK_SECRET
+    webhook_secret: "enterprise_webhook_secret"
+
+    # The private key of your GitHub App (in PEM format)
+    # Environment variable: GITHUB_ENTERPRISE_GITHUB_APP_PRIVATE_KEY
     private_key: |
       -----BEGIN RSA PRIVATE KEY-----
-      xxxxx
-      xxxxx
-      xxxxx
+      MIIEpAIBAAKCAQEA...
+      ...your enterprise private key...
       -----END RSA PRIVATE KEY-----
+
+  # OAuth configuration (optional, required for UI login features)
   oauth:
-    # The client ID of the OAuth app associated with the GitHub app. Can also
-    # be set by the GITHUB_OAUTH_CLIENT_ID environment variable.
-    client_id: "client_id"
-    # The client secret of the OAuth app associated with the GitHub app. Can
-    # also be set by the GITHUB_OAUTH_CLIENT_SECRET environment variable.
-    client_secret: "client_secret"
+    # OAuth app client ID associated with your GitHub App
+    # Environment variable: GITHUB_ENTERPRISE_GITHUB_OAUTH_CLIENT_ID
+    client_id: "enterprise_oauth_client_id"
+
+    # OAuth app client secret
+    # Environment variable: GITHUB_ENTERPRISE_GITHUB_OAUTH_CLIENT_SECRET
+    client_secret: "enterprise_oauth_client_secret"
+
+  # Optional: Custom webhook route for this app (defaults to /api/github/hook)
+  # webhook_route: "/api/github/enterprise/hook"
+
+  # Optional: Event routing configuration for SQS vs HTTP
+  # Controls which events are processed via SQS, HTTP, or both
+  # event_routing:
+  #   pull_request: "sqs"
+  #   status: "http"
+  #   issue_comment: "both"
+
+# GitHub Enterprise Cloud Configuration
+# Use this for github.com or GitHub Enterprise Cloud accounts
+github_cloud:
+  # The URL of the GitHub homepage (typically github.com)
+  # Environment variable: GITHUB_CLOUD_GITHUB_WEB_URL
+  web_url: "https://github.com"
+
+  # The base URL for v3 (REST) API requests
+  # Environment variable: GITHUB_CLOUD_GITHUB_V3_API_URL
+  v3_api_url: "https://api.github.com"
+
+  # The base URL for v4 (GraphQL) API requests
+  # Environment variable: GITHUB_CLOUD_GITHUB_V4_API_URL
+  v4_api_url: "https://api.github.com/graphql"
+
+  # GitHub App configuration
+  app:
+    # The integration ID of your GitHub App
+    # Environment variable: GITHUB_CLOUD_GITHUB_APP_INTEGRATION_ID
+    integration_id: 456
+
+    # Webhook secret for validating webhook requests
+    # Environment variable: GITHUB_CLOUD_GITHUB_APP_WEBHOOK_SECRET
+    webhook_secret: "cloud_webhook_secret"
+
+    # The private key of your GitHub App (in PEM format)
+    # Environment variable: GITHUB_CLOUD_GITHUB_APP_PRIVATE_KEY
+    private_key: |
+      -----BEGIN RSA PRIVATE KEY-----
+      MIIEpAIBAAKCAQEA...
+      ...your cloud private key...
+      -----END RSA PRIVATE KEY-----
+
+  # OAuth configuration (optional, required for UI login features)
+  oauth:
+    # OAuth app client ID associated with your GitHub App
+    # Environment variable: GITHUB_CLOUD_GITHUB_OAUTH_CLIENT_ID
+    client_id: "cloud_oauth_client_id"
+
+    # OAuth app client secret
+    # Environment variable: GITHUB_CLOUD_GITHUB_OAUTH_CLIENT_SECRET
+    client_secret: "cloud_oauth_client_secret"
+
+  # Optional: Custom webhook route for this app (defaults to /api/github/hook)
+  # webhook_route: "/api/github/cloud/hook"
+
+  # Optional: Event routing configuration for SQS vs HTTP
+  # Controls which events are processed via SQS, HTTP, or both
+  # event_routing:
+  #   pull_request: "both"
+  #   status: "sqs"
+  #   check_run: "sqs"
+
+# ==============================================================================
+# Configuration Notes:
+# ==============================================================================
+# 1. You must configure at least one of github_enterprise or github_cloud
+# 2. When both are configured, webhooks are routed based on:
+#    - HTTP: X-GitHub-Enterprise-Host header (GHES) or x-dcp-destination-host (GHEC)
+#    - SQS: Host field in the message headers
+# 3. All URL fields (web_url, v3_api_url, v4_api_url) are required
+# 4. All app fields (integration_id, webhook_secret, private_key) are required
+# 5. OAuth fields are optional but both must be set if you want OAuth features
+# 6. Use environment variables for sensitive data in production
+# ==============================================================================
 
 # Options for user sessions
 sessions:
@@ -150,7 +505,11 @@ sessions:
   key: "secretsessionkey"
 
 # Options for application behavior. The defaults are shown below.
+# Note: You can configure separate options for cloud_options and enterprise_options
+# if you need different behavior for each GitHub instance.
 #
+# cloud_options:
+# enterprise_options:
 # options:
 #   # The path to the policy file in a repository. Can also be set by the
 #   # POLICYBOT_OPTIONS_POLICY_PATH environment variable.

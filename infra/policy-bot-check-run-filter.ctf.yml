@@ -1,0 +1,98 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  CloudFormation template that connects the Policy Bot SNS topic to an SQS queue
+  and filters `check_run` events so that only messages for a specific GitHub App ID
+  and a set of installation IDs (covering the target repositories/orgs) are delivered.
+
+Parameters:
+  GitHubAppId:
+    Type: Number
+    Description: GitHub App ID that Policy Bot should accept check_run events from.
+
+  AllowedInstallationIds:
+    Type: CommaDelimitedList
+    Description: >
+      Comma-separated list of installation IDs (as strings) that are allowed to enqueue
+      check_run events. Obtain from the GitHub App installation page or webhook headers.
+
+  SNSTopicName:
+    Type: String
+    Default: policy-bot-check-run
+    Description: Optional override for the SNS topic name.
+
+  SQSQueueName:
+    Type: String
+    Default: policy-bot-check-run-queue
+    Description: Optional override for the SQS queue name.
+
+Resources:
+  CheckRunTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Ref SNSTopicName
+      Tags:
+        - Key: Service
+          Value: PolicyBot
+        - Key: EventType
+          Value: check_run
+
+  CheckRunQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Ref SQSQueueName
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 345600   # 4 days
+      Tags:
+        - Key: Service
+          Value: PolicyBot
+        - Key: EventType
+          Value: check_run
+
+  CheckRunQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref CheckRunQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowSNSPublish
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt CheckRunQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref CheckRunTopic
+
+  CheckRunSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref CheckRunTopic
+      Protocol: sqs
+      Endpoint: !GetAtt CheckRunQueue.Arn
+      RawMessageDelivery: true
+      FilterPolicyScope: MessageBody
+      FilterPolicy:
+        headers:
+          X-GitHub-Event:
+            - check_run
+          X-GitHub-Hook-Installation-Target-ID: !Ref AllowedInstallationIds
+        check_run:
+          app:
+            id:
+              - !Sub "${GitHubAppId}"
+
+Outputs:
+  TopicArn:
+    Description: ARN of the SNS topic publishing filtered check_run events.
+    Value: !Ref CheckRunTopic
+
+  QueueUrl:
+    Description: URL of the SQS queue receiving filtered check_run events.
+    Value: !Ref CheckRunQueue
+
+  QueueArn:
+    Description: ARN of the SQS queue receiving filtered check_run events.
+    Value: !GetAtt CheckRunQueue.Arn

@@ -15,44 +15,29 @@
 package predicate
 
 type Predicates struct {
-	ChangedFiles     *ChangedFiles     `yaml:"changed_files,omitempty"`
-	NoChangedFiles   *NoChangedFiles   `yaml:"no_changed_files,omitempty"`
-	OnlyChangedFiles *OnlyChangedFiles `yaml:"only_changed_files,omitempty"`
-	FileAdded        *FileAdded        `yaml:"file_added,omitempty"`
-	FileNotAdded     *FileNotAdded     `yaml:"file_not_added,omitempty"`
-	FileDeleted      *FileDeleted      `yaml:"file_deleted,omitempty"`
-	FileNotDeleted   *FileNotDeleted   `yaml:"file_not_deleted,omitempty"`
+	ChangedFiles     *ChangedFiles     `yaml:"changed_files"`
+	OnlyChangedFiles *OnlyChangedFiles `yaml:"only_changed_files"`
 
-	HasAuthorIn             *HasAuthorIn             `yaml:"has_author_in,omitempty"`
-	HasContributorIn        *HasContributorIn        `yaml:"has_contributor_in,omitempty"`
-	OnlyHasContributorsIn   *OnlyHasContributorsIn   `yaml:"only_has_contributors_in,omitempty"`
-	AuthorIsOnlyContributor *AuthorIsOnlyContributor `yaml:"author_is_only_contributor,omitempty"`
+	HasAuthorIn             *HasAuthorIn             `yaml:"has_author_in"`
+	HasContributorIn        *HasContributorIn        `yaml:"has_contributor_in"`
+	OnlyHasContributorsIn   *OnlyHasContributorsIn   `yaml:"only_has_contributors_in"`
+	AuthorIsOnlyContributor *AuthorIsOnlyContributor `yaml:"author_is_only_contributor"`
 
-	TargetsBranch *TargetsBranch `yaml:"targets_branch,omitempty"`
-	FromBranch    *FromBranch    `yaml:"from_branch,omitempty"`
+	TargetsBranch *TargetsBranch `yaml:"targets_branch"`
+	FromBranch    *FromBranch    `yaml:"from_branch"`
 
-	ModifiedLines *ModifiedLines `yaml:"modified_lines,omitempty"`
+	ModifiedLines *ModifiedLines `yaml:"modified_lines"`
 
-	HasStatus *HasStatus `yaml:"has_status,omitempty"`
-	// `has_successful_status` is a deprecated field that is kept for backwards
-	// compatibility.  `has_status` replaces it, and can accept any conclusion
-	// rather than just "success".
-	HasSuccessfulStatus *HasSuccessfulStatus `yaml:"has_successful_status,omitempty"`
+	HasSuccessfulStatus *HasSuccessfulStatus `yaml:"has_successful_status"`
 
-	HasWorkflowResult *HasWorkflowResult `yaml:"has_workflow_result,omitempty"`
+	HasLabels *HasLabels `yaml:"has_labels"`
 
-	HasLabels *HasLabels `yaml:"has_labels,omitempty"`
+	Repository *Repository `yaml:"repository"`
+	Title      *Title      `yaml:"title"`
 
-	Repository *Repository `yaml:"repository,omitempty"`
-	Title      *Title      `yaml:"title,omitempty"`
-
-	HasValidSignatures       *HasValidSignatures       `yaml:"has_valid_signatures,omitempty"`
-	HasValidSignaturesBy     *HasValidSignaturesBy     `yaml:"has_valid_signatures_by,omitempty"`
-	HasValidSignaturesByKeys *HasValidSignaturesByKeys `yaml:"has_valid_signatures_by_keys,omitempty"`
-}
-
-func (p Predicates) IsZero() bool {
-	return p == Predicates{}
+	HasValidSignatures       *HasValidSignatures       `yaml:"has_valid_signatures"`
+	HasValidSignaturesBy     *HasValidSignaturesBy     `yaml:"has_valid_signatures_by"`
+	HasValidSignaturesByKeys *HasValidSignaturesByKeys `yaml:"has_valid_signatures_by_keys"`
 }
 
 func (p *Predicates) Predicates() []Predicate {
@@ -61,23 +46,8 @@ func (p *Predicates) Predicates() []Predicate {
 	if p.ChangedFiles != nil {
 		ps = append(ps, Predicate(p.ChangedFiles))
 	}
-	if p.NoChangedFiles != nil {
-		ps = append(ps, Predicate(p.NoChangedFiles))
-	}
 	if p.OnlyChangedFiles != nil {
 		ps = append(ps, Predicate(p.OnlyChangedFiles))
-	}
-	if p.FileAdded != nil {
-		ps = append(ps, Predicate(p.FileAdded))
-	}
-	if p.FileNotAdded != nil {
-		ps = append(ps, Predicate(p.FileNotAdded))
-	}
-	if p.FileDeleted != nil {
-		ps = append(ps, Predicate(p.FileDeleted))
-	}
-	if p.FileNotDeleted != nil {
-		ps = append(ps, Predicate(p.FileNotDeleted))
 	}
 
 	if p.HasAuthorIn != nil {
@@ -104,16 +74,8 @@ func (p *Predicates) Predicates() []Predicate {
 		ps = append(ps, Predicate(p.ModifiedLines))
 	}
 
-	if p.HasStatus != nil {
-		ps = append(ps, Predicate(p.HasStatus))
-	}
-
 	if p.HasSuccessfulStatus != nil {
 		ps = append(ps, Predicate(p.HasSuccessfulStatus))
-	}
-
-	if p.HasWorkflowResult != nil {
-		ps = append(ps, Predicate(p.HasWorkflowResult))
 	}
 
 	if p.HasLabels != nil {

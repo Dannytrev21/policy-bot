@@ -19,7 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/google/go-github/v74/github"
+	"github.com/google/go-github/v47/github"
 	"github.com/palantir/go-githubapp/githubapp"
 	"github.com/palantir/policy-bot/policy"
 	"github.com/palantir/policy-bot/policy/common"
@@ -52,12 +52,13 @@ func (h *IssueComment) Handle(ctx context.Context, eventType, deliveryID string,
 		return nil
 	}
 
-	client, err := h.NewInstallationClient(installationID)
+	// Use cached client lookup instead of creating uncached client
+	clients, err := h.GetClientsForEvent(ctx, owner, installationID)
 	if err != nil {
 		return err
 	}
 
-	pr, _, err := client.PullRequests.Get(ctx, owner, repo.GetName(), number)
+	pr, _, err := clients.V3Client.PullRequests.Get(ctx, owner, repo.GetName(), number)
 	if err != nil {
 		return errors.Wrapf(err, "failed to get pull request %s/%s#%d", owner, repo.GetName(), number)
 	}

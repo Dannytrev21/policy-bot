@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/google/go-github/v74/github"
+	"github.com/google/go-github/v47/github"
 	"github.com/palantir/go-githubapp/githubapp"
 	"github.com/palantir/policy-bot/policy/common"
 	"github.com/palantir/policy-bot/pull"
@@ -60,7 +60,8 @@ func (h *Status) processOwn(ctx context.Context, event github.StatusEvent) error
 	commitSHA := event.GetCommit().GetSHA()
 	installationID := githubapp.GetInstallationIDFromEvent(&event)
 
-	client, err := h.NewInstallationClient(installationID)
+	// Use cached client lookup instead of creating uncached client
+	clients, err := h.GetClientsForEvent(ctx, ownerName, installationID)
 	if err != nil {
 		return err
 	}
@@ -96,7 +97,7 @@ func (h *Status) processOwn(ctx context.Context, event github.StatusEvent) error
 		Description: &desc,
 	}
 
-	_, _, err = client.Repositories.CreateStatus(ctx, ownerName, repoName, commitSHA, status)
+	_, _, err = clients.V3Client.Repositories.CreateStatus(ctx, ownerName, repoName, commitSHA, status)
 	return err
 }
 
@@ -107,7 +108,8 @@ func (h *Status) processOthers(ctx context.Context, event github.StatusEvent) er
 	commitSHA := event.GetCommit().GetSHA()
 	installationID := githubapp.GetInstallationIDFromEvent(&event)
 
-	client, err := h.NewInstallationClient(installationID)
+	// Use cached client lookup instead of creating uncached client
+	clients, err := h.GetClientsForEvent(ctx, ownerName, installationID)
 	if err != nil {
 		return err
 	}
@@ -116,13 +118,13 @@ func (h *Status) processOthers(ctx context.Context, event github.StatusEvent) er
 
 	// In practice, there should be well under 100 PRs for a given commit. In exceptional cases, if there are
 	// more than 100 PRs, only process the most recent 100.
-	prs, _, err := client.PullRequests.ListPullRequestsWithCommit(
+	prs, _, err := clients.V3Client.PullRequests.ListPullRequestsWithCommit(
 		ctx,
 		ownerName,
 		repoName,
 		commitSHA,
-		&github.ListOptions{
-			PerPage: 100,
+		&github.PullRequestListOptions{
+			ListOptions: github.ListOptions{PerPage: 100},
 		})
 	if err != nil {
 		return errors.Wrapf(err, "failed to list pull requests for SHA %s", commitSHA)

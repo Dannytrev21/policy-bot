@@ -10,6 +10,8 @@
         {
           "comment": "This one fails in id: 6, but that timestamp is earlier than this one, so is ignored",
           "id": 1,
+          "workflow_id": 101,
+          "head_sha": "e05fcae367230ee709313dd2720da527d178ce43",
           "path": ".github/workflows/a.yml",
           "event": "pull_request",
           "status": "completed",
@@ -21,6 +23,8 @@
         {
           "comment": "This one fails in id: 5, and that timestamp is later than this one, so is taken as the resutl of the workflow",
           "id": 2,
+          "workflow_id": 102,
+          "head_sha": "e05fcae367230ee709313dd2720da527d178ce43",
           "path": ".github/workflows/b.yml",
           "event": "pull_request",
           "status": "completed",
@@ -42,6 +46,8 @@
       "workflow_runs": [
         {
           "id": 3,
+          "workflow_id": 103,
+          "head_sha": "e05fcae367230ee709313dd2720da527d178ce43",
           "path": ".github/workflows/c.yml",
           "event": "pull_request",
           "status": "completed",
@@ -51,6 +57,8 @@
         },
         {
           "id": 4,
+          "workflow_id": 104,
+          "head_sha": "e05fcae367230ee709313dd2720da527d178ce43",
           "path": ".github/workflows/d.yml",
           "event": "pull_request",
           "status": "in_progress",
@@ -60,6 +68,8 @@
         },
         {
           "id": 5,
+          "workflow_id": 102,
+          "head_sha": "e05fcae367230ee709313dd2720da527d178ce43",
           "path": ".github/workflows/b.yml",
           "event": "pull_request",
           "status": "completed",
@@ -69,6 +79,8 @@
         },
         {
           "id": 6,
+          "workflow_id": 101,
+          "head_sha": "e05fcae367230ee709313dd2720da527d178ce43",
           "path": ".github/workflows/a.yml",
           "event": "pull_request",
           "status": "completed",
@@ -79,6 +91,8 @@
         },
         {
           "id": 7,
+          "workflow_id": 101,
+          "head_sha": "e05fcae367230ee709313dd2720da527d178ce43",
           "path": ".github/workflows/a.yml",
           "event": "push",
           "status": "completed",

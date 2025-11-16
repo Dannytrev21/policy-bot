@@ -1,0 +1,53 @@
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#2E86AB', 'primaryBorderColor':'#1E5A7D', 'errorBkgColor':'#D62828', 'errorTextColor':'#fff', 'warningBkgColor':'#F77F00', 'successBkgColor':'#52B788', 'successTextColor':'#fff'}}}%%
+
+graph TB
+    subgraph "BEFORE: Synchronous Webhook Architecture"
+        GH1[GitHub Enterprise] -->|Webhook| LB1[Load Balancer]
+        LB1 --> PB1[Policy Bot Instance 1]
+        LB1 --> PB2[Policy Bot Instance 2]
+
+        PB1 --> Queue1[Internal Queue<br/>⚠️ Limited: 100 events]
+        PB2 --> Queue2[Internal Queue<br/>⚠️ Limited: 100 events]
+
+        Queue1 --> Worker1[Worker Pool<br/>10 workers]
+        Queue2 --> Worker2[Worker Pool<br/>10 workers]
+
+        Worker1 -->|Direct API Calls| GHAPI1[GitHub API]
+        Worker2 -->|Direct API Calls| GHAPI1
+
+        style Queue1 fill:#F77F00,stroke:#333,stroke-width:2px
+        style Queue2 fill:#F77F00,stroke:#333,stroke-width:2px
+
+        Issues1[❌ 5-10% Event Loss During Peaks<br/>❌ No Retry on Failures<br/>❌ Limited Observability<br/>❌ Direct API Pressure]
+
+        style Issues1 fill:#D62828,stroke:#333,stroke-width:2px,color:#fff
+    end
+
+    subgraph "AFTER: Event-Driven SQS Architecture"
+        GH2[GitHub Enterprise] -->|Webhook| SNS[ghec-github-webhook<br/>-orchestrator SNS]
+        SNS --> Lambda[Lambda Bridge]
+        Lambda --> SNS2[codegenie-car SNS]
+
+        SNS2 --> SQS1[policy-status SQS<br/>♾️ Unlimited buffer]
+        SNS2 --> SQS2[policy-pr SQS<br/>♾️ Unlimited buffer]
+        SNS2 --> SQS3[Other Event SQS<br/>♾️ Unlimited buffer]
+
+        SQS1 --> Consumer1[SQS Consumer<br/>Adaptive Workers]
+        SQS2 --> Consumer2[SQS Consumer<br/>Adaptive Workers]
+
+        Consumer1 --> Manager[Installation Manager<br/>🛡️ Circuit Breaker<br/>🔄 Smart Retry<br/>💾 90% Cache Hit]
+        Consumer2 --> Manager
+
+        Manager -->|Protected API Calls| GHAPI2[GitHub API]
+
+        style SQS1 fill:#52B788,stroke:#333,stroke-width:2px
+        style SQS2 fill:#52B788,stroke:#333,stroke-width:2px
+        style SQS3 fill:#52B788,stroke:#333,stroke-width:2px
+        style Manager fill:#2E86AB,stroke:#333,stroke-width:2px,color:#fff
+
+        Benefits[✅ 0% Event Loss<br/>✅ Automatic Retries<br/>✅ Full Observability<br/>✅ 40% Less API Calls<br/>✅ 200 events/sec capacity]
+
+        style Benefits fill:#52B788,stroke:#333,stroke-width:2px,color:#fff
+    end
+```

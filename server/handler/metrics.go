@@ -17,15 +17,13 @@ package handler
 import (
 	"net/http"
 
-	"github.com/palantir/go-baseapp/appmetrics/emitter/prometheus"
-	"github.com/palantir/go-baseapp/baseapp"
+	"github.com/palantir/policy-bot/server/metricsbridge"
 	"github.com/rcrowley/go-metrics"
 )
 
-func Metrics(r metrics.Registry, config prometheus.Config) http.Handler {
-	h := prometheus.NewHandler(r, config)
+func Metrics(r metrics.Registry, config metricsbridge.Config) http.Handler {
+	h := metricsbridge.NewHandler(r, config)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		baseapp.IgnoreAll(r)
 		h.ServeHTTP(w, r)
 	})
 }

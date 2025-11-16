@@ -80,11 +80,6 @@ func TestRules(t *testing.T) {
 						common.NewCompiledRegexp(regexp.MustCompile("path1")),
 					},
 				},
-				NoChangedFiles: &predicate.NoChangedFiles{
-					Paths: []common.Regexp{
-						common.NewCompiledRegexp(regexp.MustCompile("path2")),
-					},
-				},
 				OnlyChangedFiles: &predicate.OnlyChangedFiles{
 					Paths: []common.Regexp{
 						common.NewCompiledRegexp(regexp.MustCompile("path3")),

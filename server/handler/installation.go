@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/google/go-github/v74/github"
+	"github.com/google/go-github/v47/github"
 	"github.com/palantir/go-githubapp/githubapp"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
@@ -41,6 +41,7 @@ func (h *Installation) Handle(ctx context.Context, eventType, deliveryID string,
 	var action string
 	var installationID int64
 	var repositories []*github.Repository
+	var owner string
 
 	switch eventType {
 	case "installation":
@@ -52,6 +53,9 @@ func (h *Installation) Handle(ctx context.Context, eventType, deliveryID string,
 		action = event.GetAction()
 		installationID = githubapp.GetInstallationIDFromEvent(&event)
 		repositories = event.Repositories
+		if event.Installation != nil && event.Installation.Account != nil {
+			owner = event.Installation.Account.GetLogin()
+		}
 
 	case "installation_repositories":
 		var event github.InstallationRepositoriesEvent
@@ -61,18 +65,64 @@ func (h *Installation) Handle(ctx context.Context, eventType, deliveryID string,
 
 		action = event.GetAction()
 		installationID = githubapp.GetInstallationIDFromEvent(&event)
-		repositories = event.RepositoriesAdded
+		if event.Installation != nil && event.Installation.Account != nil {
+			owner = event.Installation.Account.GetLogin()
+		}
+
+		// Handle both added and removed repositories
+		if action == "added" {
+			repositories = event.RepositoriesAdded
+		} else if action == "removed" {
+			repositories = event.RepositoriesRemoved
+		}
+	}
+
+	logger := zerolog.Ctx(ctx)
+
+	// SIMPLIFIED: Installation locator removed during simplification
+	// Cache updates are now handled per-org instead of per-installation
+
+	// Extract repository names for cache operations
+	repoNames := make([]string, 0, len(repositories))
+	for _, repo := range repositories {
+		repoNames = append(repoNames, repo.GetName())
 	}
 
 	switch action {
 	case "created", "added":
-		client, err := h.NewInstallationClient(installationID)
+		// Populate caches with installation, organization, and repository mappings
+		h.PopulateInstallationCaches(installationID, owner, repoNames)
+		logger.Debug().
+			Int64("installation_id", installationID).
+			Str("owner", owner).
+			Int("repos_count", len(repoNames)).
+			Msg("Populated installation caches (created/added)")
+
+		// Use cached client lookup for consistency
+		clients, err := h.GetClientsForEvent(ctx, owner, installationID)
 		if err != nil {
 			return err
 		}
 		for _, repo := range repositories {
-			h.postRepoInstallationStatus(ctx, client, repo)
+			h.postRepoInstallationStatus(ctx, clients.V3Client, repo)
 		}
+
+	case "deleted":
+		// Clear all cache entries when installation is deleted
+		h.InvalidateInstallationCaches(installationID, owner, repoNames)
+		logger.Info().
+			Int64("installation_id", installationID).
+			Str("owner", owner).
+			Int("repos_count", len(repoNames)).
+			Msg("Invalidated installation caches (deleted)")
+
+	case "removed":
+		// Remove specific repositories from cache when they're removed from the installation
+		h.RemoveRepositoriesFromCache(owner, repoNames)
+		logger.Info().
+			Str("owner", owner).
+			Int("repos_count", len(repoNames)).
+			Msg("Removed repositories from cache (removed)")
 	}
 
 	return nil
@@ -92,7 +142,7 @@ func (h *Installation) postRepoInstallationStatus(ctx context.Context, client *g
 	}
 
 	defaultBranch := repository.GetDefaultBranch()
-	branch, _, err := client.Repositories.GetBranch(ctx, owner, repo, defaultBranch, 0)
+	branch, _, err := client.Repositories.GetBranch(ctx, owner, repo, defaultBranch, false)
 	if err != nil {
 		return
 	}

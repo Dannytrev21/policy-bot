@@ -1,0 +1,31 @@
+{
+  "action": "synchronize",
+  "number": {{random_number}},
+  "pull_request": {
+    "id": "{{uuid}}",
+    "state": "open",
+    "title": "Load test PR {{thread_num}}",
+    "user": {
+      "login": "loadtest-bot"
+    },
+    "head": {
+      "ref": "feature/load-test-{{random_number}}",
+      "sha": "{{random_sha_head}}"
+    },
+    "base": {
+      "ref": "main",
+      "sha": "{{random_sha_base}}"
+    }
+  },
+  "repository": {
+    "id": 123456,
+    "name": "policy-bot",
+    "full_name": "qa/policy-bot",
+    "owner": {
+      "login": "qa"
+    }
+  },
+  "sender": {
+    "login": "loadtest-bot"
+  }
+}

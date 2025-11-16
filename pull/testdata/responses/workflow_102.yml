@@ -1,0 +1,9 @@
+- status: 200
+  body: |
+    {
+      "id": 102,
+      "name": "Workflow B",
+      "path": ".github/workflows/b.yml",
+      "state": "active",
+      "html_url": "http://github.localhost/repos/testorg/testrepo/actions/workflows/102"
+    }

@@ -1,0 +1,446 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>test: Go Coverage Report</title>
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">github.com/palantir/policy-bot/test/localstack_helpers.go (70.6%)</option>
+				
+				<option value="file1">github.com/palantir/policy-bot/test/performance_metrics.go (78.8%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">not covered</span>
+				<span class="cov8">covered</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">// Copyright 2025 Palantir Technologies, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package test
+
+import (
+        "context"
+        "errors"
+        "net/http"
+        "strings"
+        "testing"
+        "time"
+
+        "github.com/aws/aws-sdk-go-v2/aws"
+        awsconfig "github.com/aws/aws-sdk-go-v2/config"
+        "github.com/aws/aws-sdk-go-v2/credentials"
+        "github.com/aws/aws-sdk-go-v2/service/sqs"
+        "github.com/aws/aws-sdk-go-v2/service/sqs/types"
+        "github.com/stretchr/testify/require"
+)
+
+// LocalStackOptions configures LocalStack connectivity for tests.
+type LocalStackOptions struct {
+        URL             string
+        Region          string
+        AccessKey       string
+        SecretKey       string
+        SessionToken    string
+        WaitTimeout     time.Duration
+        RequirePresence bool
+}
+
+// LocalStackManager manages LocalStack SQS queues during tests.
+type LocalStackManager struct {
+        t         *testing.T
+        url       string
+        region    string
+        client    *sqs.Client
+        queueURLs map[string]string
+}
+
+// NewLocalStackManager creates a LocalStack manager and ensures availability when requested.
+func NewLocalStackManager(t *testing.T, opts LocalStackOptions) *LocalStackManager <span class="cov8" title="1">{
+        t.Helper()
+
+        if opts.URL == "" </span><span class="cov0" title="0">{
+                opts.URL = "http://localhost:4566"
+        }</span>
+        <span class="cov8" title="1">if opts.Region == "" </span><span class="cov0" title="0">{
+                opts.Region = "us-east-1"
+        }</span>
+        <span class="cov8" title="1">if opts.AccessKey == "" </span><span class="cov8" title="1">{
+                opts.AccessKey = "test"
+        }</span>
+        <span class="cov8" title="1">if opts.SecretKey == "" </span><span class="cov8" title="1">{
+                opts.SecretKey = "test"
+        }</span>
+        <span class="cov8" title="1">if opts.WaitTimeout == 0 </span><span class="cov8" title="1">{
+                opts.WaitTimeout = 10 * time.Second
+        }</span>
+
+        <span class="cov8" title="1">if opts.RequirePresence &amp;&amp; !WaitForLocalStack(opts.URL, opts.WaitTimeout) </span><span class="cov0" title="0">{
+                t.Skipf("LocalStack is not available at %s", opts.URL)
+        }</span>
+
+        <span class="cov8" title="1">cfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+                awsconfig.WithRegion(opts.Region),
+                awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(opts.AccessKey, opts.SecretKey, opts.SessionToken)),
+        )
+        require.NoError(t, err)
+
+        client := sqs.NewFromConfig(cfg, func(o *sqs.Options) </span><span class="cov8" title="1">{
+                o.BaseEndpoint = aws.String(opts.URL)
+        }</span>)
+
+        <span class="cov8" title="1">return &amp;LocalStackManager{
+                t:         t,
+                url:       opts.URL,
+                region:    opts.Region,
+                client:    client,
+                queueURLs: make(map[string]string),
+        }</span>
+}
+
+// Client exposes the underlying SQS client for advanced use cases.
+func (m *LocalStackManager) Client() *sqs.Client <span class="cov8" title="1">{
+        return m.client
+}</span>
+
+// EnsureQueues ensures that the provided event-to-queue mapping exists and returns updated URLs.
+func (m *LocalStackManager) EnsureQueues(eventQueueMap map[string]string) map[string]string <span class="cov8" title="1">{
+        result := make(map[string]string, len(eventQueueMap))
+        for eventType, queueRef := range eventQueueMap </span><span class="cov8" title="1">{
+                queueName := queueRef
+                if strings.HasPrefix(queueRef, "http") </span><span class="cov8" title="1">{
+                        queueName = QueueNameFromURL(queueRef)
+                }</span>
+                <span class="cov8" title="1">queueURL := m.EnsureQueue(queueName)
+                result[eventType] = queueURL</span>
+        }
+        <span class="cov8" title="1">return result</span>
+}
+
+// EnsureQueue creates or retrieves a queue and returns its URL.
+func (m *LocalStackManager) EnsureQueue(queueName string) string <span class="cov8" title="1">{
+        if url, ok := m.queueURLs[queueName]; ok </span><span class="cov0" title="0">{
+                return url
+        }</span>
+
+        <span class="cov8" title="1">out, err := m.client.CreateQueue(context.Background(), &amp;sqs.CreateQueueInput{
+                QueueName: aws.String(queueName),
+        })
+        if err != nil </span><span class="cov0" title="0">{
+                var existsErr *types.QueueNameExists
+                if errors.As(err, &amp;existsErr) </span><span class="cov0" title="0">{
+                        getOut, getErr := m.client.GetQueueUrl(context.Background(), &amp;sqs.GetQueueUrlInput{
+                                QueueName: aws.String(queueName),
+                        })
+                        require.NoError(m.t, getErr)
+                        url := aws.ToString(getOut.QueueUrl)
+                        m.queueURLs[queueName] = url
+                        return url
+                }</span>
+                <span class="cov0" title="0">require.NoError(m.t, err)</span>
+        }
+
+        <span class="cov8" title="1">url := aws.ToString(out.QueueUrl)
+        m.queueURLs[queueName] = url
+        return url</span>
+}
+
+// PurgeQueue removes all messages from a queue when possible.
+func (m *LocalStackManager) PurgeQueue(queueName string) <span class="cov8" title="1">{
+        if queueURL, ok := m.queueURLs[queueName]; ok </span><span class="cov8" title="1">{
+                _, err := m.client.PurgeQueue(context.Background(), &amp;sqs.PurgeQueueInput{QueueUrl: aws.String(queueURL)})
+                if err != nil </span><span class="cov0" title="0">{
+                        var inProgress *types.PurgeQueueInProgress
+                        if !errors.As(err, &amp;inProgress) </span><span class="cov0" title="0">{
+                                m.t.Logf("failed to purge queue %s: %v", queueName, err)
+                        }</span>
+                }
+        }
+}
+
+// Cleanup removes queues created by the manager.
+func (m *LocalStackManager) Cleanup() <span class="cov8" title="1">{
+        for queueName, queueURL := range m.queueURLs </span><span class="cov8" title="1">{
+                _, err := m.client.DeleteQueue(context.Background(), &amp;sqs.DeleteQueueInput{QueueUrl: aws.String(queueURL)})
+                if err != nil </span><span class="cov0" title="0">{
+                        m.t.Logf("failed to delete queue %s: %v", queueName, err)
+                }</span>
+        }
+}
+
+// WaitForLocalStack checks LocalStack availability within the provided timeout.
+func WaitForLocalStack(url string, timeout time.Duration) bool <span class="cov8" title="1">{
+        deadline := time.Now().Add(timeout)
+        client := &amp;http.Client{Timeout: 2 * time.Second}
+
+        for time.Now().Before(deadline) </span><span class="cov8" title="1">{
+                resp, err := client.Get(url)
+                if err == nil </span><span class="cov8" title="1">{
+                        status := resp.StatusCode
+                        if cerr := resp.Body.Close(); cerr != nil </span><span class="cov0" title="0">{
+                                continue</span>
+                        }
+                        <span class="cov8" title="1">if status &lt; 500 </span><span class="cov8" title="1">{
+                                return true
+                        }</span>
+                }
+                <span class="cov0" title="0">time.Sleep(500 * time.Millisecond)</span>
+        }
+
+        <span class="cov0" title="0">return false</span>
+}
+
+// QueueNameFromURL extracts the queue name from a LocalStack SQS URL.
+func QueueNameFromURL(queueURL string) string <span class="cov8" title="1">{
+        parts := strings.Split(queueURL, "/")
+        if len(parts) == 0 </span><span class="cov0" title="0">{
+                return queueURL
+        }</span>
+        <span class="cov8" title="1">return parts[len(parts)-1]</span>
+}
+</pre>
+		
+		<pre class="file" id="file1" style="display: none">// Copyright 2025 Palantir Technologies, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package test
+
+import (
+        "context"
+        "fmt"
+        "strconv"
+        "testing"
+        "time"
+
+        "github.com/aws/aws-sdk-go-v2/aws"
+        "github.com/aws/aws-sdk-go-v2/service/sqs"
+        "github.com/aws/aws-sdk-go-v2/service/sqs/types"
+)
+
+// LoadScenario describes a synthetic workload for performance testing.
+type LoadScenario struct {
+        Name               string
+        TotalEvents        int
+        DelayBetweenSends  time.Duration
+        WaitTimeout        time.Duration
+        TargetEventsPerMin float64
+}
+
+// RunTimer tracks a scenario start time and produces RunStats on completion.
+type RunTimer struct {
+        scenario LoadScenario
+        start    time.Time
+}
+
+// RunStats contains summary metrics for a load execution.
+type RunStats struct {
+        Scenario        LoadScenario
+        Started         time.Time
+        Completed       time.Time
+        Duration        time.Duration
+        TotalEvents     int
+        EventsPerSecond float64
+        EventsPerMinute float64
+}
+
+// StartRun begins timing for the provided scenario.
+func StartRun(scenario LoadScenario) *RunTimer <span class="cov8" title="1">{
+        if scenario.WaitTimeout == 0 </span><span class="cov0" title="0">{
+                scenario.WaitTimeout = 30 * time.Second
+        }</span>
+        <span class="cov8" title="1">return &amp;RunTimer{
+                scenario: scenario,
+                start:    time.Now(),
+        }</span>
+}
+
+// Finish finalises the run and computes aggregate stats.
+func (rt *RunTimer) Finish(totalEvents int) RunStats <span class="cov8" title="1">{
+        if totalEvents == 0 </span><span class="cov0" title="0">{
+                totalEvents = rt.scenario.TotalEvents
+        }</span>
+
+        <span class="cov8" title="1">finished := time.Now()
+        duration := finished.Sub(rt.start)
+        if duration &lt;= 0 </span><span class="cov0" title="0">{
+                duration = time.Millisecond
+        }</span>
+        <span class="cov8" title="1">eventsPerSecond := float64(totalEvents) / duration.Seconds()
+
+        return RunStats{
+                Scenario:        rt.scenario,
+                Started:         rt.start,
+                Completed:       finished,
+                Duration:        duration,
+                TotalEvents:     totalEvents,
+                EventsPerSecond: eventsPerSecond,
+                EventsPerMinute: eventsPerSecond * 60.0,
+        }</span>
+}
+
+// Log outputs a concise, human-readable summary of the run.
+func (rs RunStats) Log(t *testing.T) <span class="cov8" title="1">{
+        t.Helper()
+        t.Logf("%s: processed %d events in %s (%.1f events/sec, %.0f events/min)",
+                rs.Scenario.Name,
+                rs.TotalEvents,
+                rs.Duration.Truncate(10*time.Millisecond),
+                rs.EventsPerSecond,
+                rs.EventsPerMinute,
+        )
+}</span>
+
+// QueueDepth returns the approximate number of visible messages in the queue.
+func QueueDepth(ctx context.Context, client *sqs.Client, queueURL string) (int64, error) <span class="cov8" title="1">{
+        out, err := client.GetQueueAttributes(ctx, &amp;sqs.GetQueueAttributesInput{
+                QueueUrl: aws.String(queueURL),
+                AttributeNames: []types.QueueAttributeName{
+                        types.QueueAttributeNameApproximateNumberOfMessages,
+                        types.QueueAttributeNameApproximateNumberOfMessagesNotVisible,
+                },
+        })
+        if err != nil </span><span class="cov0" title="0">{
+                return 0, err
+        }</span>
+
+        <span class="cov8" title="1">val, ok := out.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessages)]
+        if !ok </span><span class="cov0" title="0">{
+                return 0, fmt.Errorf("attribute %s not returned", types.QueueAttributeNameApproximateNumberOfMessages)
+        }</span>
+        <span class="cov8" title="1">depth, err := strconv.ParseInt(val, 10, 64)
+        if err != nil </span><span class="cov0" title="0">{
+                return 0, fmt.Errorf("parse queue depth: %w", err)
+        }</span>
+
+        <span class="cov8" title="1">inFlightVal, ok := out.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessagesNotVisible)]
+        if ok </span><span class="cov8" title="1">{
+                inFlight, parseErr := strconv.ParseInt(inFlightVal, 10, 64)
+                if parseErr == nil </span><span class="cov8" title="1">{
+                        depth += inFlight
+                }</span>
+        }
+
+        <span class="cov8" title="1">return depth, nil</span>
+}
+
+// ScenarioWithWorkers adjusts the scenario name to reflect worker counts for log readability.
+func ScenarioWithWorkers(base LoadScenario, workers int) LoadScenario <span class="cov8" title="1">{
+        copy := base
+        if base.Name == "" </span><span class="cov0" title="0">{
+                copy.Name = fmt.Sprintf("%d-workers", workers)
+        }</span> else<span class="cov8" title="1"> {
+                copy.Name = fmt.Sprintf("%s-%d-workers", base.Name, workers)
+        }</span>
+        <span class="cov8" title="1">return copy</span>
+}
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>

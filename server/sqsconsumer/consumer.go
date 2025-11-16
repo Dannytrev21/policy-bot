@@ -17,6 +17,9 @@ package sqsconsumer
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +42,27 @@ const (
 	DefaultMaxRetries        = 3
 )
 
+// EventQueueConfig provides event-specific queue configuration with regional URLs and environment controls
+type EventQueueConfig struct {
+	// Regional queue URLs
+	EastRegionURL string
+	WestRegionURL string
+
+	// Event routing strategy: "http", "sqs", or "both"
+	EventRouting string
+
+	// Environment-specific enablement
+	GHECEnabled bool
+	GHESEnabled bool
+
+	// Number of workers for this event type
+	QueueWorkers int
+
+	// Optional overrides
+	VisibilityTimeout int
+	MaxRetries        int
+}
+
 // Config contains SQS consumer configuration
 type Config struct {
 	// Enable SQS event consumption
@@ -50,17 +74,14 @@ type Config struct {
 	// AWS endpoint URL for LocalStack/testing (optional)
 	EndpointURL string
 
-	// Map of GitHub event type to SQS queue URL
-	Queues map[string]string
+	// Processing mode: "scheduler" (legacy) or "direct" (worker pools)
+	ProcessingMode string
 
-	// Event routing: specify which events to process via SQS vs HTTP
-	EventRouting map[string]string // event_type -> "sqs" | "http" | "both"
+	// Event-based queue configuration with region URLs and environment controls
+	Queues map[string]EventQueueConfig
 
 	// Default number of workers per queue
 	WorkersPerQueue int
-
-	// Per-queue worker allocation (overrides WorkersPerQueue for specific event types)
-	QueueWorkers map[string]int
 
 	// Maximum number of messages to receive in a single request (1-10)
 	MaxMessages int
@@ -79,6 +100,128 @@ type Config struct {
 
 	// Maximum number of retries before sending to DLQ
 	MaxRetries int
+
+	// Dead Letter Queue configuration
+	DLQ DLQConfig
+
+	// Adaptive polling configuration
+	AdaptivePolling AdaptivePollingConfig
+}
+
+// DLQConfig configures Dead Letter Queue behavior
+type DLQConfig struct {
+	// Enable DLQ monitoring
+	Enabled bool
+
+	// Maximum times a message can be received before being sent to DLQ
+	MaxReceiveCount int
+
+	// Suffix to append to queue URLs for DLQ (e.g., "-dlq")
+	QueueSuffix string
+}
+
+// AdaptivePollingConfig configures adaptive SQS polling based on worker availability
+type AdaptivePollingConfig struct {
+	// Enable adaptive polling based on worker availability
+	Enabled bool
+
+	// Base backoff duration when workers are saturated
+	BaseBackoff time.Duration
+
+	// Maximum backoff duration
+	MaxBackoff time.Duration
+
+	// Enable per-event-type configuration
+	EventTypeOverrides map[string]AdaptivePollingEventConfig
+}
+
+// AdaptivePollingEventConfig configures adaptive polling for a specific event type
+type AdaptivePollingEventConfig struct {
+	Enabled     bool
+	BaseBackoff time.Duration
+	MaxBackoff  time.Duration
+}
+
+// BuildQueueMap builds a map of event types to queue URLs for a given environment
+func (c *Config) BuildQueueMap(environment string) map[string]string {
+	result := make(map[string]string)
+
+	// Process EventQueueConfig format
+	for eventType, queueConfig := range c.Queues {
+		// Check if event is enabled for this environment
+		if !c.IsEventEnabledForEnvironment(eventType, environment) {
+			continue
+		}
+
+		// Get the appropriate URL based on region
+		region := c.DetectRegion()
+		url := c.SelectRegionURL(queueConfig, region)
+		if url != "" {
+			result[eventType] = url
+		}
+	}
+
+	return result
+}
+
+// DetectRegion determines the current AWS region from configuration or environment
+func (c *Config) DetectRegion() string {
+	// First check if Region is explicitly set in config
+	if c.Region != "" {
+		return c.Region
+	}
+
+	// Check AWS_REGION environment variable
+	if region, ok := os.LookupEnv("AWS_REGION"); ok && region != "" {
+		return region
+	}
+
+	// Check AWS_DEFAULT_REGION environment variable
+	if region, ok := os.LookupEnv("AWS_DEFAULT_REGION"); ok && region != "" {
+		return region
+	}
+
+	// Default to us-east-1
+	return "us-east-1"
+}
+
+// SelectRegionURL selects the appropriate queue URL based on the region
+func (c *Config) SelectRegionURL(queueConfig EventQueueConfig, region string) string {
+	// If region contains "west", use west URL if available
+	if strings.Contains(strings.ToLower(region), "west") {
+		if queueConfig.WestRegionURL != "" {
+			return queueConfig.WestRegionURL
+		}
+		// Fall back to east URL if west not available
+		return queueConfig.EastRegionURL
+	}
+
+	// For east or any other region, prefer east URL
+	if queueConfig.EastRegionURL != "" {
+		return queueConfig.EastRegionURL
+	}
+
+	// Fall back to west URL if east not available
+	return queueConfig.WestRegionURL
+}
+
+// IsEventEnabledForEnvironment checks if an event is enabled for a specific environment
+func (c *Config) IsEventEnabledForEnvironment(eventType, environment string) bool {
+	queueConfig, exists := c.Queues[eventType]
+	if !exists {
+		// If not in new config, assume enabled for backward compatibility
+		return true
+	}
+
+	switch environment {
+	case "cloud", "ghec":
+		return queueConfig.GHECEnabled
+	case "enterprise", "ghes":
+		return queueConfig.GHESEnabled
+	default:
+		// Unknown environment, check both
+		return queueConfig.GHECEnabled || queueConfig.GHESEnabled
+	}
 }
 
 // Consumer handles consuming messages from SQS queues
@@ -86,14 +229,33 @@ type Consumer interface {
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
 	Health() error
+	DetailedHealth(ctx context.Context) (map[string]QueueHealth, error)
+}
+
+// QueueHealth represents health information for a single queue
+type QueueHealth struct {
+	QueueName        string `json:"queue_name"`
+	QueueURL         string `json:"queue_url"`
+	Status           string `json:"status"`
+	ApproxMessages   int64  `json:"approximate_messages"`
+	ApproxDelayed    int64  `json:"approximate_delayed_messages"`
+	ApproxNotVisible int64  `json:"approximate_not_visible_messages"`
+	LastError        string `json:"last_error,omitempty"`
+	CheckedAt        string `json:"checked_at"`
 }
 
 // consumer implements Consumer
 type consumer struct {
-	config    *Config
-	sqsClient *sqs.Client
-	processor *Processor
-	logger    zerolog.Logger
+	config             *Config
+	sqsClient          SQSClient
+	processor          *Processor
+	workerPoolMgr      *WorkerPoolManager
+	logger             zerolog.Logger
+	registry           metrics.Registry
+	cloudHandlers      []githubapp.EventHandler
+	enterpriseHandlers []githubapp.EventHandler
+	environment        string // "cloud" or "enterprise"
+	queueMap           map[string]string // Resolved event type to queue URL mapping
 
 	// channels for coordinating shutdown
 	stopChan   chan struct{}
@@ -103,11 +265,14 @@ type consumer struct {
 	startMutex sync.Mutex
 }
 
-// New creates a new SQS consumer
-func New(
+// NewWithEnvironment creates a new SQS consumer for a specific environment
+func NewWithEnvironment(
 	cfg *Config,
-	handlers []githubapp.EventHandler,
-	scheduler githubapp.Scheduler,
+	environment string,
+	cloudHandlers []githubapp.EventHandler,
+	enterpriseHandlers []githubapp.EventHandler,
+	cloudScheduler githubapp.Scheduler,
+	enterpriseScheduler githubapp.Scheduler,
 	logger zerolog.Logger,
 	registry metrics.Registry,
 ) (Consumer, error) {
@@ -130,34 +295,83 @@ func New(
 		}
 	})
 
+	// Set default processing mode if not specified
+	if cfg.ProcessingMode == "" {
+		cfg.ProcessingMode = "scheduler" // Default to legacy mode
+	}
+
+	// Create worker pool manager for direct processing mode
+	workerPoolMgr := NewWorkerPoolManager(logger, registry)
+
 	// Create processor
 	processorConfig := &ProcessorConfig{
-		EnableRetry:       cfg.EnableRetry,
-		MaxRetries:        cfg.MaxRetries,
-		VisibilityTimeout: cfg.VisibilityTimeout,
+		EnableRetry:          cfg.EnableRetry,
+		MaxRetries:           cfg.MaxRetries,
+		VisibilityTimeout:    cfg.VisibilityTimeout,
+		ProcessingMode:       cfg.ProcessingMode,
+		EnableCircuitBreaker: true, // Enable circuit breaker for production resilience
+		CircuitBreakerConfig: nil,  // Use default config
 	}
 
 	processor := NewProcessor(
 		processorConfig,
 		sqsClient,
-		handlers,
-		scheduler,
+		enterpriseHandlers,
+		cloudHandlers,
+		enterpriseScheduler,
+		cloudScheduler,
+		cloudScheduler, // Default shared scheduler
+		workerPoolMgr,
 		logger,
 		registry,
 	)
 
+	// Build queue worker map for direct processing mode from EventQueueConfig
+	queueWorkers := make(map[string]int)
+	for eventType, queueConfig := range cfg.Queues {
+		if queueConfig.QueueWorkers > 0 {
+			queueWorkers[eventType] = queueConfig.QueueWorkers
+		}
+	}
+	if len(queueWorkers) > 0 {
+		processor.SetQueueWorkers(queueWorkers)
+	}
+
+	// Build queue map from config
+	queueMap := cfg.BuildQueueMap(environment)
+
 	c := &consumer{
-		config:    cfg,
-		sqsClient: sqsClient,
-		processor: processor,
-		logger:    logger.With().Str("component", "sqs_consumer").Logger(),
-		stopChan:  make(chan struct{}),
+		config:             cfg,
+		sqsClient:          sqsClient,
+		processor:          processor,
+		workerPoolMgr:      workerPoolMgr,
+		cloudHandlers:      cloudHandlers,
+		enterpriseHandlers: enterpriseHandlers,
+		environment:        environment,
+		queueMap:           queueMap,
+		logger:             logger.With().Str("component", "sqs_consumer").Str("environment", environment).Logger(),
+		registry:           registry,
+		stopChan:           make(chan struct{}),
 	}
 
 	// Initialize metrics
 	c.initMetrics(registry)
 
 	return c, nil
+}
+
+// New creates a new SQS consumer (defaults to cloud environment for backward compatibility)
+func New(
+	cfg *Config,
+	cloudHandlers []githubapp.EventHandler,
+	enterpriseHandlers []githubapp.EventHandler,
+	cloudScheduler githubapp.Scheduler,
+	enterpriseScheduler githubapp.Scheduler,
+	logger zerolog.Logger,
+	registry metrics.Registry,
+) (Consumer, error) {
+	// Default to cloud environment for backward compatibility
+	return NewWithEnvironment(cfg, "cloud", cloudHandlers, enterpriseHandlers, cloudScheduler, enterpriseScheduler, logger, registry)
 }
 
 // initMetrics sets up SQS-specific metrics
@@ -167,7 +381,7 @@ func (c *consumer) initMetrics(registry metrics.Registry) {
 	}
 
 	// Create metrics for each queue
-	for eventType := range c.config.Queues {
+	for eventType := range c.queueMap {
 		metrics.NewRegisteredCounter(fmt.Sprintf("%s.%s", MetricsKeyMessagesProcessed, eventType), registry)
 		metrics.NewRegisteredCounter(fmt.Sprintf("%s.%s", MetricsKeyMessagesFailed, eventType), registry)
 		metrics.NewRegisteredTimer(fmt.Sprintf("%s.%s", MetricsKeyProcessingTime, eventType), registry)
@@ -185,18 +399,19 @@ func (c *consumer) Start(ctx context.Context) error {
 
 	// Calculate total workers for logging
 	totalWorkers := 0
-	for eventType := range c.config.Queues {
+	for eventType := range c.queueMap {
 		if c.shouldProcessViaSQS(eventType) {
 			totalWorkers += c.getWorkersForQueue(eventType)
 		}
 	}
 
 	c.logger.Info().
-		Int("num_queues", len(c.config.Queues)).
+		Int("num_queues", len(c.queueMap)).
 		Int("total_workers", totalWorkers).
+		Str("environment", c.environment).
 		Msg("Starting SQS consumer")
 
-	for eventType, queueURL := range c.config.Queues {
+	for eventType, queueURL := range c.queueMap {
 		// Check if this event type should be processed via SQS
 		if !c.shouldProcessViaSQS(eventType) {
 			c.logger.Info().
@@ -208,6 +423,7 @@ func (c *consumer) Start(ctx context.Context) error {
 		workersPerQueue := c.getWorkersForQueue(eventType)
 		c.logger.Info().
 			Str("event_type", eventType).
+			Str("queue_url", queueURL).
 			Int("workers", workersPerQueue).
 			Msg("Starting SQS workers for queue")
 
@@ -217,24 +433,28 @@ func (c *consumer) Start(ctx context.Context) error {
 		}
 	}
 
+	// Start DLQ monitoring if enabled
+	if c.config.DLQ.Enabled {
+		c.logger.Info().Msg("Starting DLQ monitoring")
+		c.wg.Add(1)
+		go c.monitorDLQ(ctx)
+	}
+
 	c.started = true
 	return nil
 }
 
 // shouldProcessViaSQS checks if an event type should be processed via SQS
 func (c *consumer) shouldProcessViaSQS(eventType string) bool {
-	if c.config.EventRouting == nil {
-		// If no routing specified, process all configured queues via SQS
-		return true
+	// Check EventQueueConfig routing
+	if queueConfig, exists := c.config.Queues[eventType]; exists && queueConfig.EventRouting != "" {
+		routing := queueConfig.EventRouting
+		return routing == "sqs" || routing == "both"
 	}
 
-	routing, exists := c.config.EventRouting[eventType]
-	if !exists {
-		// Default to SQS if queue is configured but routing not specified
-		return true
-	}
-
-	return routing == "sqs" || routing == "both"
+	// Default to SQS if queue is configured
+	_, hasQueue := c.queueMap[eventType]
+	return hasQueue
 }
 
 // Stop gracefully shuts down all SQS consumers
@@ -249,6 +469,11 @@ func (c *consumer) Stop(ctx context.Context) error {
 		shutdownTimeout = DefaultShutdownTimeout
 	}
 
+	// Create shutdown context with timeout
+	shutdownCtx, cancel := context.WithTimeout(ctx, shutdownTimeout)
+	defer cancel()
+
+	// Wait for all consumer workers to stop
 	done := make(chan struct{})
 	go func() {
 		c.wg.Wait()
@@ -257,8 +482,7 @@ func (c *consumer) Stop(ctx context.Context) error {
 
 	select {
 	case <-done:
-		c.logger.Info().Msg("All SQS consumer workers stopped gracefully")
-		return nil
+		c.logger.Info().Msg("All SQS consumer workers stopped")
 	case <-time.After(shutdownTimeout):
 		c.logger.Warn().Msg("SQS consumer shutdown timeout exceeded")
 		return errors.New("shutdown timeout exceeded")
@@ -266,12 +490,24 @@ func (c *consumer) Stop(ctx context.Context) error {
 		c.logger.Warn().Msg("SQS consumer shutdown context cancelled")
 		return ctx.Err()
 	}
+
+	// Shutdown worker pool manager if using direct mode
+	if c.config.ProcessingMode == "direct" && c.workerPoolMgr != nil {
+		c.logger.Info().Msg("Shutting down worker pool manager")
+		if err := c.workerPoolMgr.Shutdown(shutdownCtx); err != nil {
+			c.logger.Error().Err(err).Msg("Error shutting down worker pool manager")
+			return err
+		}
+	}
+
+	c.logger.Info().Msg("SQS consumer stopped gracefully")
+	return nil
 }
 
 // Health checks if the SQS consumer is healthy
 func (c *consumer) Health() error {
 	// Try to get queue attributes for one queue to verify connectivity
-	for _, queueURL := range c.config.Queues {
+	for _, queueURL := range c.queueMap {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_, err := c.sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 			QueueUrl:       aws.String(queueURL),
@@ -283,13 +519,82 @@ func (c *consumer) Health() error {
 	return nil
 }
 
+// DetailedHealth returns detailed health information for all configured queues
+func (c *consumer) DetailedHealth(ctx context.Context) (map[string]QueueHealth, error) {
+	health := make(map[string]QueueHealth)
+	checkedAt := time.Now().UTC().Format(time.RFC3339)
+
+	for eventType, queueURL := range c.queueMap {
+		queueHealth := QueueHealth{
+			QueueName: eventType,
+			QueueURL:  queueURL,
+			CheckedAt: checkedAt,
+			Status:    "unknown",
+		}
+
+		// Create context with timeout for this check
+		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		result, err := c.sqsClient.GetQueueAttributes(checkCtx, &sqs.GetQueueAttributesInput{
+			QueueUrl: aws.String(queueURL),
+			AttributeNames: []types.QueueAttributeName{
+				types.QueueAttributeNameApproximateNumberOfMessages,
+				types.QueueAttributeNameApproximateNumberOfMessagesDelayed,
+				types.QueueAttributeNameApproximateNumberOfMessagesNotVisible,
+			},
+		})
+		cancel()
+
+		if err != nil {
+			queueHealth.Status = "unhealthy"
+			queueHealth.LastError = err.Error()
+			c.logger.Warn().
+				Err(err).
+				Str("queue_name", eventType).
+				Str("queue_url", queueURL).
+				Msg("Failed to get queue attributes for health check")
+		} else {
+			queueHealth.Status = "healthy"
+
+			// Parse queue attributes
+			if result.Attributes != nil {
+				if val, ok := result.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessages)]; ok {
+					if parsed, err := strconv.ParseInt(val, 10, 64); err == nil {
+						queueHealth.ApproxMessages = parsed
+					}
+				}
+				if val, ok := result.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessagesDelayed)]; ok {
+					if parsed, err := strconv.ParseInt(val, 10, 64); err == nil {
+						queueHealth.ApproxDelayed = parsed
+					}
+				}
+				if val, ok := result.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessagesNotVisible)]; ok {
+					if parsed, err := strconv.ParseInt(val, 10, 64); err == nil {
+						queueHealth.ApproxNotVisible = parsed
+					}
+				}
+			}
+
+			c.logger.Debug().
+				Str("queue_name", eventType).
+				Int64("messages", queueHealth.ApproxMessages).
+				Int64("delayed", queueHealth.ApproxDelayed).
+				Int64("not_visible", queueHealth.ApproxNotVisible).
+				Msg("Queue health check completed")
+		}
+
+		health[eventType] = queueHealth
+	}
+
+	return health, nil
+}
+
 // getWorkersForQueue returns the number of workers for a specific queue
 func (c *consumer) getWorkersForQueue(eventType string) int {
-	if c.config.QueueWorkers != nil {
-		if workers, exists := c.config.QueueWorkers[eventType]; exists && workers > 0 {
-			return workers
-		}
+	// Check EventQueueConfig.QueueWorkers
+	if queueConfig, exists := c.config.Queues[eventType]; exists && queueConfig.QueueWorkers > 0 {
+		return queueConfig.QueueWorkers
 	}
+
 	return c.getWorkersPerQueue()
 }
 
@@ -317,6 +622,9 @@ func (c *consumer) consumeQueue(ctx context.Context, eventType, queueURL string,
 	visibilityTimeout := c.getVisibilityTimeout()
 	waitTimeSeconds := c.getWaitTimeSeconds()
 
+	// Track consecutive saturation events for backoff
+	consecutiveSaturations := 0
+
 	for {
 		select {
 		case <-c.stopChan:
@@ -327,6 +635,74 @@ func (c *consumer) consumeQueue(ctx context.Context, eventType, queueURL string,
 			return
 		default:
 			// Continue processing
+		}
+
+		// Check if adaptive polling is enabled
+		adaptiveEnabled := c.config.AdaptivePolling.Enabled
+		if override, exists := c.config.AdaptivePolling.EventTypeOverrides[eventType]; exists {
+			adaptiveEnabled = override.Enabled
+		}
+
+		// OPTIMIZATION: Check worker availability before polling
+		if adaptiveEnabled && c.config.ProcessingMode == "direct" && c.workerPoolMgr != nil {
+			workerCount := c.getWorkersForQueue(eventType)
+			availableCapacity := c.workerPoolMgr.GetAvailableCapacityForEventType(eventType, workerCount)
+
+			if availableCapacity == 0 {
+				// All workers busy, implement backoff
+				consecutiveSaturations++
+				backoffDuration := c.calculateBackoff(eventType, consecutiveSaturations)
+
+				logger.Debug().
+					Int("consecutive_saturations", consecutiveSaturations).
+					Dur("backoff_duration", backoffDuration).
+					Msg("Worker pool saturated, backing off SQS polling")
+
+				// Record saturation metric
+				if c.registry != nil {
+					saturationCounter := metrics.GetOrRegisterCounter(
+						fmt.Sprintf("sqs.worker_pool.saturation_events.%s", eventType),
+						c.registry,
+					)
+					saturationCounter.Inc(1)
+				}
+
+				select {
+				case <-time.After(backoffDuration):
+				case <-c.stopChan:
+					return
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
+
+			// Reset saturation counter when workers become available
+			if consecutiveSaturations > 0 {
+				logger.Debug().
+					Int("available_capacity", availableCapacity).
+					Msg("Workers available, resuming normal polling")
+				consecutiveSaturations = 0
+			}
+
+			// Adjust max messages based on available capacity
+			originalMaxMessages := maxMessages
+			if availableCapacity < maxMessages {
+				maxMessages = availableCapacity
+				logger.Debug().
+					Int("original_max_messages", originalMaxMessages).
+					Int("adjusted_max_messages", maxMessages).
+					Int("available_capacity", availableCapacity).
+					Msg("Adjusted max messages to match available capacity")
+
+				if c.registry != nil {
+					adjustmentCounter := metrics.GetOrRegisterCounter(
+						fmt.Sprintf("sqs.consumer.adaptive_adjustments.%s", eventType),
+						c.registry,
+					)
+					adjustmentCounter.Inc(1)
+				}
+			}
 		}
 
 		// Receive messages from SQS
@@ -356,6 +732,9 @@ func (c *consumer) consumeQueue(ctx context.Context, eventType, queueURL string,
 				logger.Error().Err(err).Msg("Failed to process SQS message")
 			}
 		}
+
+		// Reset maxMessages for next iteration if it was adjusted
+		maxMessages = c.getMaxMessages()
 	}
 }
 
@@ -386,6 +765,135 @@ func (c *consumer) getWaitTimeSeconds() int {
 	return waitTimeSeconds
 }
 
+// calculateBackoff calculates exponential backoff duration for worker saturation
+func (c *consumer) calculateBackoff(eventType string, consecutiveSaturations int) time.Duration {
+	// Default values if not configured
+	baseBackoff := time.Second
+	maxBackoff := 30 * time.Second
+
+	// Check for event-specific overrides first
+	if override, exists := c.config.AdaptivePolling.EventTypeOverrides[eventType]; exists {
+		if override.BaseBackoff > 0 {
+			baseBackoff = override.BaseBackoff
+		}
+		if override.MaxBackoff > 0 {
+			maxBackoff = override.MaxBackoff
+		}
+	} else {
+		// Use global configuration if available
+		if c.config.AdaptivePolling.BaseBackoff > 0 {
+			baseBackoff = c.config.AdaptivePolling.BaseBackoff
+		}
+		if c.config.AdaptivePolling.MaxBackoff > 0 {
+			maxBackoff = c.config.AdaptivePolling.MaxBackoff
+		}
+	}
+
+	// Calculate exponential backoff
+	backoff := baseBackoff * time.Duration(1<<uint(consecutiveSaturations-1))
+	if backoff > maxBackoff {
+		backoff = maxBackoff
+	}
+
+	// Add jitter (±10%) to prevent thundering herd
+	jitterPercent := 0.1 * (2*float64(consecutiveSaturations%100)/100.0 - 1)
+	jitter := time.Duration(float64(backoff) * jitterPercent)
+	backoff += jitter
+
+	return backoff
+}
+
+// monitorDLQ periodically checks Dead Letter Queue depths and records metrics
+func (c *consumer) monitorDLQ(ctx context.Context) {
+	defer c.wg.Done()
+
+	logger := c.logger.With().Str("component", "dlq_monitor").Logger()
+	logger.Info().Msg("DLQ monitoring started")
+
+	// Monitor every 5 minutes
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	// Do an immediate check on start
+	c.checkDLQs(ctx, logger)
+
+	for {
+		select {
+		case <-c.stopChan:
+			logger.Info().Msg("DLQ monitoring stopping")
+			return
+		case <-ctx.Done():
+			logger.Info().Msg("DLQ monitoring context cancelled")
+			return
+		case <-ticker.C:
+			c.checkDLQs(ctx, logger)
+		}
+	}
+}
+
+// checkDLQs checks all DLQ queues and records metrics
+func (c *consumer) checkDLQs(ctx context.Context, logger zerolog.Logger) {
+	if c.config.DLQ.QueueSuffix == "" {
+		c.config.DLQ.QueueSuffix = "-dlq"
+	}
+
+	for eventType, queueURL := range c.queueMap {
+		// Construct DLQ URL by appending suffix
+		dlqURL := queueURL + c.config.DLQ.QueueSuffix
+
+		// Create context with timeout for this check
+		checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		result, err := c.sqsClient.GetQueueAttributes(checkCtx, &sqs.GetQueueAttributesInput{
+			QueueUrl: aws.String(dlqURL),
+			AttributeNames: []types.QueueAttributeName{
+				types.QueueAttributeNameApproximateNumberOfMessages,
+			},
+		})
+		cancel()
+
+		if err != nil {
+			logger.Debug().
+				Err(err).
+				Str("event_type", eventType).
+				Str("dlq_url", dlqURL).
+				Msg("Could not check DLQ (may not exist)")
+			continue
+		}
+
+		// Parse message count
+		var messageCount int64
+		if result.Attributes != nil {
+			if val, ok := result.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessages)]; ok {
+				if parsed, err := strconv.ParseInt(val, 10, 64); err == nil {
+					messageCount = parsed
+				}
+			}
+		}
+
+		// Record metric if registry is available
+		if c.registry != nil {
+			metricKey := fmt.Sprintf("%s.%s", MetricsKeyDLQMessages, eventType)
+			if gauge := metrics.GetOrRegisterGauge(metricKey, c.registry); gauge != nil {
+				gauge.Update(messageCount)
+			}
+		}
+
+		// Log warning if messages are in DLQ
+		if messageCount > 0 {
+			logger.Warn().
+				Str("event_type", eventType).
+				Int64("message_count", messageCount).
+				Str("dlq_url", dlqURL).
+				Msg("Messages found in Dead Letter Queue - manual intervention may be required")
+		} else {
+			logger.Debug().
+				Str("event_type", eventType).
+				Int64("message_count", messageCount).
+				Msg("DLQ check completed - no messages")
+		}
+	}
+}
+
 // noOpConsumer is used when SQS is disabled
 type noOpConsumer struct{}
 
@@ -399,4 +907,8 @@ func (c *noOpConsumer) Stop(ctx context.Context) error {
 
 func (c *noOpConsumer) Health() error {
 	return nil
+}
+
+func (c *noOpConsumer) DetailedHealth(ctx context.Context) (map[string]QueueHealth, error) {
+	return make(map[string]QueueHealth), nil
 }

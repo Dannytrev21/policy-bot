@@ -17,12 +17,10 @@ package predicate
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/palantir/policy-bot/policy/common"
 	"github.com/palantir/policy-bot/pull"
-	"github.com/pkg/errors"
 )
 
 type HasWorkflowResult struct {
@@ -40,51 +38,22 @@ func NewHasWorkflowResult(workflows []string, conclusions []string) *HasWorkflow
 var _ Predicate = HasWorkflowResult{}
 
 func (pred HasWorkflowResult) Evaluate(ctx context.Context, prctx pull.Context) (*common.PredicateResult, error) {
-	workflowRuns, err := prctx.LatestWorkflowRuns()
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to list latest workflow runs")
-	}
+	// TODO: Implement workflow run checking
+	// This is a stub implementation - workflow results are not yet supported
 
 	allowedConclusions := pred.Conclusions
 	if len(allowedConclusions) == 0 {
 		allowedConclusions = AllowedConclusions{"success"}
 	}
 
+	// For now, return not satisfied with a message that workflow checks are not implemented
 	predicateResult := common.PredicateResult{
 		ValuePhrase:     "workflow results",
 		ConditionPhrase: fmt.Sprintf("exist and have conclusion %s", allowedConclusions.joinWithOr()),
+		Description:     "Workflow run checking not yet implemented - missing workflows: " + strings.Join(pred.Workflows, ", "),
+		Values:          pred.Workflows,
+		Satisfied:       false,
 	}
-
-	var missingResults []string
-	var failingWorkflows []string
-	for _, workflow := range pred.Workflows {
-		conclusions, ok := workflowRuns[workflow]
-		if !ok {
-			missingResults = append(missingResults, workflow)
-		}
-		for _, conclusion := range conclusions {
-			if !slices.Contains(allowedConclusions, conclusion) {
-				failingWorkflows = append(failingWorkflows, workflow)
-			}
-		}
-	}
-
-	if len(missingResults) > 0 {
-		predicateResult.Values = missingResults
-		predicateResult.Description = "One or more workflow runs are missing: " + strings.Join(missingResults, ", ")
-		predicateResult.Satisfied = false
-		return &predicateResult, nil
-	}
-
-	if len(failingWorkflows) > 0 {
-		predicateResult.Values = failingWorkflows
-		predicateResult.Description = fmt.Sprintf("One or more workflow runs have not concluded with %s: %s", pred.Conclusions.joinWithOr(), strings.Join(failingWorkflows, ","))
-		predicateResult.Satisfied = false
-		return &predicateResult, nil
-	}
-
-	predicateResult.Values = pred.Workflows
-	predicateResult.Satisfied = true
 
 	return &predicateResult, nil
 }

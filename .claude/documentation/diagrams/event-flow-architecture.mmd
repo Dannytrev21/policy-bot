@@ -1,0 +1,101 @@
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#2E86AB', 'primaryBorderColor':'#1E5A7D', 'fontFamily': 'Arial'}}}%%
+
+sequenceDiagram
+    participant GH as GitHub Enterprise
+    participant SNS1 as ghec-webhook-orchestrator<br/>(SNS Topic)
+    participant Lambda as Lambda Bridge<br/>(Event Router)
+    participant SNS2 as codegenie-car<br/>(SNS Topic)
+    participant SQS as policy-bot-{event}<br/>(SQS Queue)
+    participant PB as Policy Bot<br/>(SQS Consumer)
+    participant IM as Installation Manager<br/>(w/ Circuit Breaker)
+    participant Cache as Registry Cache<br/>(TTL: 1hr)
+    participant API as GitHub API
+
+    %% Event Reception
+    Note over GH,SNS1: 1. EVENT RECEPTION
+    GH->>+SNS1: POST webhook event<br/>{headers, body}
+    SNS1-->>-Lambda: Trigger Lambda<br/>(event notification)
+
+    %% Event Routing
+    Note over Lambda,SNS2: 2. EVENT ROUTING
+    Lambda->>Lambda: Parse event type<br/>from headers
+    Lambda->>Lambda: Determine routing<br/>(GHEC/GHES)
+    Lambda->>+SNS2: Publish to codegenie-car<br/>with routing metadata
+
+    %% Fan-out Distribution
+    Note over SNS2,SQS: 3. FAN-OUT DISTRIBUTION
+    SNS2-->>SQS: Fan-out to queue<br/>policy-bot-pull_request
+    SNS2-->>SQS: Fan-out to queue<br/>policy-bot-status
+    SNS2-->>-SQS: Fan-out to queue<br/>policy-bot-check_run
+
+    %% Event Processing
+    Note over SQS,PB: 4. EVENT PROCESSING
+    loop Long Polling (20s)
+        PB->>+SQS: ReceiveMessage<br/>(batch: 10)
+        SQS-->>-PB: Return messages
+    end
+
+    PB->>PB: Parse headers<br/>Detect GHEC/GHES
+
+    %% Resilient API Access
+    Note over PB,API: 5. RESILIENT API ACCESS
+
+    PB->>+IM: GetClients(installationID)
+
+    %% Check Circuit Breaker
+    IM->>IM: Check Circuit State
+    alt Circuit Breaker OPEN
+        IM-->>PB: Return Error<br/>"API Unavailable"
+        PB->>SQS: Return to queue<br/>(visibility timeout)
+    else Circuit Breaker CLOSED/HALF-OPEN
+
+        %% Cache Check
+        IM->>+Cache: Check(installationID)
+        alt Cache HIT (90% of time)
+            Cache-->>-IM: Return cached status
+        else Cache MISS
+            IM->>+API: GetInstallation(id)
+            alt API Success
+                API-->>IM: Installation data
+                IM->>Cache: Store(id, data, TTL=1hr)
+                IM->>IM: Reset circuit breaker
+            else API Failure
+                API-->>-IM: Error
+                IM->>IM: Record failure
+                opt Too many failures
+                    IM->>IM: Open circuit breaker
+                end
+                IM-->>PB: Return error
+            end
+        end
+
+        %% Process Event
+        opt Installation Valid
+            IM-->>-PB: Return clients
+            PB->>+API: Fetch PR data
+            API-->>-PB: PR details
+            PB->>PB: Evaluate policies
+            PB->>+API: Post status check
+            API-->>-PB: Success
+
+            %% Success Path
+            PB->>SQS: DeleteMessage
+        end
+    end
+
+    %% Error Handling
+    alt Permanent Error (404, 401)
+        PB->>SQS: DeleteMessage<br/>(no retry)
+    else Transient Error (500, timeout)
+        PB->>PB: Calculate backoff<br/>(100ms → 3.2s)
+        PB->>SQS: Return to queue<br/>(with backoff delay)
+    else Too Many Retries
+        Note over PB,SQS: Move to DLQ after 5 attempts
+    end
+
+    %% Metrics & Tracing
+    Note over PB: 6. OBSERVABILITY
+    PB-->>PB: Record metrics:<br/>• Success/failure count<br/>• Processing time<br/>• Queue depth<br/>• Cache hit rate
+    PB-->>PB: Create trace span:<br/>• Installation ID<br/>• Repository<br/>• Circuit state
+```

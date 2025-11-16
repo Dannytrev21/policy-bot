@@ -23,13 +23,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/palantir/go-baseapp/baseapp"
 	"github.com/palantir/go-githubapp/githubapp"
@@ -120,12 +119,18 @@ func (h *TestEventHandler) Reset() {
 
 // Integration test configuration
 type IntegrationTestConfig struct {
-	UseLocalStack bool
-	LocalStackURL string
-	WebhookSecret string
-	ServerPort    string
-	SQSQueueURLs  map[string]string
-	TestDuration  time.Duration
+	UseLocalStack       bool
+	LocalStackURL       string
+	WebhookSecret       string
+	ServerPort          string
+	SQSQueueURLs        map[string]server.EventQueueConfig
+	TestDuration        time.Duration
+	SQSWorkersPerQueue  int
+	SQSMaxMessages      int
+	WorkerPoolSize      int
+	SQSWaitTimeSeconds  int
+	SQSProcessingMode   string // "scheduler" or "direct"
+	AdaptivePolling     bool   // Enable adaptive polling
 }
 
 func DefaultIntegrationTestConfig() *IntegrationTestConfig {
@@ -133,14 +138,42 @@ func DefaultIntegrationTestConfig() *IntegrationTestConfig {
 		UseLocalStack: true,
 		LocalStackURL: "http://localhost:4566",
 		WebhookSecret: "test-webhook-secret-123",
-		ServerPort:    "0", // Random port
-		SQSQueueURLs: map[string]string{
-			"pull_request":        "http://localhost:4566/000000000000/github-pull-request",
-			"pull_request_review": "http://localhost:4566/000000000000/github-pull-request-review",
-			"issue_comment":       "http://localhost:4566/000000000000/github-issue-comment",
-			"status":              "http://localhost:4566/000000000000/github-status",
+		ServerPort:    "8080",
+		SQSQueueURLs: map[string]server.EventQueueConfig{
+			"pull_request": {
+				EastRegionURL: "http://localhost:4566/000000000000/github-pull-request",
+				EventRouting:  "sqs",
+				GHECEnabled:   true,
+				GHESEnabled:   true,
+				QueueWorkers:  3,
+			},
+			"pull_request_review": {
+				EastRegionURL: "http://localhost:4566/000000000000/github-pull-request-review",
+				EventRouting:  "sqs",
+				GHECEnabled:   true,
+				GHESEnabled:   true,
+				QueueWorkers:  3,
+			},
+			"issue_comment": {
+				EastRegionURL: "http://localhost:4566/000000000000/github-issue-comment",
+				EventRouting:  "sqs",
+				GHECEnabled:   true,
+				GHESEnabled:   true,
+				QueueWorkers:  1,
+			},
+			"status": {
+				EastRegionURL: "http://localhost:4566/000000000000/github-status",
+				EventRouting:  "sqs",
+				GHECEnabled:   true,
+				GHESEnabled:   true,
+				QueueWorkers:  5,
+			},
 		},
-		TestDuration: 10 * time.Second,
+		TestDuration:       10 * time.Second,
+		SQSWorkersPerQueue: 2,
+		SQSMaxMessages:     10,
+		WorkerPoolSize:     4,
+		SQSWaitTimeSeconds: 5,
 	}
 }
 
@@ -151,9 +184,26 @@ func TestIntegration_HTTPAndSQSEventProcessing(t *testing.T) {
 
 	config := DefaultIntegrationTestConfig()
 
-	// Skip if LocalStack is not available
-	if config.UseLocalStack && !isLocalStackAvailable(config.LocalStackURL) {
-		t.Skip("LocalStack is not available at " + config.LocalStackURL)
+	// Configure LocalStack if enabled
+	var (
+		localStack *LocalStackManager
+		sqsClient  *sqs.Client
+	)
+
+	if config.UseLocalStack {
+		localStack = NewLocalStackManager(t, LocalStackOptions{
+			URL:             config.LocalStackURL,
+			Region:          "us-east-1",
+			RequirePresence: true,
+		})
+		defer localStack.Cleanup()
+
+		config.SQSQueueURLs = localStack.EnsureQueues(config.SQSQueueURLs)
+		for _, queueConfig := range config.SQSQueueURLs {
+			localStack.PurgeQueue(QueueNameFromURL(queueConfig.EastRegionURL))
+		}
+
+		sqsClient = localStack.Client()
 	}
 
 	// Create test handler
@@ -163,16 +213,7 @@ func TestIntegration_HTTPAndSQSEventProcessing(t *testing.T) {
 	srv, serverURL, cleanup := setupTestServer(t, config, testHandler)
 	defer cleanup()
 
-	// Setup SQS queues if using LocalStack
-	var sqsClient *sqs.Client
-	if config.UseLocalStack {
-		sqsClient = setupLocalStackQueues(t, config)
-	}
-
 	// Start the server
-	_, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	serverErrChan := make(chan error, 1)
 	go func() {
 		serverErrChan <- srv.Start()
@@ -218,7 +259,7 @@ func TestIntegration_HTTPAndSQSEventProcessing(t *testing.T) {
 			}
 
 			for _, event := range events {
-				sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type], event)
+				sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event)
 			}
 
 			// Wait for events to be processed
@@ -257,7 +298,7 @@ func TestIntegration_HTTPAndSQSEventProcessing(t *testing.T) {
 					{Type: "status", State: "pending", Context: "test-parallel"},
 				}
 				for _, event := range events {
-					sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type], event)
+					sendSQSMessage(t, sqsClient, config.SQSQueueURLs[event.Type].EastRegionURL, event)
 					time.Sleep(150 * time.Millisecond)
 				}
 			}()
@@ -285,7 +326,12 @@ func TestIntegration_HTTPAndSQSEventProcessing(t *testing.T) {
 	}
 
 	// Shutdown server
-	cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		t.Logf("Server shutdown error: %v", err)
+	}
+	shutdownCancel()
+
 	select {
 	case err := <-serverErrChan:
 		if err != nil && err != http.ErrServerClosed {
@@ -307,35 +353,67 @@ type GitHubEvent struct {
 }
 
 func setupTestServer(t *testing.T, config *IntegrationTestConfig, handler *TestEventHandler) (*server.Server, string, func()) {
+	port := 8080
+	if config.ServerPort != "" {
+		parsedPort, err := strconv.Atoi(config.ServerPort)
+		require.NoError(t, err, "invalid server port")
+		port = parsedPort
+	}
+
+	publicURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+
 	// Create server configuration
+	workerCount := config.WorkerPoolSize
+	if workerCount <= 0 {
+		workerCount = 2
+	}
+
+	sqsWorkers := config.SQSWorkersPerQueue
+	if sqsWorkers <= 0 {
+		sqsWorkers = 2
+	}
+
+	sqsMaxMessages := config.SQSMaxMessages
+	if sqsMaxMessages <= 0 {
+		sqsMaxMessages = 10
+	}
+
+	sqsWaitTime := config.SQSWaitTimeSeconds
+	if sqsWaitTime < 0 {
+		sqsWaitTime = 5
+	}
+
 	serverConfig := &server.Config{
 		Server: baseapp.HTTPConfig{
-			Address: "127.0.0.1",
-			Port:    0, // Random port
+			Address:   "127.0.0.1",
+			Port:      port,
+			PublicURL: publicURL,
 		},
 		Logging: server.LoggingConfig{
 			Level: "debug",
 			Text:  true,
 		},
-		Github: githubapp.Config{
-			WebURL:   "https://github.com",
-			V3APIURL: "https://api.github.com",
-			V4APIURL: "https://api.github.com/graphql",
-			App: struct {
-				IntegrationID int64  `yaml:"integration_id" json:"integrationId"`
-				WebhookSecret string `yaml:"webhook_secret" json:"webhookSecret"`
-				PrivateKey    string `yaml:"private_key" json:"privateKey"`
-			}{
-				IntegrationID: 123456,
-				WebhookSecret: config.WebhookSecret,
-				PrivateKey:    testPrivateKey,
+		GithubCloud: server.GithubAppConfig{
+			Config: githubapp.Config{
+				WebURL:   "https://github.com",
+				V3APIURL: "https://api.github.com",
+				V4APIURL: "https://api.github.com/graphql",
+				App: struct {
+					IntegrationID int64  `yaml:"integration_id" json:"integrationId"`
+					WebhookSecret string `yaml:"webhook_secret" json:"webhookSecret"`
+					PrivateKey    string `yaml:"private_key" json:"privateKey"`
+				}{
+					IntegrationID: 123456,
+					WebhookSecret: config.WebhookSecret,
+					PrivateKey:    testPrivateKey,
+				},
 			},
 		},
 		Sessions: server.SessionsConfig{
 			Key: "test-session-key",
 		},
 		Workers: server.WorkerConfig{
-			Workers:   2,
+			Workers:   workerCount,
 			QueueSize: 10,
 		},
 		SQS: server.SQSConfig{
@@ -343,10 +421,10 @@ func setupTestServer(t *testing.T, config *IntegrationTestConfig, handler *TestE
 			Region:            "us-east-1",
 			EndpointURL:       config.LocalStackURL,
 			Queues:            config.SQSQueueURLs,
-			WorkersPerQueue:   2,
-			MaxMessages:       5,
+			WorkersPerQueue:   sqsWorkers,
+			MaxMessages:       sqsMaxMessages,
 			VisibilityTimeout: 30,
-			WaitTimeSeconds:   5,
+			WaitTimeSeconds:   sqsWaitTime,
 			ShutdownTimeout:   5 * time.Second,
 		},
 	}
@@ -356,54 +434,13 @@ func setupTestServer(t *testing.T, config *IntegrationTestConfig, handler *TestE
 	require.NoError(t, err)
 
 	// Get server URL
-	addr := srv.Address()
-	serverURL := fmt.Sprintf("http://%s", addr)
+	serverURL := publicURL
 
 	cleanup := func() {
 		// Cleanup is handled by the test
 	}
 
 	return srv, serverURL, cleanup
-}
-
-func isLocalStackAvailable(url string) bool {
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode < 500
-}
-
-func setupLocalStackQueues(t *testing.T, config *IntegrationTestConfig) *sqs.Client {
-	cfg, err := awsconfig.LoadDefaultConfig(context.Background(),
-		awsconfig.WithRegion("us-east-1"),
-	)
-	require.NoError(t, err)
-
-	client := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
-		o.BaseEndpoint = aws.String(config.LocalStackURL)
-	})
-
-	// Create queues
-	for _, queueURL := range config.SQSQueueURLs {
-		queueName := getQueueNameFromURL(queueURL)
-		_, err := client.CreateQueue(context.Background(), &sqs.CreateQueueInput{
-			QueueName: aws.String(queueName),
-		})
-		if err != nil {
-			t.Logf("Queue %s might already exist: %v", queueName, err)
-		}
-	}
-
-	return client
-}
-
-func getQueueNameFromURL(queueURL string) string {
-	// Extract queue name from URL: http://localhost:4566/000000000000/queue-name -> queue-name
-	parts := strings.Split(queueURL, "/")
-	return parts[len(parts)-1]
 }
 
 func sendHTTPWebhook(t *testing.T, serverURL, secret string, event GitHubEvent) {
@@ -422,7 +459,9 @@ func sendHTTPWebhook(t *testing.T, serverURL, secret string, event GitHubEvent) 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() {
+		require.NoError(t, resp.Body.Close())
+	}()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
@@ -488,6 +527,11 @@ func waitForEvents(t *testing.T, handler *TestEventHandler, expectedCount int, t
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Logf("Timeout waiting for %d events, got %d", expectedCount, handler.GetEventCount())
+}
+
+// parseGitHubEvent parses a JSON payload into a GitHubEvent struct
+func parseGitHubEvent(payload []byte, event *GitHubEvent) error {
+	return json.Unmarshal(payload, event)
 }
 
 // Test private key for GitHub App (not a real key)
