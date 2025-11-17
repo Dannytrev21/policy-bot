@@ -80,8 +80,58 @@ func NewIdempotencyManager(size int, ttl time.Duration, registry metrics.Registr
 	return im, nil
 }
 
+// IsProcessed checks if a delivery ID has been successfully processed.
+// Returns true if the message was already processed (duplicate), false otherwise.
+// This method does NOT mark the message as processed - use MarkProcessed for that.
+//
+// Performance: O(1) due to LRU cache.
+// Uses RWMutex for minimal lock contention on reads (cache hits).
+func (im *IdempotencyManager) IsProcessed(deliveryID string) bool {
+	now := time.Now()
+
+	// Record check metric
+	im.recordCheck()
+
+	// Use read lock for cache check (optimized for cache hits)
+	im.mu.RLock()
+	processedAt, exists := im.cache.Get(deliveryID)
+	im.mu.RUnlock()
+
+	if exists {
+		// Check if entry has expired
+		if now.Sub(processedAt) < im.ttl {
+			// Valid cache hit - already processed
+			im.recordDuplicate()
+			return true
+		}
+		// Entry expired, treat as not processed
+	}
+
+	return false
+}
+
+// MarkProcessed marks a delivery ID as successfully processed.
+// This should be called AFTER the message has been successfully processed
+// or after a non-retryable error (to prevent future retries).
+//
+// Performance: O(1) due to LRU cache.
+func (im *IdempotencyManager) MarkProcessed(deliveryID string) {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+
+	im.cache.Add(deliveryID, time.Now())
+	im.updateCacheSizeMetric()
+}
+
 // CheckAndMark checks if a delivery ID has been processed and marks it as processed.
 // Returns true if the message was already processed (duplicate), false otherwise.
+//
+// DEPRECATED: Use IsProcessed() followed by MarkProcessed() instead.
+// This method marks messages as processed BEFORE they are actually processed,
+// which can cause issues with retries. The new pattern is:
+//   1. Check with IsProcessed() before processing
+//   2. Process the message
+//   3. Mark with MarkProcessed() after success or non-retryable error
 //
 // Performance: O(1) for both check and insert due to LRU cache.
 // Uses RWMutex for minimal lock contention on reads (cache hits).

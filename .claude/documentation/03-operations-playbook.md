@@ -414,6 +414,15 @@ FROM (
 
 -- Note: Cache hit rate removed after InstallationRegistry simplification (v2.0)
 -- Client cache is now per-organization (GHEC) or per-installation (GHES)
+
+-- Idempotency Metrics
+SELECT
+  latest(sqs.idempotency.cache_size) AS cache_size,
+  rate(sum(sqs.idempotency.duplicates), 1 minute) AS duplicates_per_min,
+  rate(sum(sqs.idempotency.checks_total), 1 minute) AS checks_per_min
+FROM Metric
+WHERE appName = 'policy-bot'
+SINCE 5 minutes ago
 ```
 
 ### 2.3 Alert Configuration
@@ -452,6 +461,13 @@ alerts:
     severity: WARNING
     duration: 10 minutes
     runbook: "#high-queue-depth"
+
+  - name: High Duplicate Rate
+    nrql: SELECT percentage(count(*), WHERE sqs.idempotency.duplicates > 0) FROM Metric
+    condition: above 20  # More than 20% duplicates is abnormal
+    severity: WARNING
+    duration: 15 minutes
+    runbook: "#high-duplicate-rate"
 ```
 
 ---
@@ -586,6 +602,53 @@ aws sqs send-message-batch \
    - Check circuit breaker state
    - Verify GitHub API rate limits
    - Review cache hit rate
+
+#### 🟡 High Duplicate Rate {#high-duplicate-rate}
+
+**Impact**: Wasted processing resources, potential data inconsistency
+
+**Diagnosis**:
+```sql
+-- Check duplicate rate and cache size
+SELECT
+  rate(sum(sqs.idempotency.duplicates), 1 minute) AS duplicates_per_min,
+  latest(sqs.idempotency.cache_size) AS cache_size,
+  percentage(sum(sqs.idempotency.duplicates), sum(sqs.idempotency.checks_total)) AS duplicate_percentage
+FROM Metric
+WHERE appName = 'policy-bot'
+SINCE 1 hour ago
+TIMESERIES 5 minutes
+```
+
+**Common Causes**:
+1. **GitHub re-sending webhooks**: GitHub retries webhooks if initial delivery fails
+2. **SQS message re-queuing**: Retryable errors cause message re-queue with same X-GitHub-Delivery
+3. **Cache TTL too short**: Messages processed but evicted before duplicate arrives
+4. **Cache size too small**: LRU eviction removing recent entries
+
+**Actions**:
+1. **Check Cache Configuration**:
+   ```yaml
+   sqs:
+     idempotency:
+       cache_size: 10000  # Increase if seeing evictions
+       ttl: 1h           # Increase if duplicates arrive after TTL
+   ```
+
+2. **Verify X-GitHub-Delivery Extraction**:
+   ```bash
+   # Check logs for missing header warnings
+   grep "No X-GitHub-Delivery header found" /var/log/policy-bot.log
+   ```
+
+3. **Monitor for GitHub Webhook Retries**:
+   - Check GitHub webhook delivery logs for repeated deliveries
+   - Same `X-GitHub-Delivery` header = legitimate duplicate detection
+   - Different `X-GitHub-Delivery` = GitHub re-sending (not a problem)
+
+4. **Review Successful vs Retry Duplicates**:
+   - If duplicates have same `X-GitHub-Delivery`: idempotency working correctly
+   - If many retries are being re-processed: check that retryable errors are succeeding eventually
 
 ### 3.2 Troubleshooting Decision Tree
 

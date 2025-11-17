@@ -167,6 +167,7 @@ go test ./server/sqsconsumer -run TestConsumer_ConsumeQueue_ -v  # Message consu
 go test ./server/sqsconsumer -run TestConsumer_MonitorDLQ -v     # DLQ monitoring
 go test ./server/sqsconsumer -run TestProcessor_ -v           # Message processing
 go test ./server/sqsconsumer -run TestWorkerPool_ -v         # Worker pool
+go test ./server/sqsconsumer -run TestIdempotencyManager_ -v  # Idempotency management
 ```
 
 **Test Coverage:**
@@ -174,6 +175,14 @@ go test ./server/sqsconsumer -run TestWorkerPool_ -v         # Worker pool
 - **Message Consumption**: consumeQueue() - Tests SQS polling loop, error handling
 - **DLQ Monitoring**: monitorDLQ(), checkDLQs() - Tests dead letter queue monitoring
 - **Event Routing**: shouldProcessViaSQS() - Tests HTTP vs SQS routing decisions
+- **Idempotency Management**: IsProcessed(), MarkProcessed(), CheckAndMark() - Tests duplicate detection with success-based marking
+
+**Key Idempotency Tests:**
+- `TestIdempotencyManager_IsProcessed` - Verifies check-without-mark behavior (no side effects)
+- `TestIdempotencyManager_MarkProcessed` - Verifies explicit post-success marking
+- `TestProcessor_ParseMessage_XGitHubDeliveryOverridesJSONDeliveryID` - X-GitHub-Delivery header takes precedence
+- `TestProcessor_ParseMessage_XGitHubDeliveryStableAcrossRetries` - Same delivery ID across SQS retries
+- "separate marking allows retry semantics" - Demonstrates correct retry flow (check → process → mark)
 
 #### GitHub API Rate Limiter Tests
 

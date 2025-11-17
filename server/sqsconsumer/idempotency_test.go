@@ -181,6 +181,141 @@ func TestIdempotencyManager_LRUEviction(t *testing.T) {
 	})
 }
 
+func TestIdempotencyManager_IsProcessed(t *testing.T) {
+	t.Run("returns false for new delivery ID without marking", func(t *testing.T) {
+		registry := metrics.NewRegistry()
+		im, err := NewIdempotencyManager(100, 1*time.Hour, registry)
+		require.NoError(t, err)
+
+		isProcessed := im.IsProcessed("delivery-123")
+
+		assert.False(t, isProcessed)
+		// Cache should NOT be modified (no marking)
+		assert.Equal(t, 0, im.GetCacheSize())
+
+		// Verify check metric incremented
+		checks := registry.Get(MetricsKeyIdempotencyChecks).(metrics.Counter).Count()
+		assert.Equal(t, int64(1), checks)
+
+		// Verify duplicate metric NOT incremented
+		duplicates := registry.Get(MetricsKeyIdempotencyDuplicates).(metrics.Counter).Count()
+		assert.Equal(t, int64(0), duplicates)
+	})
+
+	t.Run("returns true for marked delivery ID", func(t *testing.T) {
+		registry := metrics.NewRegistry()
+		im, err := NewIdempotencyManager(100, 1*time.Hour, registry)
+		require.NoError(t, err)
+
+		// First mark it as processed
+		im.MarkProcessed("delivery-123")
+		assert.Equal(t, 1, im.GetCacheSize())
+
+		// Now check - should return true
+		isProcessed := im.IsProcessed("delivery-123")
+		assert.True(t, isProcessed)
+
+		// Verify metrics
+		checks := registry.Get(MetricsKeyIdempotencyChecks).(metrics.Counter).Count()
+		assert.Equal(t, int64(1), checks)
+
+		duplicates := registry.Get(MetricsKeyIdempotencyDuplicates).(metrics.Counter).Count()
+		assert.Equal(t, int64(1), duplicates)
+	})
+
+	t.Run("expired entry returns false", func(t *testing.T) {
+		im, err := NewIdempotencyManager(100, 10*time.Millisecond, nil)
+		require.NoError(t, err)
+
+		im.MarkProcessed("delivery-123")
+		assert.True(t, im.IsProcessed("delivery-123"))
+
+		// Wait for TTL to expire
+		time.Sleep(15 * time.Millisecond)
+
+		// Should return false since expired
+		assert.False(t, im.IsProcessed("delivery-123"))
+	})
+
+	t.Run("handles nil registry gracefully", func(t *testing.T) {
+		im, err := NewIdempotencyManager(100, 1*time.Hour, nil)
+		require.NoError(t, err)
+
+		// Should not panic
+		assert.False(t, im.IsProcessed("delivery-123"))
+		im.MarkProcessed("delivery-123")
+		assert.True(t, im.IsProcessed("delivery-123"))
+	})
+}
+
+func TestIdempotencyManager_MarkProcessed(t *testing.T) {
+	t.Run("marks delivery ID as processed", func(t *testing.T) {
+		registry := metrics.NewRegistry()
+		im, err := NewIdempotencyManager(100, 1*time.Hour, registry)
+		require.NoError(t, err)
+
+		// Initially not processed
+		assert.False(t, im.IsProcessed("delivery-123"))
+		assert.Equal(t, 0, im.GetCacheSize())
+
+		// Mark as processed
+		im.MarkProcessed("delivery-123")
+
+		// Now should be processed
+		assert.True(t, im.IsProcessed("delivery-123"))
+		assert.Equal(t, 1, im.GetCacheSize())
+	})
+
+	t.Run("marking updates cache size metric", func(t *testing.T) {
+		registry := metrics.NewRegistry()
+		im, err := NewIdempotencyManager(100, 1*time.Hour, registry)
+		require.NoError(t, err)
+
+		im.MarkProcessed("delivery-1")
+		im.MarkProcessed("delivery-2")
+		im.MarkProcessed("delivery-3")
+
+		cacheSize := registry.Get(MetricsKeyIdempotencyCacheSize).(metrics.Gauge).Value()
+		assert.Equal(t, int64(3), cacheSize)
+	})
+
+	t.Run("marking same ID multiple times updates timestamp", func(t *testing.T) {
+		im, err := NewIdempotencyManager(100, 50*time.Millisecond, nil)
+		require.NoError(t, err)
+
+		im.MarkProcessed("delivery-123")
+		time.Sleep(30 * time.Millisecond)
+
+		// Re-mark should update the timestamp
+		im.MarkProcessed("delivery-123")
+		time.Sleep(30 * time.Millisecond)
+
+		// Should still be valid (not expired) because we re-marked
+		assert.True(t, im.IsProcessed("delivery-123"))
+	})
+
+	t.Run("separate marking allows retry semantics", func(t *testing.T) {
+		im, err := NewIdempotencyManager(100, 1*time.Hour, nil)
+		require.NoError(t, err)
+
+		// Simulate retry scenario:
+		// 1. First attempt - check (not marked), processing fails
+		isProcessed := im.IsProcessed("delivery-123")
+		assert.False(t, isProcessed)
+		// Processing fails... don't mark
+
+		// 2. Second attempt (retry) - check again, still not marked
+		isProcessed = im.IsProcessed("delivery-123")
+		assert.False(t, isProcessed)
+		// Processing succeeds this time, mark it
+		im.MarkProcessed("delivery-123")
+
+		// 3. Third attempt (duplicate) - should be marked now
+		isProcessed = im.IsProcessed("delivery-123")
+		assert.True(t, isProcessed)
+	})
+}
+
 func TestIdempotencyManager_Remove(t *testing.T) {
 	t.Run("removes entry from cache", func(t *testing.T) {
 		registry := metrics.NewRegistry()

@@ -184,6 +184,7 @@ func TestProcessor_ParseMessage_WebhookFormat(t *testing.T) {
 	messageBody := `{
 		"headers": {
 			"X-GitHub-Event": "pull_request",
+			"X-GitHub-Delivery": "webhook-delivery-456",
 			"Host": "github.example.com"
 		},
 		"payload": {"action": "synchronize"}
@@ -196,8 +197,8 @@ func TestProcessor_ParseMessage_WebhookFormat(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.Equal(t, "pull_request", sqsMsg.EventType)
-	// DeliveryID will be empty for webhook format without explicit delivery_id
-	// but payload should be set
+	// DeliveryID should be extracted from X-GitHub-Delivery header for idempotency
+	assert.Equal(t, "webhook-delivery-456", sqsMsg.DeliveryID)
 	assert.NotNil(t, sqsMsg.Headers)
 	assert.Contains(t, string(sqsMsg.Payload), "synchronize")
 }
@@ -215,7 +216,8 @@ func TestProcessor_ParseMessage_RawPayload(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.Equal(t, "status", sqsMsg.EventType)
-	// DeliveryID will be empty for raw payload without explicit delivery_id
+	// DeliveryID falls back to SQS MessageId when no X-GitHub-Delivery header
+	assert.Equal(t, "msg-789", sqsMsg.DeliveryID)
 	assert.Contains(t, string(sqsMsg.Payload), "action")
 	assert.Contains(t, string(sqsMsg.Payload), "42")
 }
@@ -227,6 +229,7 @@ func TestProcessor_ParseMessage_WebhookWithSeparatePayload(t *testing.T) {
 	messageBody := `{
 		"headers": {
 			"X-GitHub-Event": "issues",
+			"X-GitHub-Delivery": "issues-delivery-789",
 			"Host": "github.company.com"
 		},
 		"payload": {
@@ -244,6 +247,8 @@ func TestProcessor_ParseMessage_WebhookWithSeparatePayload(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.Equal(t, "issues", sqsMsg.EventType)
+	// DeliveryID should be extracted from X-GitHub-Delivery header
+	assert.Equal(t, "issues-delivery-789", sqsMsg.DeliveryID)
 	assert.NotNil(t, sqsMsg.Headers)
 	assert.Contains(t, string(sqsMsg.Payload), "closed")
 	assert.Contains(t, string(sqsMsg.Payload), "123")
@@ -301,6 +306,114 @@ func TestProcessor_ParseMessage_NilPayload(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, sqsMsg.Payload)
 	assert.Greater(t, len(sqsMsg.Payload), 0)
+}
+
+// TestProcessor_ParseMessage_XGitHubDeliveryOverridesJSONDeliveryID tests that X-GitHub-Delivery header
+// takes precedence over JSON delivery_id field for idempotency
+func TestProcessor_ParseMessage_XGitHubDeliveryOverridesJSONDeliveryID(t *testing.T) {
+	processor := createTestProcessor()
+
+	// JSON has delivery_id, but headers have X-GitHub-Delivery which should take precedence
+	messageBody := `{
+		"event_type": "pull_request",
+		"delivery_id": "json-delivery-id-should-be-overridden",
+		"headers": {
+			"X-GitHub-Delivery": "72d3162e-cc78-11e3-81ab-4c9367dc0958",
+			"X-GitHub-Event": "pull_request"
+		},
+		"payload": {"action": "opened"}
+	}`
+
+	message := createSQSMessage("sqs-message-id", messageBody)
+	sqsMsg := getSQSMessageFromPool()
+	defer returnSQSMessageToPool(sqsMsg)
+	err := processor.parseMessage("pull_request", message, sqsMsg)
+
+	assert.NoError(t, err)
+	// X-GitHub-Delivery header should override JSON delivery_id
+	assert.Equal(t, "72d3162e-cc78-11e3-81ab-4c9367dc0958", sqsMsg.DeliveryID)
+}
+
+// TestProcessor_ParseMessage_XGitHubDeliveryStableAcrossRetries tests that retry messages
+// with same X-GitHub-Delivery but different SQS MessageId use the stable GitHub ID
+func TestProcessor_ParseMessage_XGitHubDeliveryStableAcrossRetries(t *testing.T) {
+	processor := createTestProcessor()
+
+	// Simulate original message
+	messageBody := `{
+		"headers": {
+			"X-GitHub-Delivery": "stable-github-delivery-id",
+			"X-GitHub-Event": "issues"
+		},
+		"payload": {"action": "opened", "issue": {"number": 42}}
+	}`
+
+	// First message has one SQS MessageId
+	message1 := createSQSMessage("first-sqs-message-id", messageBody)
+	sqsMsg1 := getSQSMessageFromPool()
+	defer returnSQSMessageToPool(sqsMsg1)
+	err := processor.parseMessage("issues", message1, sqsMsg1)
+
+	assert.NoError(t, err)
+	assert.Equal(t, "stable-github-delivery-id", sqsMsg1.DeliveryID)
+
+	// Retry message has different SQS MessageId but same payload
+	message2 := createSQSMessage("second-sqs-message-id-after-retry", messageBody)
+	sqsMsg2 := getSQSMessageFromPool()
+	defer returnSQSMessageToPool(sqsMsg2)
+	err = processor.parseMessage("issues", message2, sqsMsg2)
+
+	assert.NoError(t, err)
+	// Both should have same DeliveryID (stable for idempotency)
+	assert.Equal(t, "stable-github-delivery-id", sqsMsg2.DeliveryID)
+	assert.Equal(t, sqsMsg1.DeliveryID, sqsMsg2.DeliveryID)
+}
+
+// TestProcessor_ParseMessage_FallbackToSQSMessageIdWhenNoHeader tests fallback behavior
+// when X-GitHub-Delivery header is not present
+func TestProcessor_ParseMessage_FallbackToSQSMessageIdWhenNoHeader(t *testing.T) {
+	processor := createTestProcessor()
+
+	// Headers present but no X-GitHub-Delivery
+	messageBody := `{
+		"headers": {
+			"X-GitHub-Event": "push",
+			"Host": "github.com"
+		},
+		"payload": {"ref": "refs/heads/main"}
+	}`
+
+	message := createSQSMessage("fallback-sqs-message-id", messageBody)
+	sqsMsg := getSQSMessageFromPool()
+	defer returnSQSMessageToPool(sqsMsg)
+	err := processor.parseMessage("push", message, sqsMsg)
+
+	assert.NoError(t, err)
+	// Should fall back to SQS MessageId
+	assert.Equal(t, "fallback-sqs-message-id", sqsMsg.DeliveryID)
+}
+
+// TestProcessor_ParseMessage_EmptyXGitHubDeliveryFallsBack tests that empty X-GitHub-Delivery
+// still falls back to SQS MessageId
+func TestProcessor_ParseMessage_EmptyXGitHubDeliveryFallsBack(t *testing.T) {
+	processor := createTestProcessor()
+
+	messageBody := `{
+		"headers": {
+			"X-GitHub-Delivery": "",
+			"X-GitHub-Event": "push"
+		},
+		"payload": {"ref": "refs/heads/main"}
+	}`
+
+	message := createSQSMessage("fallback-for-empty", messageBody)
+	sqsMsg := getSQSMessageFromPool()
+	defer returnSQSMessageToPool(sqsMsg)
+	err := processor.parseMessage("push", message, sqsMsg)
+
+	assert.NoError(t, err)
+	// Empty X-GitHub-Delivery should fall back to SQS MessageId
+	assert.Equal(t, "fallback-for-empty", sqsMsg.DeliveryID)
 }
 
 // TestProcessor_DeleteMessage_Success tests successful message deletion

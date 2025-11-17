@@ -325,12 +325,14 @@ func (p *Processor) ProcessMessage(ctx context.Context, eventType, queueURL stri
 	msgLogger.Debug().Msg("Processing SQS message")
 
 	// Check idempotency to prevent duplicate processing
-	if p.idempotency != nil && p.idempotency.CheckAndMark(sqsMsg.DeliveryID) {
+	// This check verifies if the message was SUCCESSFULLY processed before
+	// We do NOT mark here - marking happens AFTER successful processing
+	if p.idempotency != nil && p.idempotency.IsProcessed(sqsMsg.DeliveryID) {
 		msgLogger.Info().
 			Str("delivery_id", sqsMsg.DeliveryID).
-			Msg("Duplicate message detected - skipping processing")
+			Msg("Message already successfully processed - skipping duplicate")
 
-		// Delete the message since we've already processed it
+		// Delete the message since we've already processed it successfully
 		return p.deleteMessage(ctx, queueURL, message.ReceiptHandle, msgLogger)
 	}
 
@@ -422,16 +424,33 @@ func (p *Processor) ProcessMessage(ctx context.Context, eventType, queueURL stri
 		if !isRetryable {
 			msgLogger.Info().
 				Msg("Deleting message with non-retryable error")
+			// Mark as processed to prevent duplicate handling on non-retryable errors
+			if p.idempotency != nil {
+				p.idempotency.MarkProcessed(sqsMsg.DeliveryID)
+				msgLogger.Debug().
+					Str("delivery_id", sqsMsg.DeliveryID).
+					Msg("Marked message as processed (non-retryable error)")
+			}
 			return p.deleteMessage(ctx, queueURL, message.ReceiptHandle, msgLogger)
 		}
 
 		// For retryable errors that exceeded retry limit, return error
 		// so message goes to DLQ if configured
+		// Note: We do NOT mark as processed here since we're moving to DLQ
 		return err
 	}
 
 	// Mark span as successful
 	span.SetStatus(codes.Ok, "message processed successfully")
+
+	// Mark as successfully processed for idempotency
+	// This prevents duplicate processing of the same message
+	if p.idempotency != nil {
+		p.idempotency.MarkProcessed(sqsMsg.DeliveryID)
+		msgLogger.Debug().
+			Str("delivery_id", sqsMsg.DeliveryID).
+			Msg("Marked message as successfully processed")
+	}
 
 	// Delete the message from the queue on successful processing
 	return p.deleteMessage(ctx, queueURL, message.ReceiptHandle, msgLogger)
@@ -496,6 +515,27 @@ func (p *Processor) parseMessage(eventType string, message types.Message, sqsMsg
 	// Ensure payload is set if it's still nil (shouldn't happen, but be safe)
 	if sqsMsg.Payload == nil || len(sqsMsg.Payload) == 0 {
 		sqsMsg.Payload = json.RawMessage(*message.Body)
+	}
+
+	// CRITICAL: Extract X-GitHub-Delivery from headers for idempotency
+	// This header is stable across retries, unlike SQS MessageId which changes on re-queue
+	if sqsMsg.Headers != nil {
+		if githubDeliveryID, ok := sqsMsg.Headers["X-GitHub-Delivery"].(string); ok && githubDeliveryID != "" {
+			sqsMsg.DeliveryID = githubDeliveryID
+			p.logger.Debug().
+				Str("github_delivery_id", githubDeliveryID).
+				Str("sqs_message_id", aws.ToString(message.MessageId)).
+				Msg("Using X-GitHub-Delivery header for idempotency key")
+		}
+	}
+
+	// Fallback to SQS MessageId if no delivery ID set
+	// This is not ideal for retry scenarios as MessageId changes on re-queue
+	if sqsMsg.DeliveryID == "" {
+		sqsMsg.DeliveryID = aws.ToString(message.MessageId)
+		p.logger.Warn().
+			Str("sqs_message_id", aws.ToString(message.MessageId)).
+			Msg("No X-GitHub-Delivery header found, using SQS MessageId (not retry-safe for idempotency)")
 	}
 
 	return nil

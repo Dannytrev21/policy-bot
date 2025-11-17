@@ -98,6 +98,13 @@ graph LR
 - Maintained per-installation caching for GHES (multiple installations per org)
 - 99% reduction in GitHub API calls for typical GHEC workflows
 
+#### 7. **Success-Based Idempotency** (v2.1 - November 2024)
+- Uses `X-GitHub-Delivery` header (stable across retries) instead of SQS MessageId
+- Messages marked as processed only AFTER successful handling
+- Retryable errors (rate limits, timeouts) allow automatic retry
+- Non-retryable errors (404, auth) marked to prevent duplicate handling
+- LRU cache with configurable size and TTL for fast duplicate detection
+
 ## Impact Summary
 
 ### 📊 By the Numbers

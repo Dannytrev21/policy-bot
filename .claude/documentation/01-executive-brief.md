@@ -166,6 +166,12 @@ We decoupled webhook reception from processing using AWS managed services:
 - Established pattern for webhook → SQS processing
 - Being adopted by 3 other teams
 
+🔄 **Success-Based Idempotency**
+- Uses `X-GitHub-Delivery` header (stable across retries) instead of SQS MessageId
+- Messages marked as processed only AFTER successful handling
+- Retryable errors automatically retry without manual intervention
+- Prevents duplicate processing while ensuring reliable delivery
+
 📚 **Open Source Contribution**
 - Planning to open-source resilience framework
 - Conference talk proposal submitted

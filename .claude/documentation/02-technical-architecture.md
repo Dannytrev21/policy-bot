@@ -143,6 +143,51 @@ sequenceDiagram
 | `check_run` | High | Dedicated | 8-15 | GitHub Actions and external CI |
 | `installation` | Very Low | Shared | 1-2 | App installs are rare |
 
+### Message Idempotency
+
+The SQS consumer implements **success-based idempotency** to prevent duplicate processing while allowing retries for transient failures:
+
+```mermaid
+sequenceDiagram
+    participant SQS
+    participant Consumer
+    participant IdempotencyCache
+    participant Handler
+
+    SQS->>Consumer: Receive Message
+    Consumer->>IdempotencyCache: IsProcessed(X-GitHub-Delivery)?
+
+    alt Already Processed
+        IdempotencyCache-->>Consumer: true (duplicate)
+        Consumer->>SQS: DeleteMessage
+    else Not Processed
+        IdempotencyCache-->>Consumer: false (proceed)
+        Consumer->>Handler: Process Event
+
+        alt Success
+            Handler-->>Consumer: nil (success)
+            Consumer->>IdempotencyCache: MarkProcessed(X-GitHub-Delivery)
+            Consumer->>SQS: DeleteMessage
+        else Non-Retryable Error
+            Handler-->>Consumer: error (permanent)
+            Consumer->>IdempotencyCache: MarkProcessed(X-GitHub-Delivery)
+            Consumer->>SQS: DeleteMessage
+        else Retryable Error
+            Handler-->>Consumer: error (transient)
+            Note over Consumer: NOT marked - allows retry
+            Consumer->>SQS: Re-queue with backoff
+        end
+    end
+```
+
+**Key Design Decisions:**
+
+1. **X-GitHub-Delivery as idempotency key**: GitHub provides a unique `X-GitHub-Delivery` header for each webhook. This header stays stable across retries, unlike SQS MessageId which changes on re-queue.
+
+2. **Success-based marking**: Messages are only marked as processed AFTER successful handling or permanent failure. Retryable errors (rate limits, timeouts) allow the message to be retried.
+
+3. **LRU cache with TTL**: In-memory cache with configurable size (default 10,000) and TTL (default 1 hour) provides fast duplicate detection without external dependencies.
+
 ---
 
 ## 3. Client Management & Caching

@@ -1196,7 +1196,7 @@ If not specified, events default to being processed via SQS if a queue is config
 
 - **Parallel Processing**: HTTP and SQS consumers run in parallel, sharing the same event handlers
 - **Shared Scheduler**: Both paths use the same worker pool and scheduling logic
-- **Idempotency**: GitHub delivery IDs ensure duplicate events are handled gracefully
+- **Success-Based Idempotency**: Uses `X-GitHub-Delivery` header (stable across retries) to detect duplicates. Messages are only marked as processed AFTER successful handling or permanent failure, allowing retryable errors (rate limits, timeouts) to be retried automatically.
 - **Context Enrichment**: SQS messages receive the same context metadata as HTTP events
 - **Metrics**: Comprehensive metrics for both HTTP and SQS processing paths
 - **Per-Queue Scaling**: Different worker counts per event type based on volume
