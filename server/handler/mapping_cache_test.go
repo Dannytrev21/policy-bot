@@ -145,6 +145,19 @@ func TestMappingCache_BuildKeys(t *testing.T) {
 
 	key = cache.BuildOrgCacheKey("")
 	assert.Equal(t, "", key, "Should return empty for invalid input")
+
+	// Test BuildOwnerIDCacheKey
+	key = cache.BuildOwnerIDCacheKey(12345)
+	assert.Equal(t, "id:12345", key)
+
+	key = cache.BuildOwnerIDCacheKey(9223372036854775807) // Max int64
+	assert.Equal(t, "id:9223372036854775807", key)
+
+	key = cache.BuildOwnerIDCacheKey(1)
+	assert.Equal(t, "id:1", key)
+
+	key = cache.BuildOwnerIDCacheKey(0)
+	assert.Equal(t, "", key, "Should return empty for zero ID")
 }
 
 func TestMappingCache_Eviction(t *testing.T) {
@@ -263,6 +276,84 @@ func TestMappingCache_EdgeCases(t *testing.T) {
 	assert.Equal(t, int64(0), id, "Should be negative cache now")
 }
 
+func TestMappingCache_OwnerIDBasedCaching(t *testing.T) {
+	cache := NewMappingCache(1*time.Hour, 5*time.Minute)
+	defer cache.Stop()
+
+	// Test caching installation by owner ID
+	ownerID := int64(123456789)
+	installationID := int64(987654321)
+
+	// Build cache key using owner ID
+	key := cache.BuildOwnerIDCacheKey(ownerID)
+	assert.Equal(t, "id:123456789", key)
+
+	// Cache the installation ID by owner ID
+	cache.Set(key, installationID)
+
+	// Retrieve using the same owner ID
+	cachedID, found := cache.Get(key)
+	assert.True(t, found, "Should find cached installation")
+	assert.Equal(t, installationID, cachedID, "Should return cached installation ID")
+
+	// Test that different owner IDs have different cache entries
+	ownerID2 := int64(111222333)
+	installationID2 := int64(444555666)
+	key2 := cache.BuildOwnerIDCacheKey(ownerID2)
+	cache.Set(key2, installationID2)
+
+	// Both entries should be in cache
+	cachedID1, found1 := cache.Get(key)
+	cachedID2, found2 := cache.Get(key2)
+	assert.True(t, found1)
+	assert.True(t, found2)
+	assert.Equal(t, installationID, cachedID1)
+	assert.Equal(t, installationID2, cachedID2)
+
+	// Test negative caching for owner ID (installation not found)
+	ownerIDNotFound := int64(999888777)
+	keyNotFound := cache.BuildOwnerIDCacheKey(ownerIDNotFound)
+	cache.SetNotFound(keyNotFound)
+
+	cachedID, found = cache.Get(keyNotFound)
+	assert.True(t, found, "Should find negative cache entry")
+	assert.Equal(t, int64(0), cachedID, "Negative cache should return 0")
+}
+
+func TestMappingCache_OwnerIDAndNameCoexistence(t *testing.T) {
+	cache := NewMappingCache(1*time.Hour, 5*time.Minute)
+	defer cache.Stop()
+
+	// This test demonstrates that the cache can store both:
+	// - Owner name-based keys: "org:acme-corp"
+	// - Owner ID-based keys: "id:12345"
+	// They coexist in the same cache without conflict
+
+	ownerName := "acme-corp"
+	ownerID := int64(12345)
+	installationID := int64(98765)
+
+	// Cache by owner name
+	nameKey := cache.BuildOrgCacheKey(ownerName)
+	cache.Set(nameKey, installationID)
+
+	// Cache by owner ID
+	idKey := cache.BuildOwnerIDCacheKey(ownerID)
+	cache.Set(idKey, installationID)
+
+	// Both should be retrievable independently
+	idByName, foundByName := cache.Get(nameKey)
+	idByID, foundByID := cache.Get(idKey)
+
+	assert.True(t, foundByName, "Should find by name")
+	assert.True(t, foundByID, "Should find by ID")
+	assert.Equal(t, installationID, idByName)
+	assert.Equal(t, installationID, idByID)
+
+	// Cache should have 2 entries
+	assert.Equal(t, 2, cache.GetSize())
+}
+
 // Benchmark tests
 func BenchmarkMappingCache_Get(b *testing.B) {
 	cache := NewMappingCache(1*time.Hour, 5*time.Minute)
@@ -302,6 +393,18 @@ func BenchmarkMappingCache_BuildRepoCacheKey(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		cache.BuildRepoCacheKey("owner", "repository")
+	}
+}
+
+func BenchmarkMappingCache_BuildOwnerIDCacheKey(b *testing.B) {
+	cache := NewMappingCache(1*time.Hour, 5*time.Minute)
+	defer cache.Stop()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		cache.BuildOwnerIDCacheKey(123456789)
 	}
 }
 

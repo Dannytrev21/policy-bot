@@ -15,6 +15,7 @@
 package handler
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -338,6 +339,29 @@ func (c *MappingCache) BuildOrgCacheKey(org string) string {
 	builder.Grow(4 + len(org))
 	builder.WriteString("org:")
 	builder.WriteString(org)
+	return builder.String()
+}
+
+// BuildOwnerIDCacheKey builds a cache key for owner ID mapping lookups.
+// Format: "id:12345"
+// This enables ID-based caching where owner IDs are immutable (unlike owner names).
+// This helper reduces allocations by reusing string builders from pool.
+func (c *MappingCache) BuildOwnerIDCacheKey(ownerID int64) string {
+	if ownerID == 0 {
+		return ""
+	}
+
+	builder := c.builderPool.Get().(*strings.Builder)
+	defer func() {
+		builder.Reset()
+		c.builderPool.Put(builder)
+	}()
+
+	// Pre-size to avoid reallocation
+	// "id:" = 3 bytes, int64 can be up to 19 digits
+	builder.Grow(22)
+	builder.WriteString("id:")
+	builder.WriteString(strconv.FormatInt(ownerID, 10))
 	return builder.String()
 }
 

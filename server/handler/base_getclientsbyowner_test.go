@@ -384,6 +384,190 @@ func TestGetClientsByOwner_MultipleOrgs_CachedSeparately(t *testing.T) {
 	assert.Equal(t, installationID2, cachedID2)
 }
 
+// TestGetClientsByOwner_WithOwnerID_CacheHit tests owner ID-based cache lookup
+func TestGetClientsByOwner_WithOwnerID_CacheHit(t *testing.T) {
+	ctx := zerolog.New(nil).WithContext(context.Background())
+	owner := "test-org"
+	ownerID := int64(123456789)
+	installationID := int64(987654321)
+
+	mockInstallations := newMockInstallationsServiceForOwner(owner, installationID)
+	mockCreator := NewMockRateLimitedClientCreator()
+
+	base := &Base{
+		ClientCreator:   mockCreator,
+		Installations:   mockInstallations,
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
+		GithubCloud:     true,
+		MetricsRegistry: gometrics.NewRegistry(),
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	// Pre-populate org mapping cache with owner ID
+	idKey := base.OrgMappingCache.BuildOwnerIDCacheKey(ownerID)
+	base.OrgMappingCache.Set(idKey, installationID)
+
+	// Execute - should find installation ID by owner ID
+	clients, err := base.GetClientsByOwner(ctx, owner, ownerID)
+
+	// Verify
+	require.NoError(t, err)
+	assert.NotNil(t, clients)
+	assert.NotNil(t, clients.V3Client)
+	assert.NotNil(t, clients.V4Client)
+
+	// Verify clients were created with correct installation ID
+	assert.Contains(t, mockCreator.callLog, fmt.Sprintf("NewOrgClient(%s, %d)", owner, installationID))
+}
+
+// TestGetClientsByOwner_WithOwnerID_FallbackToNameLookup tests fallback from ID to name lookup
+func TestGetClientsByOwner_WithOwnerID_FallbackToNameLookup(t *testing.T) {
+	ctx := zerolog.New(nil).WithContext(context.Background())
+	owner := "test-org"
+	ownerID := int64(999999) // Not in cache
+	installationID := int64(12345)
+
+	mockInstallations := newMockInstallationsServiceForOwner(owner, installationID)
+	mockCreator := NewMockRateLimitedClientCreator()
+
+	base := &Base{
+		ClientCreator:   mockCreator,
+		Installations:   mockInstallations,
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
+		GithubCloud:     true,
+		MetricsRegistry: gometrics.NewRegistry(),
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	// Pre-populate org mapping cache with owner NAME only (not ID)
+	orgKey := base.OrgMappingCache.BuildOrgCacheKey(owner)
+	base.OrgMappingCache.Set(orgKey, installationID)
+
+	// Execute - should fall back to name-based lookup
+	clients, err := base.GetClientsByOwner(ctx, owner, ownerID)
+
+	// Verify
+	require.NoError(t, err)
+	assert.NotNil(t, clients)
+	assert.NotNil(t, clients.V3Client)
+	assert.NotNil(t, clients.V4Client)
+}
+
+// TestGetClientsByOwner_CachesWithBothIDAndName tests that both keys are cached
+func TestGetClientsByOwner_CachesWithBothIDAndName(t *testing.T) {
+	ctx := zerolog.New(nil).WithContext(context.Background())
+	owner := "new-org"
+	ownerID := int64(111222333)
+	installationID := int64(444555666)
+
+	mockInstallations := newMockInstallationsServiceForOwner(owner, installationID)
+	mockCreator := NewMockRateLimitedClientCreator()
+
+	base := &Base{
+		ClientCreator:   mockCreator,
+		Installations:   mockInstallations,
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
+		GithubCloud:     true,
+		MetricsRegistry: gometrics.NewRegistry(),
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	// Execute - fresh lookup, should make API call
+	clients, err := base.GetClientsByOwner(ctx, owner, ownerID)
+
+	// Verify clients created successfully
+	require.NoError(t, err)
+	assert.NotNil(t, clients)
+
+	// Verify both ID-based and name-based cache entries exist
+	idKey := base.OrgMappingCache.BuildOwnerIDCacheKey(ownerID)
+	cachedByID, foundByID := base.OrgMappingCache.Get(idKey)
+	assert.True(t, foundByID, "Should be cached by owner ID")
+	assert.Equal(t, installationID, cachedByID)
+
+	orgKey := base.OrgMappingCache.BuildOrgCacheKey(owner)
+	cachedByName, foundByName := base.OrgMappingCache.Get(orgKey)
+	assert.True(t, foundByName, "Should be cached by owner name")
+	assert.Equal(t, installationID, cachedByName)
+}
+
+// TestGetClientsByOwner_BackwardCompatible tests that old calls without ownerID still work
+func TestGetClientsByOwner_BackwardCompatible(t *testing.T) {
+	ctx := zerolog.New(nil).WithContext(context.Background())
+	owner := "legacy-org"
+	installationID := int64(77777)
+
+	mockInstallations := newMockInstallationsServiceForOwner(owner, installationID)
+	mockCreator := NewMockRateLimitedClientCreator()
+
+	base := &Base{
+		ClientCreator:   mockCreator,
+		Installations:   mockInstallations,
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
+		GithubCloud:     true,
+		MetricsRegistry: gometrics.NewRegistry(),
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	// Execute WITHOUT ownerID parameter (backward compatible call)
+	clients, err := base.GetClientsByOwner(ctx, owner) // No ownerID parameter
+
+	// Verify
+	require.NoError(t, err)
+	assert.NotNil(t, clients)
+	assert.NotNil(t, clients.V3Client)
+	assert.NotNil(t, clients.V4Client)
+
+	// Verify only name-based cache entry exists (not ID-based)
+	orgKey := base.OrgMappingCache.BuildOrgCacheKey(owner)
+	cachedByName, foundByName := base.OrgMappingCache.Get(orgKey)
+	assert.True(t, foundByName, "Should be cached by owner name")
+	assert.Equal(t, installationID, cachedByName)
+}
+
+// TestGetClientsForEvent_WithOwnerID tests owner ID forwarding through GetClientsForEvent
+func TestGetClientsForEvent_WithOwnerID(t *testing.T) {
+	ctx := context.Background()
+	owner := "test-org"
+	ownerID := int64(555666777)
+	installationID := int64(888999)
+
+	mockInstallations := newMockInstallationsServiceForOwner(owner, installationID)
+	mockCreator := NewMockRateLimitedClientCreator()
+
+	base := &Base{
+		ClientCreator:   mockCreator,
+		Installations:   mockInstallations,
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
+		GithubCloud:     true,
+		MetricsRegistry: gometrics.NewRegistry(),
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	// Pre-populate cache by owner ID
+	idKey := base.OrgMappingCache.BuildOwnerIDCacheKey(ownerID)
+	base.OrgMappingCache.Set(idKey, installationID)
+
+	// Execute with owner ID parameter
+	clients, err := base.GetClientsForEvent(ctx, owner, 0, ownerID)
+
+	// Verify
+	require.NoError(t, err)
+	assert.NotNil(t, clients)
+	assert.NotNil(t, clients.V3Client)
+	assert.NotNil(t, clients.V4Client)
+}
+
 func TestGetClientsByOwner_FallbackToNonRateLimitedCreator(t *testing.T) {
 	// Setup with standard MockClientCreator (not rate-limited)
 	ctx := zerolog.New(nil).WithContext(context.Background())
