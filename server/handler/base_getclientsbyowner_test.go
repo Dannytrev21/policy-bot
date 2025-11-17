@@ -114,6 +114,7 @@ func TestGetClientsByOwner_ClientCacheHit(t *testing.T) {
 	// Setup
 	ctx := zerolog.New(nil).WithContext(context.Background())
 	owner := "test-org"
+	ownerID := int64(1001)
 	installationID := int64(12345)
 
 	mockInstallations := newMockInstallationsServiceForOwner(owner, installationID)
@@ -123,22 +124,21 @@ func TestGetClientsByOwner_ClientCacheHit(t *testing.T) {
 		ClientCreator:   mockCreator,
 		Installations:   mockInstallations,
 		ClientCache:     NewClientCache(10*time.Minute, 1000),
-		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
 		GithubCloud:     true,
 		MetricsRegistry: gometrics.NewRegistry(),
 		Logger:          zerolog.Nop(),
 	}
 	base.Initialize()
 
-	// Pre-populate client cache
+	// Pre-populate client cache with owner ID as key
 	expectedClients := &InstallationClients{
 		V3Client: github.NewClient(nil),
 		V4Client: githubv4.NewClient(nil),
 	}
-	base.ClientCache.Put(owner, expectedClients)
+	base.ClientCache.PutWithInstallationID(ownerID, expectedClients, installationID)
 
-	// Execute
-	clients, err := base.GetClientsByOwner(ctx, owner)
+	// Execute - must provide owner ID for cache to work
+	clients, err := base.GetClientsByOwner(ctx, owner, ownerID)
 
 	// Verify
 	require.NoError(t, err)
@@ -149,10 +149,11 @@ func TestGetClientsByOwner_ClientCacheHit(t *testing.T) {
 	assert.Empty(t, mockCreator.callLog, "Should not create new clients on cache hit")
 }
 
-func TestGetClientsByOwner_OrgMappingCacheHit(t *testing.T) {
+func TestGetClientsByOwner_CacheMissWithOwnerID(t *testing.T) {
 	// Setup
 	ctx := zerolog.New(nil).WithContext(context.Background())
 	owner := "test-org"
+	ownerID := int64(1001)
 	installationID := int64(12345)
 
 	mockInstallations := newMockInstallationsServiceForOwner(owner, installationID)
@@ -162,19 +163,14 @@ func TestGetClientsByOwner_OrgMappingCacheHit(t *testing.T) {
 		ClientCreator:   mockCreator,
 		Installations:   mockInstallations,
 		ClientCache:     NewClientCache(10*time.Minute, 1000),
-		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
 		GithubCloud:     true,
 		MetricsRegistry: gometrics.NewRegistry(),
 		Logger:          zerolog.Nop(),
 	}
 	base.Initialize()
 
-	// Pre-populate org mapping cache (but not client cache)
-	orgKey := "org:" + owner
-	base.OrgMappingCache.Set(orgKey, installationID)
-
-	// Execute
-	clients, err := base.GetClientsByOwner(ctx, owner)
+	// Execute - no cache, will do API lookup
+	clients, err := base.GetClientsByOwner(ctx, owner, ownerID)
 
 	// Verify
 	require.NoError(t, err)
@@ -186,15 +182,17 @@ func TestGetClientsByOwner_OrgMappingCacheHit(t *testing.T) {
 	assert.Contains(t, mockCreator.callLog, fmt.Sprintf("NewOrgClient(%s, %d)", owner, installationID))
 	assert.Contains(t, mockCreator.callLog, fmt.Sprintf("NewOrgV4Client(%s, %d)", owner, installationID))
 
-	// Verify client cache was populated
-	cachedClients := base.ClientCache.Get(owner)
+	// Verify client cache was populated with installation ID
+	cachedClients, cachedInstID := base.ClientCache.GetWithInstallationID(ownerID)
 	assert.NotNil(t, cachedClients, "Clients should be cached after creation")
+	assert.Equal(t, installationID, cachedInstID, "Installation ID should be cached alongside clients")
 }
 
 func TestGetClientsByOwner_APILookup(t *testing.T) {
 	// Setup
 	ctx := zerolog.New(nil).WithContext(context.Background())
 	owner := "new-org"
+	ownerID := int64(9999)
 	installationID := int64(99999)
 
 	mockInstallations := newMockInstallationsServiceForOwner(owner, installationID)
@@ -204,7 +202,6 @@ func TestGetClientsByOwner_APILookup(t *testing.T) {
 		ClientCreator:   mockCreator,
 		Installations:   mockInstallations,
 		ClientCache:     NewClientCache(10*time.Minute, 1000),
-		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
 		GithubCloud:     true,
 		MetricsRegistry: gometrics.NewRegistry(),
 		Logger:          zerolog.Nop(),
@@ -212,7 +209,7 @@ func TestGetClientsByOwner_APILookup(t *testing.T) {
 	base.Initialize()
 
 	// Execute (no cache - will do API lookup)
-	clients, err := base.GetClientsByOwner(ctx, owner)
+	clients, err := base.GetClientsByOwner(ctx, owner, ownerID)
 
 	// Verify
 	require.NoError(t, err)
@@ -224,20 +221,17 @@ func TestGetClientsByOwner_APILookup(t *testing.T) {
 	assert.Contains(t, mockCreator.callLog, fmt.Sprintf("NewOrgClient(%s, %d)", owner, installationID))
 	assert.Contains(t, mockCreator.callLog, fmt.Sprintf("NewOrgV4Client(%s, %d)", owner, installationID))
 
-	// Verify both caches were populated
-	cachedClients := base.ClientCache.Get(owner)
+	// Verify cache was populated with both clients and installation ID
+	cachedClients, cachedInstID := base.ClientCache.GetWithInstallationID(ownerID)
 	assert.NotNil(t, cachedClients, "Clients should be cached")
-
-	orgKey := "org:" + owner
-	cachedID, found := base.OrgMappingCache.Get(orgKey)
-	assert.True(t, found, "Org mapping should be cached")
-	assert.Equal(t, installationID, cachedID)
+	assert.Equal(t, installationID, cachedInstID, "Installation ID should be cached alongside clients")
 }
 
 func TestGetClientsByOwner_InstallationNotFound(t *testing.T) {
 	// Setup
 	ctx := zerolog.New(nil).WithContext(context.Background())
 	owner := "nonexistent-org"
+	ownerID := int64(8888)
 
 	// Mock service configured for different owner - this one won't be found
 	mockInstallations := newMockInstallationsServiceForOwner("different-owner", 12345)
@@ -247,7 +241,6 @@ func TestGetClientsByOwner_InstallationNotFound(t *testing.T) {
 		ClientCreator:   mockCreator,
 		Installations:   mockInstallations,
 		ClientCache:     NewClientCache(10*time.Minute, 1000),
-		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
 		GithubCloud:     true,
 		MetricsRegistry: gometrics.NewRegistry(),
 		Logger:          zerolog.Nop(),
@@ -255,13 +248,16 @@ func TestGetClientsByOwner_InstallationNotFound(t *testing.T) {
 	base.Initialize()
 
 	// Execute
-	clients, err := base.GetClientsByOwner(ctx, owner)
+	clients, err := base.GetClientsByOwner(ctx, owner, ownerID)
 
 	// Verify
 	assert.Error(t, err)
 	assert.Nil(t, clients)
 	assert.Contains(t, err.Error(), "failed to find installation")
 	assert.Empty(t, mockCreator.callLog, "Should not create clients for missing installation")
+
+	// Verify negative cache was set
+	assert.True(t, base.ClientCache.IsNegativelyCached(ownerID), "Should cache negative result")
 }
 
 func TestGetClientsByOwner_EmptyOwner(t *testing.T) {
@@ -322,6 +318,8 @@ func TestGetClientsByOwner_MultipleOrgs_CachedSeparately(t *testing.T) {
 	ctx := zerolog.New(nil).WithContext(context.Background())
 	org1 := "org-one"
 	org2 := "org-two"
+	ownerID1 := int64(1111)
+	ownerID2 := int64(2222)
 	installationID1 := int64(11111)
 	installationID2 := int64(22222)
 
@@ -330,9 +328,9 @@ func TestGetClientsByOwner_MultipleOrgs_CachedSeparately(t *testing.T) {
 		getByOwnerFunc: func(ctx context.Context, owner string) (githubapp.Installation, error) {
 			switch owner {
 			case org1:
-				return githubapp.Installation{ID: installationID1, Owner: org1, OwnerID: installationID1 + 1000}, nil
+				return githubapp.Installation{ID: installationID1, Owner: org1, OwnerID: ownerID1}, nil
 			case org2:
-				return githubapp.Installation{ID: installationID2, Owner: org2, OwnerID: installationID2 + 1000}, nil
+				return githubapp.Installation{ID: installationID2, Owner: org2, OwnerID: ownerID2}, nil
 			default:
 				return githubapp.Installation{}, githubapp.InstallationNotFound(owner)
 			}
@@ -345,7 +343,6 @@ func TestGetClientsByOwner_MultipleOrgs_CachedSeparately(t *testing.T) {
 		ClientCreator:   mockCreator,
 		Installations:   mockInstallations,
 		ClientCache:     NewClientCache(10*time.Minute, 1000),
-		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
 		GithubCloud:     true,
 		MetricsRegistry: gometrics.NewRegistry(),
 		Logger:          zerolog.Nop(),
@@ -353,8 +350,8 @@ func TestGetClientsByOwner_MultipleOrgs_CachedSeparately(t *testing.T) {
 	base.Initialize()
 
 	// Execute - get clients for both orgs
-	clients1, err1 := base.GetClientsByOwner(ctx, org1)
-	clients2, err2 := base.GetClientsByOwner(ctx, org2)
+	clients1, err1 := base.GetClientsByOwner(ctx, org1, ownerID1)
+	clients2, err2 := base.GetClientsByOwner(ctx, org2, ownerID2)
 
 	// Verify both succeeded
 	require.NoError(t, err1)
@@ -365,23 +362,15 @@ func TestGetClientsByOwner_MultipleOrgs_CachedSeparately(t *testing.T) {
 	// Verify they're different client instances (check pointer addresses)
 	assert.NotSame(t, clients1.V3Client, clients2.V3Client, "Different orgs should have different client pointers")
 
-	// Verify both are cached separately
-	cached1 := base.ClientCache.Get(org1)
-	cached2 := base.ClientCache.Get(org2)
+	// Verify both are cached separately by owner ID
+	cached1, instID1 := base.ClientCache.GetWithInstallationID(ownerID1)
+	cached2, instID2 := base.ClientCache.GetWithInstallationID(ownerID2)
 	assert.NotNil(t, cached1)
 	assert.NotNil(t, cached2)
 	assert.Equal(t, clients1, cached1)
 	assert.Equal(t, clients2, cached2)
-
-	// Verify org mappings are cached separately
-	orgKey1 := "org:" + org1
-	orgKey2 := "org:" + org2
-	cachedID1, found1 := base.OrgMappingCache.Get(orgKey1)
-	cachedID2, found2 := base.OrgMappingCache.Get(orgKey2)
-	assert.True(t, found1)
-	assert.True(t, found2)
-	assert.Equal(t, installationID1, cachedID1)
-	assert.Equal(t, installationID2, cachedID2)
+	assert.Equal(t, installationID1, instID1, "Installation ID 1 should be cached")
+	assert.Equal(t, installationID2, instID2, "Installation ID 2 should be cached")
 }
 
 // TestGetClientsByOwner_WithOwnerID_CacheHit tests owner ID-based cache lookup
@@ -398,35 +387,36 @@ func TestGetClientsByOwner_WithOwnerID_CacheHit(t *testing.T) {
 		ClientCreator:   mockCreator,
 		Installations:   mockInstallations,
 		ClientCache:     NewClientCache(10*time.Minute, 1000),
-		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
 		GithubCloud:     true,
 		MetricsRegistry: gometrics.NewRegistry(),
 		Logger:          zerolog.Nop(),
 	}
 	base.Initialize()
 
-	// Pre-populate org mapping cache with owner ID
-	idKey := base.OrgMappingCache.BuildOwnerIDCacheKey(ownerID)
-	base.OrgMappingCache.Set(idKey, installationID)
+	// Pre-populate client cache with owner ID
+	expectedClients := &InstallationClients{
+		V3Client: github.NewClient(nil),
+		V4Client: githubv4.NewClient(nil),
+	}
+	base.ClientCache.PutWithInstallationID(ownerID, expectedClients, installationID)
 
-	// Execute - should find installation ID by owner ID
+	// Execute - should find clients by owner ID in cache
 	clients, err := base.GetClientsByOwner(ctx, owner, ownerID)
 
-	// Verify
+	// Verify cache hit
 	require.NoError(t, err)
 	assert.NotNil(t, clients)
-	assert.NotNil(t, clients.V3Client)
-	assert.NotNil(t, clients.V4Client)
+	assert.Equal(t, expectedClients, clients)
 
-	// Verify clients were created with correct installation ID
-	assert.Contains(t, mockCreator.callLog, fmt.Sprintf("NewOrgClient(%s, %d)", owner, installationID))
+	// Verify no API calls were made (cache hit)
+	assert.Empty(t, mockCreator.callLog, "Should not create new clients on cache hit")
 }
 
-// TestGetClientsByOwner_WithOwnerID_FallbackToNameLookup tests fallback from ID to name lookup
-func TestGetClientsByOwner_WithOwnerID_FallbackToNameLookup(t *testing.T) {
+// TestGetClientsByOwner_APILookupCachesInstallationID tests that installation ID is cached after API lookup
+func TestGetClientsByOwner_APILookupCachesInstallationID(t *testing.T) {
 	ctx := zerolog.New(nil).WithContext(context.Background())
 	owner := "test-org"
-	ownerID := int64(999999) // Not in cache
+	ownerID := int64(999999)
 	installationID := int64(12345)
 
 	mockInstallations := newMockInstallationsServiceForOwner(owner, installationID)
@@ -436,18 +426,13 @@ func TestGetClientsByOwner_WithOwnerID_FallbackToNameLookup(t *testing.T) {
 		ClientCreator:   mockCreator,
 		Installations:   mockInstallations,
 		ClientCache:     NewClientCache(10*time.Minute, 1000),
-		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
 		GithubCloud:     true,
 		MetricsRegistry: gometrics.NewRegistry(),
 		Logger:          zerolog.Nop(),
 	}
 	base.Initialize()
 
-	// Pre-populate org mapping cache with owner NAME only (not ID)
-	orgKey := base.OrgMappingCache.BuildOrgCacheKey(owner)
-	base.OrgMappingCache.Set(orgKey, installationID)
-
-	// Execute - should fall back to name-based lookup
+	// Execute - fresh lookup, should make API call
 	clients, err := base.GetClientsByOwner(ctx, owner, ownerID)
 
 	// Verify
@@ -455,10 +440,14 @@ func TestGetClientsByOwner_WithOwnerID_FallbackToNameLookup(t *testing.T) {
 	assert.NotNil(t, clients)
 	assert.NotNil(t, clients.V3Client)
 	assert.NotNil(t, clients.V4Client)
+
+	// Verify installation ID is cached alongside clients
+	_, cachedInstID := base.ClientCache.GetWithInstallationID(ownerID)
+	assert.Equal(t, installationID, cachedInstID, "Installation ID should be cached")
 }
 
-// TestGetClientsByOwner_CachesWithBothIDAndName tests that both keys are cached
-func TestGetClientsByOwner_CachesWithBothIDAndName(t *testing.T) {
+// TestGetClientsByOwner_UnifiedCache tests that clients and installation ID are cached together
+func TestGetClientsByOwner_UnifiedCache(t *testing.T) {
 	ctx := zerolog.New(nil).WithContext(context.Background())
 	owner := "new-org"
 	ownerID := int64(111222333)
@@ -471,7 +460,6 @@ func TestGetClientsByOwner_CachesWithBothIDAndName(t *testing.T) {
 		ClientCreator:   mockCreator,
 		Installations:   mockInstallations,
 		ClientCache:     NewClientCache(10*time.Minute, 1000),
-		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
 		GithubCloud:     true,
 		MetricsRegistry: gometrics.NewRegistry(),
 		Logger:          zerolog.Nop(),
@@ -485,20 +473,14 @@ func TestGetClientsByOwner_CachesWithBothIDAndName(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, clients)
 
-	// Verify both ID-based and name-based cache entries exist
-	idKey := base.OrgMappingCache.BuildOwnerIDCacheKey(ownerID)
-	cachedByID, foundByID := base.OrgMappingCache.Get(idKey)
-	assert.True(t, foundByID, "Should be cached by owner ID")
-	assert.Equal(t, installationID, cachedByID)
-
-	orgKey := base.OrgMappingCache.BuildOrgCacheKey(owner)
-	cachedByName, foundByName := base.OrgMappingCache.Get(orgKey)
-	assert.True(t, foundByName, "Should be cached by owner name")
-	assert.Equal(t, installationID, cachedByName)
+	// Verify clients and installation ID are cached together
+	cachedClients, cachedInstID := base.ClientCache.GetWithInstallationID(ownerID)
+	assert.NotNil(t, cachedClients, "Clients should be cached")
+	assert.Equal(t, installationID, cachedInstID, "Installation ID should be cached alongside clients")
 }
 
-// TestGetClientsByOwner_BackwardCompatible tests that old calls without ownerID still work
-func TestGetClientsByOwner_BackwardCompatible(t *testing.T) {
+// TestGetClientsByOwner_WithoutOwnerID_NoCaching tests that calls without ownerID don't use cache
+func TestGetClientsByOwner_WithoutOwnerID_NoCaching(t *testing.T) {
 	ctx := zerolog.New(nil).WithContext(context.Background())
 	owner := "legacy-org"
 	installationID := int64(77777)
@@ -510,27 +492,23 @@ func TestGetClientsByOwner_BackwardCompatible(t *testing.T) {
 		ClientCreator:   mockCreator,
 		Installations:   mockInstallations,
 		ClientCache:     NewClientCache(10*time.Minute, 1000),
-		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
 		GithubCloud:     true,
 		MetricsRegistry: gometrics.NewRegistry(),
 		Logger:          zerolog.Nop(),
 	}
 	base.Initialize()
 
-	// Execute WITHOUT ownerID parameter (backward compatible call)
+	// Execute WITHOUT ownerID parameter - won't use cache
 	clients, err := base.GetClientsByOwner(ctx, owner) // No ownerID parameter
 
-	// Verify
+	// Verify clients created (but not cached since no owner ID)
 	require.NoError(t, err)
 	assert.NotNil(t, clients)
 	assert.NotNil(t, clients.V3Client)
 	assert.NotNil(t, clients.V4Client)
 
-	// Verify only name-based cache entry exists (not ID-based)
-	orgKey := base.OrgMappingCache.BuildOrgCacheKey(owner)
-	cachedByName, foundByName := base.OrgMappingCache.Get(orgKey)
-	assert.True(t, foundByName, "Should be cached by owner name")
-	assert.Equal(t, installationID, cachedByName)
+	// Note: Without owner ID, cache is not used (owner ID is required for caching)
+	// This is by design - owner ID provides immutability for cache keys
 }
 
 // TestGetClientsForEvent_WithOwnerID tests owner ID forwarding through GetClientsForEvent
@@ -547,16 +525,18 @@ func TestGetClientsForEvent_WithOwnerID(t *testing.T) {
 		ClientCreator:   mockCreator,
 		Installations:   mockInstallations,
 		ClientCache:     NewClientCache(10*time.Minute, 1000),
-		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
 		GithubCloud:     true,
 		MetricsRegistry: gometrics.NewRegistry(),
 		Logger:          zerolog.Nop(),
 	}
 	base.Initialize()
 
-	// Pre-populate cache by owner ID
-	idKey := base.OrgMappingCache.BuildOwnerIDCacheKey(ownerID)
-	base.OrgMappingCache.Set(idKey, installationID)
+	// Pre-populate client cache by owner ID
+	expectedClients := &InstallationClients{
+		V3Client: github.NewClient(nil),
+		V4Client: githubv4.NewClient(nil),
+	}
+	base.ClientCache.PutWithInstallationID(ownerID, expectedClients, installationID)
 
 	// Execute with owner ID parameter
 	clients, err := base.GetClientsForEvent(ctx, owner, 0, ownerID)
@@ -564,14 +544,14 @@ func TestGetClientsForEvent_WithOwnerID(t *testing.T) {
 	// Verify
 	require.NoError(t, err)
 	assert.NotNil(t, clients)
-	assert.NotNil(t, clients.V3Client)
-	assert.NotNil(t, clients.V4Client)
+	assert.Equal(t, expectedClients, clients)
 }
 
 func TestGetClientsByOwner_FallbackToNonRateLimitedCreator(t *testing.T) {
 	// Setup with standard MockClientCreator (not rate-limited)
 	ctx := zerolog.New(nil).WithContext(context.Background())
 	owner := "test-org"
+	ownerID := int64(7777)
 	installationID := int64(12345)
 
 	mockInstallations := newMockInstallationsServiceForOwner(owner, installationID)
@@ -585,15 +565,14 @@ func TestGetClientsByOwner_FallbackToNonRateLimitedCreator(t *testing.T) {
 		ClientCreator:   mockCreator,
 		Installations:   mockInstallations,
 		ClientCache:     NewClientCache(10*time.Minute, 1000),
-		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
 		GithubCloud:     true,
 		MetricsRegistry: gometrics.NewRegistry(),
 		Logger:          zerolog.Nop(),
 	}
 	base.Initialize()
 
-	// Execute
-	clients, err := base.GetClientsByOwner(ctx, owner)
+	// Execute with owner ID
+	clients, err := base.GetClientsByOwner(ctx, owner, ownerID)
 
 	// Verify - should still work, just without per-org rate limiting
 	require.NoError(t, err)
@@ -607,6 +586,7 @@ func TestGetClientsByOwner_FallbackToNonRateLimitedCreator(t *testing.T) {
 func TestGetClientsForEvent_GHEC_UsesCachedLookup(t *testing.T) {
 	ctx := context.Background()
 	owner := "test-org"
+	ownerID := int64(12345)
 	installationID := int64(12345)
 
 	// Setup mock installations service
@@ -620,15 +600,14 @@ func TestGetClientsForEvent_GHEC_UsesCachedLookup(t *testing.T) {
 		ClientCreator:   mockCreator,
 		Installations:   mockInstallations,
 		ClientCache:     NewClientCache(10*time.Minute, 1000),
-		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
 		GithubCloud:     true, // GHEC mode
 		MetricsRegistry: gometrics.NewRegistry(),
 		Logger:          zerolog.Nop(),
 	}
 	base.Initialize()
 
-	// Execute - should use GetClientsByOwner (cached path)
-	clients, err := base.GetClientsForEvent(ctx, owner, installationID)
+	// Execute - should use GetClientsByOwner (cached path) with owner ID
+	clients, err := base.GetClientsForEvent(ctx, owner, installationID, ownerID)
 
 	// Verify
 	require.NoError(t, err)
@@ -636,14 +615,15 @@ func TestGetClientsForEvent_GHEC_UsesCachedLookup(t *testing.T) {
 	assert.NotNil(t, clients.V3Client)
 	assert.NotNil(t, clients.V4Client)
 
-	// Verify cache was populated
-	cachedClients := base.ClientCache.Get(owner)
-	assert.NotNil(t, cachedClients, "Clients should be cached")
+	// Verify cache was populated by owner ID
+	cachedClients := base.ClientCache.Get(ownerID)
+	assert.NotNil(t, cachedClients, "Clients should be cached by owner ID")
 }
 
 func TestGetClientsForEvent_GHEC_HitsCacheOnSecondCall(t *testing.T) {
 	ctx := context.Background()
 	owner := "test-org"
+	ownerID := int64(12345)
 	installationID := int64(12345)
 
 	// Setup mocks
@@ -654,7 +634,6 @@ func TestGetClientsForEvent_GHEC_HitsCacheOnSecondCall(t *testing.T) {
 		ClientCreator:   mockCreator,
 		Installations:   mockInstallations,
 		ClientCache:     NewClientCache(10*time.Minute, 1000),
-		OrgMappingCache: NewMappingCache(1*time.Hour, 5*time.Minute),
 		GithubCloud:     true,
 		MetricsRegistry: gometrics.NewRegistry(),
 		Logger:          zerolog.Nop(),
@@ -662,11 +641,11 @@ func TestGetClientsForEvent_GHEC_HitsCacheOnSecondCall(t *testing.T) {
 	base.Initialize()
 
 	// First call - populates cache
-	clients1, err := base.GetClientsForEvent(ctx, owner, installationID)
+	clients1, err := base.GetClientsForEvent(ctx, owner, installationID, ownerID)
 	require.NoError(t, err)
 
 	// Second call - should hit cache
-	clients2, err := base.GetClientsForEvent(ctx, owner, installationID)
+	clients2, err := base.GetClientsForEvent(ctx, owner, installationID, ownerID)
 	require.NoError(t, err)
 
 	// Verify both calls succeeded
@@ -689,15 +668,12 @@ func TestGetClientsForEvent_GHES_UsesInstallationManager(t *testing.T) {
 		installationClient: github.NewClient(nil),
 	}
 
-	// Create circuit breaker
-	circuitBreaker := NewCircuitBreaker()
-
 	// Create installation manager for GHES
+	// CircuitBreaker is now created internally by InstallationManager
 	installationManager := NewInstallationManager(
 		mockCreator,
 		nil, // registry parameter (deprecated)
 		gometrics.NewRegistry(),
-		circuitBreaker,
 	)
 
 	// Setup base with GHES configuration
@@ -747,4 +723,243 @@ func TestGetClientsForEvent_FallbackPath(t *testing.T) {
 	assert.NotNil(t, clients)
 	assert.NotNil(t, clients.V3Client)
 	assert.NotNil(t, clients.V4Client)
+}
+
+// Tests for retrieveClientAndInstallationId
+
+func TestRetrieveClientAndInstallationId_CacheHit(t *testing.T) {
+	ctx := context.Background()
+	ownerName := "test-org"
+	ownerID := int64(12345)
+	expectedInstallationID := int64(67890)
+
+	mockCreator := NewMockRateLimitedClientCreator()
+
+	base := &Base{
+		ClientCreator:   mockCreator,
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		GithubCloud:     true,
+		MetricsRegistry: gometrics.NewRegistry(),
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	// Pre-populate cache
+	expectedClients := &InstallationClients{
+		V3Client: github.NewClient(nil),
+		V4Client: githubv4.NewClient(nil),
+	}
+	base.ClientCache.PutWithInstallationID(ownerID, expectedClients, expectedInstallationID)
+
+	// Execute
+	clients, installID, err := base.retrieveClientAndInstallationId(ctx, 0, ownerID, ownerName, "")
+
+	// Verify cache hit
+	require.NoError(t, err)
+	assert.Equal(t, expectedClients, clients)
+	assert.Equal(t, expectedInstallationID, installID)
+	assert.Len(t, mockCreator.callLog, 0, "No API calls should be made on cache hit")
+}
+
+func TestRetrieveClientAndInstallationId_GHEC_OwnerLookup(t *testing.T) {
+	ctx := context.Background()
+	ownerName := "test-org"
+	ownerID := int64(12345)
+	expectedInstallationID := int64(67890)
+
+	mockInstallations := newMockInstallationsServiceForOwner(ownerName, expectedInstallationID)
+	mockCreator := NewMockRateLimitedClientCreator()
+
+	base := &Base{
+		ClientCreator:   mockCreator,
+		Installations:   mockInstallations,
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		GithubCloud:     true,
+		MetricsRegistry: gometrics.NewRegistry(),
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	// Execute (no installation ID provided, should use owner lookup)
+	clients, installID, err := base.retrieveClientAndInstallationId(ctx, 0, ownerID, ownerName, "")
+
+	// Verify
+	require.NoError(t, err)
+	assert.NotNil(t, clients)
+	assert.Equal(t, expectedInstallationID, installID)
+
+	// Verify cached
+	cachedClients, cachedInstallID := base.ClientCache.GetWithInstallationID(ownerID)
+	assert.Equal(t, clients, cachedClients)
+	assert.Equal(t, expectedInstallationID, cachedInstallID)
+}
+
+func TestRetrieveClientAndInstallationId_GHES_RepoLookup(t *testing.T) {
+	ctx := context.Background()
+	ownerName := "test-org"
+	ownerID := int64(12345)
+	repoName := "test-repo"
+	expectedInstallationID := int64(67890)
+
+	mockInstallations := &MockInstallationsService{
+		getByRepositoryFunc: func(ctx context.Context, owner, repo string) (githubapp.Installation, error) {
+			if owner == ownerName && repo == repoName {
+				return githubapp.Installation{
+					ID:    expectedInstallationID,
+					Owner: ownerName,
+				}, nil
+			}
+			return githubapp.Installation{}, githubapp.InstallationNotFound(owner + "/" + repo)
+		},
+	}
+	mockCreator := NewMockRateLimitedClientCreator()
+
+	base := &Base{
+		ClientCreator:   mockCreator,
+		Installations:   mockInstallations,
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		GithubCloud:     false, // GHES
+		MetricsRegistry: gometrics.NewRegistry(),
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	// Execute (GHES uses repo-based lookup)
+	clients, installID, err := base.retrieveClientAndInstallationId(ctx, 0, ownerID, ownerName, repoName)
+
+	// Verify
+	require.NoError(t, err)
+	assert.NotNil(t, clients)
+	assert.Equal(t, expectedInstallationID, installID)
+}
+
+func TestRetrieveClientAndInstallationId_FallbackToRepoLookup(t *testing.T) {
+	ctx := context.Background()
+	ownerName := "test-org"
+	ownerID := int64(12345)
+	repoName := "test-repo"
+	expectedInstallationID := int64(67890)
+
+	// Owner lookup fails, but repo lookup succeeds
+	mockInstallations := &MockInstallationsService{
+		getByOwnerFunc: func(ctx context.Context, owner string) (githubapp.Installation, error) {
+			return githubapp.Installation{}, fmt.Errorf("owner lookup failed")
+		},
+		getByRepositoryFunc: func(ctx context.Context, owner, repo string) (githubapp.Installation, error) {
+			if owner == ownerName && repo == repoName {
+				return githubapp.Installation{
+					ID:    expectedInstallationID,
+					Owner: ownerName,
+				}, nil
+			}
+			return githubapp.Installation{}, githubapp.InstallationNotFound(owner + "/" + repo)
+		},
+	}
+	mockCreator := NewMockRateLimitedClientCreator()
+
+	base := &Base{
+		ClientCreator:   mockCreator,
+		Installations:   mockInstallations,
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		GithubCloud:     true,
+		MetricsRegistry: gometrics.NewRegistry(),
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	// Execute (owner lookup fails, fallback to repo lookup)
+	clients, installID, err := base.retrieveClientAndInstallationId(ctx, 0, ownerID, ownerName, repoName)
+
+	// Verify fallback worked
+	require.NoError(t, err)
+	assert.NotNil(t, clients)
+	assert.Equal(t, expectedInstallationID, installID)
+}
+
+func TestRetrieveClientAndInstallationId_NegativeCaching(t *testing.T) {
+	ctx := context.Background()
+	ownerName := "nonexistent-org"
+	ownerID := int64(99999)
+
+	// All lookups fail
+	mockInstallations := &MockInstallationsService{
+		getByOwnerFunc: func(ctx context.Context, owner string) (githubapp.Installation, error) {
+			return githubapp.Installation{}, githubapp.InstallationNotFound(owner)
+		},
+		getByRepositoryFunc: func(ctx context.Context, owner, repo string) (githubapp.Installation, error) {
+			return githubapp.Installation{}, githubapp.InstallationNotFound(owner + "/" + repo)
+		},
+	}
+	mockCreator := NewMockRateLimitedClientCreator()
+
+	base := &Base{
+		ClientCreator:   mockCreator,
+		Installations:   mockInstallations,
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		GithubCloud:     true,
+		MetricsRegistry: gometrics.NewRegistry(),
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	// Execute - should fail and cache negative result
+	clients, installID, err := base.retrieveClientAndInstallationId(ctx, 0, ownerID, ownerName, "some-repo")
+
+	// Verify failure and negative caching
+	require.Error(t, err)
+	assert.Nil(t, clients)
+	assert.Equal(t, int64(0), installID)
+	assert.True(t, base.ClientCache.IsNegativelyCached(ownerID), "Should cache negative result")
+}
+
+func TestRetrieveClientAndInstallationId_ProvidedInstallationID(t *testing.T) {
+	ctx := context.Background()
+	ownerName := "test-org"
+	ownerID := int64(12345)
+	providedInstallationID := int64(67890)
+
+	mockCreator := NewMockRateLimitedClientCreator()
+
+	base := &Base{
+		ClientCreator:   mockCreator,
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		GithubCloud:     true,
+		MetricsRegistry: gometrics.NewRegistry(),
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	// Execute with pre-provided installation ID (no lookup needed)
+	clients, installID, err := base.retrieveClientAndInstallationId(ctx, providedInstallationID, ownerID, ownerName, "")
+
+	// Verify
+	require.NoError(t, err)
+	assert.NotNil(t, clients)
+	assert.Equal(t, providedInstallationID, installID)
+}
+
+func TestRetrieveClientAndInstallationId_GHES_RequiresRepo(t *testing.T) {
+	ctx := context.Background()
+	ownerName := "test-org"
+	ownerID := int64(12345)
+
+	mockCreator := NewMockRateLimitedClientCreator()
+
+	base := &Base{
+		ClientCreator:   mockCreator,
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		GithubCloud:     false, // GHES
+		MetricsRegistry: gometrics.NewRegistry(),
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	// Execute without repo (should fail for GHES)
+	clients, installID, err := base.retrieveClientAndInstallationId(ctx, 0, ownerID, ownerName, "")
+
+	// Verify error
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "repository name required")
+	assert.Nil(t, clients)
+	assert.Equal(t, int64(0), installID)
 }

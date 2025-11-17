@@ -35,8 +35,7 @@ func TestNewInstallationManager(t *testing.T) {
 	}
 	metricsRegistry := gometrics.NewRegistry()
 
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry)
 
 	assert.NotNil(t, manager, "Manager should be created")
 	assert.Equal(t, mockCreator, manager.clientCreator)
@@ -57,8 +56,7 @@ func TestInstallationManager_GetClients_Success(t *testing.T) {
 
 	metricsRegistry := gometrics.NewRegistry()
 
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry)
 
 	// Mark installation as installed in registry
 
@@ -100,8 +98,7 @@ func TestInstallationManager_GetClients_V3ClientCreationFails(t *testing.T) {
 
 	metricsRegistry := gometrics.NewRegistry()
 
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry)
 
 	// Mark installation as installed in registry
 
@@ -138,8 +135,7 @@ func TestInstallationManager_GetClients_V4ClientCreationFails(t *testing.T) {
 
 	metricsRegistry := gometrics.NewRegistry()
 
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry)
 
 	// Mark installation as installed in registry
 
@@ -174,8 +170,7 @@ func TestInstallationManager_RecordMetric_NilRegistry(t *testing.T) {
 
 
 	// Create manager with nil metrics registry
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, nil, nil, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, nil)
 
 	// This should not panic
 	assert.NotPanics(t, func() {
@@ -197,8 +192,7 @@ func TestInstallationManager_MultipleClientCreations(t *testing.T) {
 
 	metricsRegistry := gometrics.NewRegistry()
 
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry)
 
 	// Mark installation as installed in registry
 
@@ -274,8 +268,7 @@ func TestInstallationManager_RetryLogic_V3ClientTransientError(t *testing.T) {
 	}
 
 	metricsRegistry := gometrics.NewRegistry()
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry)
 
 	// Mark installation as installed
 
@@ -312,8 +305,7 @@ func TestInstallationManager_RetryLogic_V3ClientNonRetryableError(t *testing.T) 
 	}
 
 	metricsRegistry := gometrics.NewRegistry()
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry)
 
 	// Mark installation as installed
 
@@ -351,8 +343,7 @@ func TestInstallationManager_RetryLogic_V3ClientRetryExhausted(t *testing.T) {
 	}
 
 	metricsRegistry := gometrics.NewRegistry()
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry)
 
 	// Mark installation as installed
 
@@ -391,8 +382,7 @@ func TestInstallationManager_RetryLogic_V4ClientTransientError(t *testing.T) {
 	}
 
 	metricsRegistry := gometrics.NewRegistry()
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry)
 
 	// Mark installation as installed
 
@@ -428,8 +418,7 @@ func TestInstallationManager_RetryLogic_ContextCancellation(t *testing.T) {
 	}
 
 	metricsRegistry := gometrics.NewRegistry()
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry)
 
 	// Mark installation as installed
 
@@ -656,8 +645,7 @@ func TestInstallationManager_CircuitBreakerIntegration_OpensOnConsecutiveFailure
 	}
 
 	metricsRegistry := gometrics.NewRegistry()
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry)
 
 	// Mark installation as installed
 
@@ -700,8 +688,7 @@ func TestInstallationManager_CircuitBreakerIntegration_RecoveryFlow(t *testing.T
 	}
 
 	metricsRegistry := gometrics.NewRegistry()
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry)
 
 	// Mark installation as installed
 
@@ -749,8 +736,7 @@ func TestInstallationManager_CircuitBreakerIntegration_NonRetryableErrorsDoNotTr
 	}
 
 	metricsRegistry := gometrics.NewRegistry()
-	circuitBreaker := NewCircuitBreaker()
-	manager := NewInstallationManager(mockCreator, nil, metricsRegistry, circuitBreaker)
+	manager := NewInstallationManager(mockCreator, nil, metricsRegistry)
 
 	// Mark installation as installed
 

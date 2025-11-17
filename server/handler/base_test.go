@@ -17,6 +17,7 @@ package handler
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/go-github/v47/github"
 	"github.com/palantir/go-githubapp/githubapp"
@@ -109,6 +110,8 @@ func TestBase_Initialize(t *testing.T) {
 	base.Initialize()
 
 	assert.NotNil(t, base.InstallationIdMap, "InstallationIdMap should be initialized")
+	assert.NotNil(t, base.ClientCache, "ClientCache should be initialized")
+	assert.NotNil(t, base.InstallationManager, "InstallationManager should be initialized")
 	assert.NotNil(t, base.mu, "mutex should be initialized")
 	assert.NotNil(t, base.DefaultFetchedConfig, "DefaultFetchedConfig should be initialized")
 }
@@ -117,14 +120,20 @@ func TestBase_Initialize_DoesNotOverwrite(t *testing.T) {
 	// Test that Initialize doesn't overwrite existing values
 	existingMap := make(map[int64]int64)
 	existingMap[123] = 456
+	existingCache := NewClientCache(10*time.Minute, 100)
+	existingManager := NewInstallationManager(nil, nil, nil)
 
 	base := &Base{
-		InstallationIdMap: existingMap,
+		InstallationIdMap:   existingMap,
+		ClientCache:         existingCache,
+		InstallationManager: existingManager,
 	}
 	base.Initialize()
 
 	assert.Equal(t, existingMap, base.InstallationIdMap, "Initialize should not overwrite existing InstallationIdMap")
 	assert.Contains(t, base.InstallationIdMap, int64(123), "Existing data should be preserved")
+	assert.Equal(t, existingCache, base.ClientCache, "Initialize should not overwrite existing ClientCache")
+	assert.Equal(t, existingManager, base.InstallationManager, "Initialize should not overwrite existing InstallationManager")
 }
 
 func TestBase_NewEvalContext_InstallationNotFound(t *testing.T) {

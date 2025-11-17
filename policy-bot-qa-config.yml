@@ -1,0 +1,310 @@
+# Policy Bot - QA Environment Configuration
+# This configuration demonstrates all optimization features from Phase 1-3
+
+# ============================================================================
+# Server Configuration
+# ============================================================================
+server:
+  address: "0.0.0.0"
+  port: 8080
+  public_url: "https://policy-bot-qa.example.com"
+  shutdown_timeout: 30s
+
+# ============================================================================
+# Logging Configuration
+# ============================================================================
+logging:
+  level: "debug"  # Use debug in QA for troubleshooting
+  text: false     # JSON logging for production-like environment
+
+# ============================================================================
+# Caching Configuration (Phase 1 Optimizations)
+# ============================================================================
+cache:
+  max_size: 50MB        # HTTP response cache per GitHub client
+  pushed_at_size: 100000  # Commit push time cache entries
+
+# ============================================================================
+# GitHub Enterprise Server (GHES) Configuration
+# ============================================================================
+github_enterprise:
+  # App configuration
+  app:
+    integration_id: 12345
+    webhook_secret: "${GHES_WEBHOOK_SECRET}"
+    private_key: "${GHES_PRIVATE_KEY}"
+  
+  # API endpoints
+  v3_api_url: "https://github.enterprise.example.com/api/v3"
+  v4_api_url: "https://github.enterprise.example.com/api/graphql"
+  web_url: "https://github.enterprise.example.com"
+  
+  # Event routing: GHES uses webhooks primarily
+  event_routing:
+    pull_request: "http"      # Webhooks for GHES
+    pull_request_review: "http"
+    issue_comment: "http"
+    status: "http"            # GHES status events via webhook
+    check_run: "http"
+    workflow_run: "http"
+    merge_group: "http"
+    installation: "http"
+
+# ============================================================================
+# GitHub Enterprise Cloud (GHEC) Configuration
+# ============================================================================
+github_cloud:
+  # App configuration
+  app:
+    integration_id: 67890
+    webhook_secret: "${GHEC_WEBHOOK_SECRET}"
+    private_key: "${GHEC_PRIVATE_KEY}"
+  
+  # API endpoints (cloud defaults)
+  v3_api_url: "https://api.github.com"
+  v4_api_url: "https://api.github.com/graphql"
+  web_url: "https://github.com"
+  
+  # Event routing: GHEC uses SQS for high-volume events
+  event_routing:
+    pull_request: "sqs"       # High volume → SQS
+    pull_request_review: "sqs"
+    issue_comment: "sqs"
+    status: "sqs"             # GHEC status events via SQS
+    check_run: "sqs"
+    workflow_run: "sqs"
+    merge_group: "both"       # Critical events → both for redundancy
+    installation: "both"      # Important lifecycle events → both
+
+# ============================================================================
+# Session Configuration (UI/Details pages)
+# ============================================================================
+sessions:
+  key: "${SESSION_KEY}"  # 32-byte random key
+  lifetime: "24h"
+
+# ============================================================================
+# GHES Pull Request Evaluation Options
+# ============================================================================
+enterprise_options:
+  policy_path: ".policy.yml"
+  shared_repository: "example-org/policies"
+  shared_policy_path: ".policy.yml"
+  status_check_context: "policy-bot"
+  post_insecure_status_checks: false
+  app_name: "policy-bot-ghes"
+
+# ============================================================================
+# GHEC Pull Request Evaluation Options  
+# ============================================================================
+cloud_options:
+  policy_path: ".policy.yml"
+  shared_repository: "cos-sandbox/policies"
+  shared_policy_path: ".policy.yml"
+  status_check_context: "policy-bot"
+  post_insecure_status_checks: false
+  app_name: "policy-bot-ghec"
+
+# ============================================================================
+# Template Files Configuration
+# ============================================================================
+files:
+  static: "static"
+  templates: "templates"
+
+# ============================================================================
+# Worker Configuration (Webhook Processing)
+# ============================================================================
+workers:
+  workers: 10           # Worker goroutines for webhook events
+  queue_size: 100       # Internal queue size (avoid saturation)
+  github_timeout: 10s   # GitHub API request timeout
+
+# ============================================================================
+# SQS Configuration (Phase 3: Direct Processing)
+# ============================================================================
+sqs:
+  # Enable SQS consumer
+  enabled: true
+  
+  # AWS region
+  region: "us-east-1"
+  
+  # Processing mode: "direct" bypasses scheduler queue (Phase 3 optimization)
+  # Uses dedicated worker pools with bounded concurrency
+  processing_mode: "direct"
+  
+  # Default workers per queue (can be overridden per event type)
+  workers_per_queue: 10
+  
+  # SQS polling configuration
+  max_messages: 10          # Receive up to 10 messages per request
+  visibility_timeout: 30    # Message visibility timeout (seconds)
+  wait_time_seconds: 20     # Long polling wait time
+  shutdown_timeout: 30s     # Graceful shutdown timeout
+  
+  # Retry configuration (Phase 3: Smart Retry Logic)
+  enable_retry: true
+  max_retries: 3           # Maximum retries before DLQ
+  
+  # Dead Letter Queue configuration
+  dlq:
+    enabled: true
+    max_receive_count: 3   # Messages received 3+ times → DLQ
+    queue_suffix: "-dlq"   # Append to queue name for DLQ
+  
+  # Adaptive Polling (Phase 3: Performance Optimization)
+  # Backs off when workers are saturated to prevent overwhelming
+  adaptive_polling:
+    enabled: true
+    base_backoff: 1s      # Initial backoff when workers busy
+    max_backoff: 30s      # Maximum backoff duration
+    
+    # Per-event-type overrides for high-priority events
+    event_overrides:
+      installation:
+        enabled: true
+        base_backoff: 500ms  # Faster polling for critical events
+        max_backoff: 5s
+  
+  # ============================================================================
+  # Per-Event Queue Configuration (Phase 3: Regional + Environment Routing)
+  # ============================================================================
+  queues:
+    # Pull Request Events (High Volume)
+    pull_request:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789/policy-bot-qa-pull-request"
+      west_region_url: "https://sqs.us-west-2.amazonaws.com/123456789/policy-bot-qa-pull-request"
+      event_routing: "sqs"      # SQS only
+      ghec_enabled: true        # GHEC via SQS
+      ghes_enabled: false       # GHES via webhook
+      queue_workers: 20         # Higher concurrency for high volume
+      visibility_timeout: 60    # Longer timeout for PR processing
+      max_retries: 3
+    
+    # Pull Request Review Events
+    pull_request_review:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789/policy-bot-qa-pr-review"
+      west_region_url: "https://sqs.us-west-2.amazonaws.com/123456789/policy-bot-qa-pr-review"
+      event_routing: "sqs"
+      ghec_enabled: true
+      ghes_enabled: false
+      queue_workers: 15
+      max_retries: 3
+    
+    # Issue Comment Events
+    issue_comment:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789/policy-bot-qa-issue-comment"
+      west_region_url: "https://sqs.us-west-2.amazonaws.com/123456789/policy-bot-qa-issue-comment"
+      event_routing: "sqs"
+      ghec_enabled: true
+      ghes_enabled: false
+      queue_workers: 15
+      max_retries: 3
+    
+    # Status Events (GHEC only via SQS, GHES via webhook)
+    status:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789/policy-bot-qa-status"
+      west_region_url: "https://sqs.us-west-2.amazonaws.com/123456789/policy-bot-qa-status"
+      event_routing: "sqs"
+      ghec_enabled: true        # GHEC status via SQS
+      ghes_enabled: false       # GHES status via webhook
+      queue_workers: 25         # Very high volume event
+      visibility_timeout: 30
+      max_retries: 2            # Status events can be reprocessed quickly
+    
+    # Check Run Events
+    check_run:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789/policy-bot-qa-check-run"
+      west_region_url: "https://sqs.us-west-2.amazonaws.com/123456789/policy-bot-qa-check-run"
+      event_routing: "sqs"
+      ghec_enabled: true
+      ghes_enabled: false
+      queue_workers: 15
+      max_retries: 3
+    
+    # Workflow Run Events
+    workflow_run:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789/policy-bot-qa-workflow-run"
+      west_region_url: "https://sqs.us-west-2.amazonaws.com/123456789/policy-bot-qa-workflow-run"
+      event_routing: "sqs"
+      ghec_enabled: true
+      ghes_enabled: false
+      queue_workers: 15
+      max_retries: 3
+    
+    # Merge Group Events
+    merge_group:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789/policy-bot-qa-merge-group"
+      west_region_url: "https://sqs.us-west-2.amazonaws.com/123456789/policy-bot-qa-merge-group"
+      event_routing: "both"     # Critical event → both webhook + SQS
+      ghec_enabled: true
+      ghes_enabled: true
+      queue_workers: 10
+      max_retries: 5            # Important events get more retries
+    
+    # Installation Events (Lifecycle)
+    installation:
+      east_region_url: "https://sqs.us-east-1.amazonaws.com/123456789/policy-bot-qa-installation"
+      west_region_url: "https://sqs.us-west-2.amazonaws.com/123456789/policy-bot-qa-installation"
+      event_routing: "both"     # Critical lifecycle event → both
+      ghec_enabled: true
+      ghes_enabled: true
+      queue_workers: 5          # Low volume but critical
+      visibility_timeout: 120   # Longer timeout for cache operations
+      max_retries: 5
+
+# ============================================================================
+# Rate Limiting Configuration (Phase 3: Per-Org Rate Limiting)
+# ============================================================================
+rate_limit:
+  # Enable rate limiting for SQS processing
+  enabled: true
+  
+  # Per-organization rate limit (GHEC: one installation per org)
+  # GitHub limit: ~15,000 requests/hour = 4.16 req/sec
+  # Conservative: 3.0 req/sec per org with burst capacity
+  installation_rate: 3.0
+  installation_burst: 10
+  
+  # Global rate limit across all organizations
+  # Prevents overwhelming GitHub APIs during traffic bursts
+  global_rate: 100.0
+  global_burst: 50
+  
+  # Adaptive rate limiting (optional, disabled in QA)
+  adaptive:
+    enabled: false         # Enable in production after monitoring
+    safety_factor: 0.8     # Use 80% of calculated safe rate
+    min_rate: 1.0          # Never go below 1 req/sec
+    max_rate: 4.0          # Never exceed 4 req/sec
+    smoothing_factor: 0.3  # Balanced responsiveness
+    update_interval: 10s   # Adjust every 10 seconds
+
+# ============================================================================
+# Installation Filter Configuration
+# ============================================================================
+installation_filter:
+  webhook_enabled: false  # Disable webhook filtering (all events processed)
+  sqs_enabled: true       # Enable SQS filtering (environment-based routing)
+
+# ============================================================================
+# Datadog Configuration (Optional Monitoring)
+# ============================================================================
+datadog:
+  address: ""  # Set to enable Datadog metrics
+  # address: "localhost:8125"
+
+# ============================================================================
+# Prometheus Configuration (Metrics Export)
+# ============================================================================
+prometheus:
+  enabled: true
+  path: "/api/metrics"
+  # Metrics include:
+  # - SQS worker pool utilization
+  # - Circuit breaker state
+  # - Cache hit/miss rates (Phase 1)
+  # - Rate limiter stats
+  # - Processing times
+  # - Retry counts

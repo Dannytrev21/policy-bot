@@ -15,7 +15,6 @@
 package handler
 
 import (
-	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -61,17 +60,17 @@ func TestClientCache_PutAndGet(t *testing.T) {
 		V4Client: &githubv4.Client{},
 	}
 
-	owner := "test-org"
+	ownerID := int64(12345)
 
 	// Put clients in cache
-	cache.Put(owner, clients)
+	cache.Put(ownerID, clients)
 
 	// Verify size increased
 	_, _, _, size := cache.GetMetrics()
 	assert.Equal(t, int64(1), size)
 
 	// Get clients from cache
-	retrieved := cache.Get(owner)
+	retrieved := cache.Get(ownerID)
 	assert.NotNil(t, retrieved)
 	assert.Equal(t, clients, retrieved)
 
@@ -85,8 +84,8 @@ func TestClientCache_GetMiss(t *testing.T) {
 	cache := NewClientCache(1*time.Hour, 100)
 	defer cache.Stop()
 
-	// Get non-existent entry
-	retrieved := cache.Get("nonexistent-owner")
+	// Get non-existent entry (use owner ID)
+	retrieved := cache.Get(int64(99999))
 	assert.Nil(t, retrieved)
 
 	// Verify miss was recorded
@@ -105,18 +104,20 @@ func TestClientCache_Expiration(t *testing.T) {
 		V4Client: &githubv4.Client{},
 	}
 
+	ownerID := int64(12345)
+
 	// Put clients in cache
-	cache.Put("test-owner", clients)
+	cache.Put(ownerID, clients)
 
 	// Verify we can get it immediately
-	retrieved := cache.Get("test-owner")
+	retrieved := cache.Get(ownerID)
 	assert.NotNil(t, retrieved)
 
 	// Wait for expiration
 	time.Sleep(150 * time.Millisecond)
 
 	// Get should return nil for expired entry
-	retrieved = cache.Get("test-owner")
+	retrieved = cache.Get(ownerID)
 	assert.Nil(t, retrieved)
 
 	// Verify entry was removed and metrics updated
@@ -133,15 +134,17 @@ func TestClientCache_Invalidate(t *testing.T) {
 		V4Client: &githubv4.Client{},
 	}
 
+	ownerID := int64(12345)
+
 	// Put and verify
-	cache.Put("test-owner", clients)
-	assert.NotNil(t, cache.Get("test-owner"))
+	cache.Put(ownerID, clients)
+	assert.NotNil(t, cache.Get(ownerID))
 
 	// Invalidate
-	cache.Invalidate("test-owner")
+	cache.Invalidate(ownerID)
 
 	// Verify removed
-	assert.Nil(t, cache.Get("test-owner"))
+	assert.Nil(t, cache.Get(ownerID))
 
 	_, _, _, size := cache.GetMetrics()
 	assert.Equal(t, int64(0), size)
@@ -152,7 +155,7 @@ func TestClientCache_Invalidate_NonExistent(t *testing.T) {
 	defer cache.Stop()
 
 	// Invalidate non-existent entry should not panic
-	cache.Invalidate("nonexistent-owner")
+	cache.Invalidate(int64(99999))
 
 	_, _, _, size := cache.GetMetrics()
 	assert.Equal(t, int64(0), size)
@@ -164,8 +167,8 @@ func TestClientCache_Clear(t *testing.T) {
 
 	// Add multiple entries
 	for i := 1; i <= 10; i++ {
-		owner := fmt.Sprintf("owner-%d", i)
-		cache.Put(owner, &InstallationClients{
+		ownerID := int64(i)
+		cache.Put(ownerID, &InstallationClients{
 			V3Client: &github.Client{},
 			V4Client: &githubv4.Client{},
 		})
@@ -186,9 +189,9 @@ func TestClientCache_Clear(t *testing.T) {
 	assert.Equal(t, int64(0), size)
 
 	// Verify entries removed
-	assert.Nil(t, cache.Get("owner-1"))
-	assert.Nil(t, cache.Get("owner-5"))
-	assert.Nil(t, cache.Get("owner-10"))
+	assert.Nil(t, cache.Get(int64(1)))
+	assert.Nil(t, cache.Get(int64(5)))
+	assert.Nil(t, cache.Get(int64(10)))
 }
 
 func TestClientCache_PutNil(t *testing.T) {
@@ -196,7 +199,7 @@ func TestClientCache_PutNil(t *testing.T) {
 	defer cache.Stop()
 
 	// Put nil should not add to cache
-	cache.Put("test-owner", nil)
+	cache.Put(int64(12345), nil)
 
 	_, _, _, size := cache.GetMetrics()
 	assert.Equal(t, int64(0), size)
@@ -216,13 +219,15 @@ func TestClientCache_Update_ExistingEntry(t *testing.T) {
 		V4Client: &githubv4.Client{},
 	}
 
+	ownerID := int64(12345)
+
 	// Put first entry
-	cache.Put("test-owner", clients1)
+	cache.Put(ownerID, clients1)
 	_, _, _, size := cache.GetMetrics()
 	assert.Equal(t, int64(1), size)
 
 	// Update same entry (LoadOrStore doesn't increment size if already exists)
-	cache.Put("test-owner", clients2)
+	cache.Put(ownerID, clients2)
 	_, _, _, size = cache.GetMetrics()
 	assert.Equal(t, int64(1), size) // Size should still be 1
 }
@@ -234,8 +239,8 @@ func TestClientCache_Eviction_OnMaxSize(t *testing.T) {
 
 	// Add entries up to max size
 	for i := 1; i <= 5; i++ {
-		owner := fmt.Sprintf("owner-%d", i)
-		cache.Put(owner, &InstallationClients{
+		ownerID := int64(i)
+		cache.Put(ownerID, &InstallationClients{
 			V3Client: &github.Client{},
 			V4Client: &githubv4.Client{},
 		})
@@ -245,7 +250,7 @@ func TestClientCache_Eviction_OnMaxSize(t *testing.T) {
 	assert.Equal(t, int64(5), size)
 
 	// Add one more - should trigger eviction
-	cache.Put("owner-6", &InstallationClients{
+	cache.Put(int64(6), &InstallationClients{
 		V3Client: &github.Client{},
 		V4Client: &githubv4.Client{},
 	})
@@ -263,8 +268,8 @@ func TestClientCache_CleanupExpired(t *testing.T) {
 
 	// Add entries
 	for i := 1; i <= 5; i++ {
-		owner := fmt.Sprintf("owner-%d", i)
-		cache.Put(owner, &InstallationClients{
+		ownerID := int64(i)
+		cache.Put(ownerID, &InstallationClients{
 			V3Client: &github.Client{},
 			V4Client: &githubv4.Client{},
 		})
@@ -302,8 +307,8 @@ func TestClientCache_ConcurrentAccess(t *testing.T) {
 		go func(workerID int) {
 			defer wg.Done()
 			for j := 0; j < numOperations; j++ {
-				owner := fmt.Sprintf("owner-%d", workerID*numOperations+j)
-				cache.Put(owner, &InstallationClients{
+				ownerID := int64(workerID*numOperations + j)
+				cache.Put(ownerID, &InstallationClients{
 					V3Client: &github.Client{},
 					V4Client: &githubv4.Client{},
 				})
@@ -317,8 +322,8 @@ func TestClientCache_ConcurrentAccess(t *testing.T) {
 		go func(workerID int) {
 			defer wg.Done()
 			for j := 0; j < numOperations; j++ {
-				owner := fmt.Sprintf("owner-%d", workerID*numOperations+j)
-				cache.Get(owner)
+				ownerID := int64(workerID*numOperations + j)
+				cache.Get(ownerID)
 			}
 		}(i)
 	}
@@ -329,8 +334,8 @@ func TestClientCache_ConcurrentAccess(t *testing.T) {
 		go func(workerID int) {
 			defer wg.Done()
 			for j := 0; j < numOperations; j++ {
-				owner := fmt.Sprintf("owner-%d", workerID*numOperations+j)
-				cache.Invalidate(owner)
+				ownerID := int64(workerID*numOperations + j)
+				cache.Invalidate(ownerID)
 			}
 		}(i)
 	}
@@ -338,19 +343,19 @@ func TestClientCache_ConcurrentAccess(t *testing.T) {
 	wg.Wait()
 
 	// Verify cache is still functional
-	cache.Put("owner-99999", &InstallationClients{
+	cache.Put(int64(99999), &InstallationClients{
 		V3Client: &github.Client{},
 		V4Client: &githubv4.Client{},
 	})
-	assert.NotNil(t, cache.Get("owner-99999"))
-	assert.Nil(t, cache.Get("nonexistent-owner"))
+	assert.NotNil(t, cache.Get(int64(99999)))
+	assert.Nil(t, cache.Get(int64(88888))) // nonexistent owner ID
 }
 
 func TestClientCache_Stop(t *testing.T) {
 	cache := NewClientCache(1*time.Hour, 100)
 
 	// Add some entries
-	cache.Put("owner-1", &InstallationClients{
+	cache.Put(int64(1), &InstallationClients{
 		V3Client: &github.Client{},
 		V4Client: &githubv4.Client{},
 	})
@@ -359,11 +364,11 @@ func TestClientCache_Stop(t *testing.T) {
 	cache.Stop()
 
 	// Cache should still be usable after stop (but cleanup goroutine is stopped)
-	cache.Put("owner-2", &InstallationClients{
+	cache.Put(int64(2), &InstallationClients{
 		V3Client: &github.Client{},
 		V4Client: &githubv4.Client{},
 	})
-	assert.NotNil(t, cache.Get("owner-2"))
+	assert.NotNil(t, cache.Get(int64(2)))
 }
 
 func TestCachedClients_IsExpired(t *testing.T) {
@@ -401,8 +406,8 @@ func TestClientCache_EvictOldest(t *testing.T) {
 
 	// Add entries with slight delays to ensure different creation times
 	for i := 1; i <= 10; i++ {
-		owner := fmt.Sprintf("owner-%d", i)
-		cache.Put(owner, &InstallationClients{
+		ownerID := int64(i)
+		cache.Put(ownerID, &InstallationClients{
 			V3Client: &github.Client{},
 			V4Client: &githubv4.Client{},
 		})
@@ -410,7 +415,7 @@ func TestClientCache_EvictOldest(t *testing.T) {
 	}
 
 	// Trigger eviction by exceeding max size
-	cache.Put("owner-11", &InstallationClients{
+	cache.Put(int64(11), &InstallationClients{
 		V3Client: &github.Client{},
 		V4Client: &githubv4.Client{},
 	})
@@ -429,8 +434,8 @@ func BenchmarkClientCache_Get(b *testing.B) {
 
 	// Pre-populate cache
 	for i := 1; i <= 100; i++ {
-		owner := fmt.Sprintf("owner-%d", i)
-		cache.Put(owner, &InstallationClients{
+		ownerID := int64(i)
+		cache.Put(ownerID, &InstallationClients{
 			V3Client: &github.Client{},
 			V4Client: &githubv4.Client{},
 		})
@@ -439,7 +444,7 @@ func BenchmarkClientCache_Get(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			cache.Get("owner-50") // Cache hit
+			cache.Get(int64(50)) // Cache hit
 		}
 	})
 }
@@ -455,10 +460,10 @@ func BenchmarkClientCache_Put(b *testing.B) {
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := 0
+		i := int64(0)
 		for pb.Next() {
-			owner := fmt.Sprintf("owner-%d", i)
-			cache.Put(owner, clients)
+			ownerID := int64(100000 + i)
+			cache.Put(ownerID, clients)
 			i++
 		}
 	})
@@ -471,7 +476,7 @@ func BenchmarkClientCache_GetMiss(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			cache.Get("nonexistent-owner") // Cache miss
+			cache.Get(int64(999999)) // Cache miss
 		}
 	})
 }
@@ -502,17 +507,17 @@ func TestClientCache_NegativeCaching(t *testing.T) {
 	cache := NewClientCacheWithOptions(1*time.Hour, 2*time.Minute, 100, nil)
 	defer cache.Stop()
 
-	owner := "nonexistent-org"
+	ownerID := int64(999999)
 
 	// Put negative cache entry
-	cache.PutNegative(owner)
+	cache.PutNegative(ownerID)
 
 	// Verify size increased
 	_, _, _, size := cache.GetMetrics()
 	assert.Equal(t, int64(1), size)
 
 	// Get should return nil for negative cache entry
-	retrieved := cache.Get(owner)
+	retrieved := cache.Get(ownerID)
 	assert.Nil(t, retrieved, "Get should return nil for negative cache entry")
 
 	// But it should be a cache hit (we know it doesn't exist)
@@ -521,7 +526,7 @@ func TestClientCache_NegativeCaching(t *testing.T) {
 	assert.Equal(t, int64(0), misses)
 
 	// IsNegativelyCached should return true
-	assert.True(t, cache.IsNegativelyCached(owner))
+	assert.True(t, cache.IsNegativelyCached(ownerID))
 }
 
 // Test negative cache expiration with shorter TTL
@@ -529,22 +534,22 @@ func TestClientCache_NegativeCacheExpiration(t *testing.T) {
 	cache := NewClientCacheWithOptions(1*time.Hour, 50*time.Millisecond, 100, nil)
 	defer cache.Stop()
 
-	owner := "test-org"
+	ownerID := int64(12345)
 
 	// Put negative cache entry with short TTL
-	cache.PutNegative(owner)
+	cache.PutNegative(ownerID)
 
 	// Should be negatively cached immediately
-	assert.True(t, cache.IsNegativelyCached(owner))
+	assert.True(t, cache.IsNegativelyCached(ownerID))
 
 	// Wait for expiration
 	time.Sleep(100 * time.Millisecond)
 
 	// Should no longer be negatively cached
-	assert.False(t, cache.IsNegativelyCached(owner), "Negative cache should expire")
+	assert.False(t, cache.IsNegativelyCached(ownerID), "Negative cache should expire")
 
 	// Get should return nil and record miss
-	retrieved := cache.Get(owner)
+	retrieved := cache.Get(ownerID)
 	assert.Nil(t, retrieved)
 
 	_, misses, _, _ := cache.GetMetrics()
@@ -556,24 +561,24 @@ func TestClientCache_PositiveOverridesNegative(t *testing.T) {
 	cache := NewClientCacheWithOptions(1*time.Hour, 2*time.Minute, 100, nil)
 	defer cache.Stop()
 
-	owner := "test-org"
+	ownerID := int64(12345)
 	clients := &InstallationClients{
 		V3Client: &github.Client{},
 		V4Client: &githubv4.Client{},
 	}
 
 	// First put negative cache
-	cache.PutNegative(owner)
-	assert.True(t, cache.IsNegativelyCached(owner))
+	cache.PutNegative(ownerID)
+	assert.True(t, cache.IsNegativelyCached(ownerID))
 
 	// Then put positive cache (installation found)
-	cache.Put(owner, clients)
+	cache.Put(ownerID, clients)
 
 	// Should no longer be negatively cached
-	assert.False(t, cache.IsNegativelyCached(owner))
+	assert.False(t, cache.IsNegativelyCached(ownerID))
 
 	// Get should return clients
-	retrieved := cache.Get(owner)
+	retrieved := cache.Get(ownerID)
 	assert.NotNil(t, retrieved)
 	assert.Equal(t, clients, retrieved)
 }
@@ -584,17 +589,17 @@ func TestClientCache_MetricsIntegration(t *testing.T) {
 	cache := NewClientCacheWithOptions(1*time.Hour, 2*time.Minute, 100, registry)
 	defer cache.Stop()
 
-	owner := "test-org"
+	ownerID := int64(12345)
 	clients := &InstallationClients{
 		V3Client: &github.Client{},
 		V4Client: &githubv4.Client{},
 	}
 
 	// Perform cache operations
-	cache.Put(owner, clients)
-	cache.Get(owner)                 // Hit
-	cache.Get("nonexistent-owner")   // Miss
-	cache.PutNegative("negative-org") // Negative cache
+	cache.Put(ownerID, clients)
+	cache.Get(ownerID)              // Hit
+	cache.Get(int64(999999))        // Miss
+	cache.PutNegative(int64(88888)) // Negative cache
 
 	// Manually trigger metrics publishing
 	cache.publishMetrics()
@@ -619,15 +624,15 @@ func TestClientCache_MetricsLoop(t *testing.T) {
 	cache := NewClientCacheWithOptions(1*time.Hour, 2*time.Minute, 100, registry)
 	defer cache.Stop()
 
-	owner := "test-org"
+	ownerID := int64(12345)
 	clients := &InstallationClients{
 		V3Client: &github.Client{},
 		V4Client: &githubv4.Client{},
 	}
 
 	// Perform cache operations
-	cache.Put(owner, clients)
-	cache.Get(owner) // Hit
+	cache.Put(ownerID, clients)
+	cache.Get(ownerID) // Hit
 
 	// Wait for at least one metrics publish cycle (metrics publish every 10 seconds)
 	// Use publishMetrics directly to test without waiting
@@ -644,12 +649,12 @@ func TestClientCache_NilRegistry(t *testing.T) {
 	defer cache.Stop()
 
 	// Should work without metrics publishing
-	cache.Put("test-org", &InstallationClients{
+	cache.Put(int64(12345), &InstallationClients{
 		V3Client: &github.Client{},
 		V4Client: &githubv4.Client{},
 	})
 
-	retrieved := cache.Get("test-org")
+	retrieved := cache.Get(int64(12345))
 	assert.NotNil(t, retrieved)
 }
 
@@ -659,18 +664,18 @@ func TestClientCache_HitRateCalculation(t *testing.T) {
 	cache := NewClientCacheWithOptions(1*time.Hour, 2*time.Minute, 100, registry)
 	defer cache.Stop()
 
-	owner := "test-org"
+	ownerID := int64(12345)
 	clients := &InstallationClients{
 		V3Client: &github.Client{},
 		V4Client: &githubv4.Client{},
 	}
 
 	// Put and get to create hits/misses
-	cache.Put(owner, clients)
-	cache.Get(owner)              // Hit
-	cache.Get(owner)              // Hit
-	cache.Get("nonexistent-org1") // Miss
-	cache.Get("nonexistent-org2") // Miss
+	cache.Put(ownerID, clients)
+	cache.Get(ownerID)      // Hit
+	cache.Get(ownerID)      // Hit
+	cache.Get(int64(99991)) // Miss
+	cache.Get(int64(99992)) // Miss
 
 	// Publish metrics
 	cache.publishMetrics()
@@ -700,8 +705,8 @@ func TestClientCache_ConcurrentNegativeCaching(t *testing.T) {
 		go func(workerID int) {
 			defer wg.Done()
 			for j := 0; j < numOperations; j++ {
-				owner := fmt.Sprintf("owner-%d", workerID*numOperations+j)
-				cache.PutNegative(owner)
+				ownerID := int64(workerID*numOperations + j)
+				cache.PutNegative(ownerID)
 			}
 		}(i)
 	}
@@ -712,8 +717,8 @@ func TestClientCache_ConcurrentNegativeCaching(t *testing.T) {
 		go func(workerID int) {
 			defer wg.Done()
 			for j := 0; j < numOperations; j++ {
-				owner := fmt.Sprintf("owner-%d", workerID*numOperations+j)
-				cache.IsNegativelyCached(owner)
+				ownerID := int64(workerID*numOperations + j)
+				cache.IsNegativelyCached(ownerID)
 			}
 		}(i)
 	}
@@ -721,8 +726,8 @@ func TestClientCache_ConcurrentNegativeCaching(t *testing.T) {
 	wg.Wait()
 
 	// Verify cache is still functional
-	cache.PutNegative("test-owner")
-	assert.True(t, cache.IsNegativelyCached("test-owner"))
+	cache.PutNegative(int64(99999))
+	assert.True(t, cache.IsNegativelyCached(int64(99999)))
 }
 
 // Benchmark negative caching performance
@@ -732,10 +737,10 @@ func BenchmarkClientCache_PutNegative(b *testing.B) {
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := 0
+		i := int64(0)
 		for pb.Next() {
-			owner := fmt.Sprintf("owner-%d", i)
-			cache.PutNegative(owner)
+			ownerID := int64(100000 + i)
+			cache.PutNegative(ownerID)
 			i++
 		}
 	})
@@ -748,14 +753,14 @@ func BenchmarkClientCache_IsNegativelyCached(b *testing.B) {
 
 	// Pre-populate with negative cache entries
 	for i := 0; i < 100; i++ {
-		owner := fmt.Sprintf("owner-%d", i)
-		cache.PutNegative(owner)
+		ownerID := int64(i)
+		cache.PutNegative(ownerID)
 	}
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			cache.IsNegativelyCached("owner-50") // Negative cache hit
+			cache.IsNegativelyCached(int64(50)) // Negative cache hit
 		}
 	})
 }

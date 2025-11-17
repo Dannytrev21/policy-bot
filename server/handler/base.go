@@ -54,27 +54,37 @@ type OrgClientCreator interface {
 }
 
 type Base struct {
+	// GitHub App Client Creation
 	githubapp.ClientCreator
+	Installations githubapp.InstallationsService
 
-	Installations               githubapp.InstallationsService
+	// Configuration
 	ConfigFetcher               *ConfigFetcher
 	AutorRemediateConfigFetcher *ConfigFetcher
 	BaseConfig                  *baseapp.HTTPConfig
 	PullOpts                    *PullEvaluationOptions
-	InstallationIdMap           map[int64]int64 // Legacy cache, kept for backwards compatibility
-	CircuitBreaker              *CircuitBreaker      // Shared circuit breaker for tracking API failures
-	InstallationManager         *InstallationManager // GHES: Centralized manager for installation client creation (has retry/circuit breaker logic)
-	OrgMappingCache             *MappingCache        // Organization → Installation ID mapping cache (GHEC)
-	ClientCache                 *ClientCache         // Owner/org → InstallationClients cache (per-org caching for GHEC)
-	MetricsRegistry             gometrics.Registry   // Registry for recording metrics
-	AppID                       int64                // Our GitHub App ID for multi-app event detection
-	DefaultInstallationID       int64                // GHEC optimization: single installation ID (set during init)
-	GithubCloud                 bool
-	mu                          *sync.RWMutex
-	Logger                      zerolog.Logger
 
-	AppName              string
+	// Caching (environment-specific)
+	// GHEC: Uses ClientCache (owner ID → clients with installation ID)
+	// GHES: Uses InstallationManager (installation-based with circuit breaker)
+	InstallationManager *InstallationManager // GHES: Centralized manager for installation client creation
+	ClientCache         *ClientCache         // GHEC: Unified cache keyed by owner ID
+
+	// Legacy Support
+	InstallationIdMap map[int64]int64 // Legacy cache for backwards compatibility
+
+	// Observability
+	MetricsRegistry gometrics.Registry // Registry for recording metrics
+	Logger          zerolog.Logger
+
+	// App Identity
+	AppID       int64  // GitHub App ID for multi-app event detection
+	AppName     string // GitHub App name
+	GithubCloud bool   // True for GHEC, false for GHES
+
+	// Internal State
 	DefaultFetchedConfig *FetchedConfig
+	mu                   *sync.RWMutex
 }
 
 func (base *Base) Initialize() {
@@ -95,37 +105,20 @@ func (base *Base) Initialize() {
 		base.DefaultFetchedConfig = &FetchedConfig{}
 	}
 
-	// Initialize shared circuit breaker for InstallationManager
-	// This ensures consistent failure tracking across GitHub API calls for GHES
-	if base.CircuitBreaker == nil {
-		base.CircuitBreaker = NewCircuitBreaker()
-	}
-
 	// Initialize installation manager for GHES (has retry and circuit breaker logic)
+	// CircuitBreaker is now created internally by InstallationManager (better encapsulation)
 	// For GHEC, this is not used (we use GetClientsByOwner instead)
 	if base.InstallationManager == nil {
 		base.InstallationManager = NewInstallationManager(
 			base.ClientCreator,
 			nil, // No registry needed - simplified
 			base.MetricsRegistry,
-			base.CircuitBreaker,
 		)
 	}
 
-	// Initialize mapping caches for organization lookups (used by GHEC)
-	// Repository mapping cache removed (no longer needed after filter removal)
-	// Integrated with MetricsRegistry for OTEL export to New Relic
-	if base.OrgMappingCache == nil {
-		base.OrgMappingCache = NewMappingCacheWithMetrics(
-			1*time.Hour,  // positiveTTL
-			5*time.Minute, // negativeTTL
-			10000,         // maxSize
-			1*time.Minute, // cleanupInterval
-			base.MetricsRegistry,
-		)
-	}
-
-	// Initialize client cache for per-org client caching (correct for GHEC)
+	// Initialize client cache for per-org client caching (unified cache for GHEC)
+	// Keyed by owner ID (int64) for efficiency and immutability
+	// Stores both clients and installation ID - no separate OrgMappingCache needed
 	// TTL: 10 minutes (clients use 1-hour tokens, refresh earlier for safety)
 	// Negative TTL: 2 minutes (shorter for non-existent installations)
 	// MaxSize: 1000 orgs (reasonable for most deployments)
@@ -355,27 +348,19 @@ func (b *Base) Evaluate(ctx context.Context, installationID int64, trigger commo
 
 // InvalidateInstallationCaches removes all cache entries associated with an installation.
 // This should be called when the GitHub App is uninstalled.
-func (b *Base) InvalidateInstallationCaches(installationID int64, owner string, repos []string) {
+// ownerID is optional but recommended - if provided, enables cache invalidation by owner ID.
+func (b *Base) InvalidateInstallationCaches(installationID int64, owner string, repos []string, ownerID ...int64) {
 	logger := zerolog.Logger{}
 
-	// Remove organization mapping if provided
-	if owner != "" && b.OrgMappingCache != nil {
-		orgKey := "org:" + owner
-		b.OrgMappingCache.Remove(orgKey)
-		logger.Debug().
-			Str("org_key", orgKey).
-			Int64("installation_id", installationID).
-			Msg("Removed organization mapping from cache")
-	}
-
-	// Invalidate cached clients for this owner
+	// Invalidate cached clients for this owner by owner ID
 	// This prevents stale cached clients from being used after installation deletion/suspension
-	if owner != "" && b.ClientCache != nil {
-		b.ClientCache.Invalidate(owner)
+	if b.ClientCache != nil && len(ownerID) > 0 && ownerID[0] > 0 {
+		b.ClientCache.Invalidate(ownerID[0])
 		logger.Debug().
 			Str("owner", owner).
+			Int64("owner_id", ownerID[0]).
 			Int64("installation_id", installationID).
-			Msg("Invalidated client cache for owner")
+			Msg("Invalidated client cache for owner (by ID)")
 	}
 
 	logger.Info().
@@ -386,24 +371,19 @@ func (b *Base) InvalidateInstallationCaches(installationID int64, owner string, 
 }
 
 // PopulateInstallationCaches adds cache entries when an installation is created or repositories are added.
+// Note: This is now a no-op since ClientCache is populated on-demand during GetClientsByOwner.
+// The cache is unified - installation ID is stored alongside clients when first accessed.
 func (b *Base) PopulateInstallationCaches(installationID int64, owner string, repos []string) {
 	logger := zerolog.Logger{}
 
-	// Add organization mapping if provided
-	if owner != "" && b.OrgMappingCache != nil {
-		orgKey := "org:" + owner
-		b.OrgMappingCache.Set(orgKey, installationID)
-		logger.Debug().
-			Str("org_key", orgKey).
-			Int64("installation_id", installationID).
-			Msg("Populated organization mapping in cache")
-	}
+	// No-op: ClientCache is populated on-demand in GetClientsByOwner
+	// The mapping (ownerID → clients + installationID) is created when first accessed
 
 	logger.Info().
 		Int64("installation_id", installationID).
 		Str("owner", owner).
 		Int("repos_count", len(repos)).
-		Msg("Populated installation caches")
+		Msg("Installation cache population delegated to on-demand lookup")
 }
 
 // RemoveRepositoriesFromCache removes specific repositories from the cache.
@@ -421,17 +401,18 @@ func (b *Base) AddRepositoriesToCache(installationID int64, owner string, repos 
 // GetClientsByOwner retrieves installation clients for a given owner/org with caching.
 // This is the simplified, preferred method for GHEC where there's ONE installation per org (max 2).
 //
-// Lookup Strategy (flexible fallback):
-//  1. Check ClientCache by owner (fast path, ~100ns)
-//  2. Check OrgMappingCache for owner→installationID mapping (tries owner ID first if provided, then owner name)
-//  3. Try Installations.GetByOwner(owner) - works for org or user
-//  4. Cache both the installation ID and the clients for future requests
+// Lookup Strategy (simplified single cache):
+//  1. Check ClientCache by owner ID (fast path, ~100ns) - returns clients and installation ID
+//  2. If cache miss, call Installations.GetByOwner(owner) to get installation
+//  3. Create clients for the installation
+//  4. Cache clients with installation ID in ClientCache
+//  5. Return clients
 //
 // For GHEC: Uses owner-level installation lookup (ONE installation per org)
 // For GHES: Returns error (use repository-based lookup instead)
 //
-// Optional ownerID parameter: If provided, enables ID-based cache lookups (preferred for immutability).
-// This is backward compatible - existing calls without ownerID continue to work.
+// IMPORTANT: ownerID is now required for efficient caching (int64 keys are faster and immutable).
+// If ownerID is not provided (0 or empty), the function will still work but won't use the cache.
 //
 // Performance: Cache hit returns in ~100ns. Cache miss requires 1 API call.
 func (b *Base) GetClientsByOwner(ctx context.Context, owner string, ownerID ...int64) (*InstallationClients, error) {
@@ -442,20 +423,28 @@ func (b *Base) GetClientsByOwner(ctx context.Context, owner string, ownerID ...i
 		return nil, fmt.Errorf("owner cannot be empty")
 	}
 
+	// Extract owner ID if provided
+	var actualOwnerID int64
+	if len(ownerID) > 0 && ownerID[0] > 0 {
+		actualOwnerID = ownerID[0]
+	}
+
 	// Step 1: Check client cache first (fast path for GHEC)
-	// This includes both positive cache (clients exist) and negative cache (installation not found)
-	if b.ClientCache != nil {
-		if clients := b.ClientCache.Get(owner); clients != nil {
+	// Cache is keyed by owner ID (int64) for efficiency and immutability
+	if b.ClientCache != nil && actualOwnerID > 0 {
+		if clients := b.ClientCache.Get(actualOwnerID); clients != nil {
 			logger.Debug().
 				Str("owner", owner).
-				Msg("Client cache hit for owner")
+				Int64("owner_id", actualOwnerID).
+				Msg("Client cache hit for owner (by ID)")
 			return clients, nil
 		}
 
 		// Check for negative cache entry (cached "not found")
-		if b.ClientCache.IsNegativelyCached(owner) {
+		if b.ClientCache.IsNegativelyCached(actualOwnerID) {
 			logger.Debug().
 				Str("owner", owner).
+				Int64("owner_id", actualOwnerID).
 				Msg("Negative cache hit - installation not found (cached)")
 			return nil, fmt.Errorf("installation not found for owner %s (negatively cached)", owner)
 		}
@@ -463,111 +452,47 @@ func (b *Base) GetClientsByOwner(ctx context.Context, owner string, ownerID ...i
 
 	logger.Debug().
 		Str("owner", owner).
+		Int64("owner_id", actualOwnerID).
 		Msg("Client cache miss - looking up installation")
 
-	// Step 2: Check org mapping cache for owner→installationID
-	// Try owner ID first (if provided), then fall back to owner name
-	var installationID int64
-	var foundInOrgCache bool
-
-	if b.OrgMappingCache != nil {
-		// Try owner ID-based lookup first (preferred - immutable)
-		if len(ownerID) > 0 && ownerID[0] > 0 {
-			idKey := b.OrgMappingCache.BuildOwnerIDCacheKey(ownerID[0])
-			if idKey != "" {
-				if cachedID, found := b.OrgMappingCache.Get(idKey); found {
-					installationID = cachedID
-					foundInOrgCache = true
-					logger.Debug().
-						Str("owner", owner).
-						Int64("owner_id", ownerID[0]).
-						Int64("installation_id", installationID).
-						Msg("Found installation ID in org mapping cache by owner ID")
-				}
-			}
-		}
-
-		// Fall back to owner name-based lookup (backward compatibility)
-		if !foundInOrgCache {
-			orgKey := b.OrgMappingCache.BuildOrgCacheKey(owner)
-			if orgKey != "" {
-				if cachedID, found := b.OrgMappingCache.Get(orgKey); found {
-					installationID = cachedID
-					foundInOrgCache = true
-					logger.Debug().
-						Str("owner", owner).
-						Int64("installation_id", installationID).
-						Msg("Found installation ID in org mapping cache by owner name")
-				}
-			}
-		}
+	// Step 2: Look up installation via Installations service
+	if !b.GithubCloud {
+		// For GHES: Use repository-level lookup
+		// Note: This requires a repository name, which we don't have here.
+		// For GHES, callers should use the existing InstallationManager.GetClients() with installation ID
+		return nil, fmt.Errorf("GetClientsByOwner requires owner-level installation lookup (GHEC only). For GHES, use repository-based lookup")
 	}
 
-	// Step 3: If not in cache, look up via Installations service
-	if !foundInOrgCache {
-		if !b.GithubCloud {
-			// For GHES: Use repository-level lookup
-			// Note: This requires a repository name, which we don't have here.
-			// For GHES, callers should use the existing InstallationManager.GetClients() with installation ID
-			return nil, fmt.Errorf("GetClientsByOwner requires owner-level installation lookup (GHEC only). For GHES, use repository-based lookup")
-		}
-
-		// For GHEC: Use GetByOwner for org-level installation lookup
-		// This works for both organizations and users
-		// In GHEC, there's typically ONE installation per org (max 2)
-		installation, lookupErr := b.Installations.GetByOwner(ctx, owner)
-		if lookupErr != nil {
-			logger.Warn().Err(lookupErr).
-				Str("owner", owner).
-				Msg("Failed to find installation for owner (org or user)")
-
-			// Cache negative result to avoid repeated API calls for non-existent installations
-			if b.ClientCache != nil {
-				b.ClientCache.PutNegative(owner)
-				logger.Debug().
-					Str("owner", owner).
-					Msg("Cached negative result (installation not found)")
-			}
-
-			return nil, errors.Wrapf(lookupErr, "failed to find installation for owner %s (org or user)", owner)
-		}
-		installationID = installation.ID
-
-		logger.Info().
+	// For GHEC: Use GetByOwner for org-level installation lookup
+	// This works for both organizations and users
+	// In GHEC, there's typically ONE installation per org (max 2)
+	installation, lookupErr := b.Installations.GetByOwner(ctx, owner)
+	if lookupErr != nil {
+		logger.Warn().Err(lookupErr).
 			Str("owner", owner).
-			Int64("installation_id", installationID).
-			Str("lookup_method", "GetByOwner").
-			Msg("Found installation via owner lookup (GHEC)")
+			Msg("Failed to find installation for owner (org or user)")
 
-		// Cache the owner→installationID mapping for faster future lookups
-		// Cache by both owner ID (if available) and owner name
-		if b.OrgMappingCache != nil {
-			// Cache by owner ID (preferred - immutable)
-			if len(ownerID) > 0 && ownerID[0] > 0 {
-				idKey := b.OrgMappingCache.BuildOwnerIDCacheKey(ownerID[0])
-				if idKey != "" {
-					b.OrgMappingCache.Set(idKey, installationID)
-					logger.Debug().
-						Str("owner", owner).
-						Int64("owner_id", ownerID[0]).
-						Int64("installation_id", installationID).
-						Msg("Cached ownerID→installation mapping")
-				}
-			}
-
-			// Also cache by owner name (backward compatibility)
-			orgKey := b.OrgMappingCache.BuildOrgCacheKey(owner)
-			if orgKey != "" {
-				b.OrgMappingCache.Set(orgKey, installationID)
-				logger.Debug().
-					Str("owner", owner).
-					Int64("installation_id", installationID).
-					Msg("Cached owner name→installation mapping")
-			}
+		// Cache negative result to avoid repeated API calls for non-existent installations
+		if b.ClientCache != nil && actualOwnerID > 0 {
+			b.ClientCache.PutNegative(actualOwnerID)
+			logger.Debug().
+				Str("owner", owner).
+				Int64("owner_id", actualOwnerID).
+				Msg("Cached negative result (installation not found)")
 		}
-	}
 
-	// Step 4: Create clients with per-org rate limiting
+		return nil, errors.Wrapf(lookupErr, "failed to find installation for owner %s (org or user)", owner)
+	}
+	installationID := installation.ID
+
+	logger.Info().
+		Str("owner", owner).
+		Int64("owner_id", actualOwnerID).
+		Int64("installation_id", installationID).
+		Str("lookup_method", "GetByOwner").
+		Msg("Found installation via owner lookup (GHEC)")
+
+	// Step 3: Create clients with per-org rate limiting
 	clients, err := b.createClientsForOwner(ctx, owner, installationID)
 	if err != nil {
 		logger.Error().Err(err).
@@ -577,22 +502,176 @@ func (b *Base) GetClientsByOwner(ctx context.Context, owner string, ownerID ...i
 		return nil, errors.Wrapf(err, "failed to create clients for owner %s (installation %d)", owner, installationID)
 	}
 
-	// Step 5: Cache clients by owner (correct for GHEC where there's ONE installation per org)
-	if b.ClientCache != nil {
-		b.ClientCache.Put(owner, clients)
+	// Step 4: Cache clients with installation ID (unified cache - no separate mapping cache needed)
+	if b.ClientCache != nil && actualOwnerID > 0 {
+		b.ClientCache.PutWithInstallationID(actualOwnerID, clients, installationID)
 		logger.Debug().
 			Str("owner", owner).
+			Int64("owner_id", actualOwnerID).
 			Int64("installation_id", installationID).
-			Msg("Cached clients by owner")
+			Msg("Cached clients by owner ID (with installation ID)")
 	}
 
 	return clients, nil
 }
 
+// retrieveClientAndInstallationId retrieves both the installation client and installation ID
+// using a cache-first approach. This is the primary method for obtaining installation information.
+//
+// Flow:
+// 1. Check cache by owner ID for cached installation ID
+// 2. If cache miss, use API to get installation ID:
+//    - GHEC: Use GetByOwner for org-level lookup
+//    - GHES: Use GetByRepository for repo-level lookup (requires repo parameter)
+// 3. Create installation clients using the installation ID
+// 4. Create installation token for the installation
+// 5. On error, fallback to repo-based lookup to obtain installation ID
+//
+// Returns: InstallationClients, installation ID, error
+func (b *Base) retrieveClientAndInstallationId(ctx context.Context, installationID int64, ownerID int64, ownerName string, repo string) (*InstallationClients, int64, error) {
+	logger := zerolog.Ctx(ctx)
+
+	// Step 1: Check cache by owner ID first (fast path)
+	if b.ClientCache != nil && ownerID > 0 {
+		if clients, cachedInstallationID := b.ClientCache.GetWithInstallationID(ownerID); clients != nil {
+			logger.Debug().
+				Str("owner", ownerName).
+				Int64("owner_id", ownerID).
+				Int64("installation_id", cachedInstallationID).
+				Msg("Cache hit - retrieved clients and installation ID from cache")
+			return clients, cachedInstallationID, nil
+		}
+
+		// Check for negative cache entry
+		if b.ClientCache.IsNegativelyCached(ownerID) {
+			logger.Debug().
+				Str("owner", ownerName).
+				Int64("owner_id", ownerID).
+				Msg("Negative cache hit - installation not found (cached)")
+			return nil, 0, fmt.Errorf("installation not found for owner %s (negatively cached)", ownerName)
+		}
+	}
+
+	logger.Debug().
+		Str("owner", ownerName).
+		Int64("owner_id", ownerID).
+		Int64("provided_installation_id", installationID).
+		Str("repo", repo).
+		Msg("Cache miss - looking up installation")
+
+	// Step 2: Get installation ID from API if not provided
+	var finalInstallationID int64 = installationID
+	var lookupErr error
+
+	if finalInstallationID == 0 {
+		if !b.GithubCloud {
+			// GHES: Use repository-based lookup (default to ownerName/repo)
+			if repo == "" {
+				return nil, 0, fmt.Errorf("repository name required for GHES installation lookup")
+			}
+			repoFullName := fmt.Sprintf("%s/%s", ownerName, repo)
+			installation, err := b.Installations.GetByRepository(ctx, ownerName, repo)
+			if err != nil {
+				logger.Warn().Err(err).
+					Str("owner", ownerName).
+					Str("repo", repo).
+					Str("repo_full_name", repoFullName).
+					Msg("Failed to find installation for repository (GHES)")
+				lookupErr = err
+			} else {
+				finalInstallationID = installation.ID
+				logger.Info().
+					Str("owner", ownerName).
+					Str("repo", repo).
+					Int64("installation_id", finalInstallationID).
+					Msg("Found installation via repository lookup (GHES)")
+			}
+		} else {
+			// GHEC: Use org/owner name for org-level installation lookup
+			installation, err := b.Installations.GetByOwner(ctx, ownerName)
+			if err != nil {
+				logger.Warn().Err(err).
+					Str("owner", ownerName).
+					Msg("Failed to find installation for owner (GHEC)")
+				lookupErr = err
+			} else {
+				finalInstallationID = installation.ID
+				logger.Info().
+					Str("owner", ownerName).
+					Int64("installation_id", finalInstallationID).
+					Msg("Found installation via owner lookup (GHEC)")
+			}
+		}
+	}
+
+	// Step 3: Handle lookup errors - fallback to repo-based lookup
+	if lookupErr != nil && repo != "" {
+		// Retry with repository-based lookup as fallback
+		logger.Debug().
+			Str("owner", ownerName).
+			Str("repo", repo).
+			Msg("Attempting fallback: repository-based installation lookup")
+
+		installation, err := b.Installations.GetByRepository(ctx, ownerName, repo)
+		if err != nil {
+			logger.Error().Err(err).
+				Str("owner", ownerName).
+				Str("repo", repo).
+				Msg("Fallback lookup also failed - installation not found")
+
+			// Cache negative result to avoid repeated failed API calls
+			if b.ClientCache != nil && ownerID > 0 {
+				b.ClientCache.PutNegative(ownerID)
+			}
+
+			return nil, 0, errors.Wrapf(err, "failed to find installation for owner %s (tried both owner and repo lookup)", ownerName)
+		}
+		finalInstallationID = installation.ID
+		logger.Info().
+			Str("owner", ownerName).
+			Str("repo", repo).
+			Int64("installation_id", finalInstallationID).
+			Msg("Found installation via fallback repository lookup")
+	} else if lookupErr != nil {
+		// No repo provided for fallback, cache negative result
+		if b.ClientCache != nil && ownerID > 0 {
+			b.ClientCache.PutNegative(ownerID)
+		}
+		return nil, 0, errors.Wrap(lookupErr, "failed to find installation (no repo provided for fallback lookup)")
+	}
+
+	// Validate we have an installation ID
+	if finalInstallationID == 0 {
+		return nil, 0, fmt.Errorf("failed to obtain installation ID for owner %s", ownerName)
+	}
+
+	// Step 4: Create installation clients (includes token creation)
+	clients, err := b.createClientsForOwner(ctx, ownerName, finalInstallationID)
+	if err != nil {
+		logger.Error().Err(err).
+			Str("owner", ownerName).
+			Int64("installation_id", finalInstallationID).
+			Msg("Failed to create clients for installation")
+		return nil, 0, errors.Wrapf(err, "failed to create clients for owner %s (installation %d)", ownerName, finalInstallationID)
+	}
+
+	// Step 5: Cache clients with installation ID
+	if b.ClientCache != nil && ownerID > 0 {
+		b.ClientCache.PutWithInstallationID(ownerID, clients, finalInstallationID)
+		logger.Debug().
+			Str("owner", ownerName).
+			Int64("owner_id", ownerID).
+			Int64("installation_id", finalInstallationID).
+			Msg("Cached clients and installation ID")
+	}
+
+	return clients, finalInstallationID, nil
+}
+
 // GetClientsForEvent retrieves installation clients using cached lookups when possible.
 // This method provides a unified interface for handlers to get clients efficiently.
 //
-// For GHEC: Uses owner-based lookup with ClientCache and OrgMappingCache (supports owner ID-based caching)
+// For GHEC: Uses owner-based lookup with ClientCache (unified cache keyed by owner ID)
 // For GHES: Uses installation-based lookup with InstallationManager's cache
 //
 // This ensures all client creation benefits from the caching infrastructure.
@@ -601,7 +680,7 @@ func (b *Base) GetClientsByOwner(ctx context.Context, owner string, ownerID ...i
 // Optional ownerID parameter: If provided, enables ID-based cache lookups (preferred for immutability).
 // This is backward compatible - existing calls without ownerID continue to work.
 func (b *Base) GetClientsForEvent(ctx context.Context, owner string, installationID int64, ownerID ...int64) (*InstallationClients, error) {
-	// For GHEC, use owner-based lookup (benefits from ClientCache + OrgMappingCache)
+	// For GHEC, use owner-based lookup (benefits from unified ClientCache)
 	if b.GithubCloud && owner != "" {
 		return b.GetClientsByOwner(ctx, owner, ownerID...)
 	}

@@ -206,17 +206,16 @@ type InstallationClients struct {
 
 // NewInstallationManager creates a new InstallationManager with the provided dependencies.
 // It initializes the client cache with default TTL (10 minutes) and max size (1000 clients).
-// The circuit breaker is shared to ensure consistent failure tracking across all GitHub API calls.
+// The circuit breaker is created internally to ensure consistent failure tracking across all GitHub API calls.
 func NewInstallationManager(
 	clientCreator githubapp.ClientCreator,
 	_ interface{}, // Deprecated: installationRegistry parameter kept for backward compatibility
 	metricsRegistry gometrics.Registry,
-	circuitBreaker *CircuitBreaker,
 ) *InstallationManager {
 	return &InstallationManager{
 		clientCreator:   clientCreator,
 		metricsRegistry: metricsRegistry,
-		circuitBreaker:  circuitBreaker,
+		circuitBreaker:  NewCircuitBreaker(), // Create internally - encapsulated
 		clientCache:     NewClientCache(defaultClientCacheTTL, defaultClientCacheMaxSize),
 	}
 }
@@ -248,9 +247,8 @@ func (m *InstallationManager) GetClients(ctx context.Context, installationID int
 
 	// Check client cache first for existing valid clients
 	// This significantly reduces overhead by reusing existing clients
-	// Note: Using installation-{id} key for backward compatibility with new per-org cache
-	cacheKey := fmt.Sprintf("installation-%d", installationID)
-	if cachedClients := m.clientCache.Get(cacheKey); cachedClients != nil {
+	// Using installation ID directly as cache key (int64)
+	if cachedClients := m.clientCache.Get(installationID); cachedClients != nil {
 		logger.Debug().
 			Int64("installation_id", installationID).
 			Str("repository", repoFullName).
@@ -385,9 +383,8 @@ func (m *InstallationManager) GetClients(ctx context.Context, installationID int
 		V4Client: v4Client,
 	}
 
-	// Note: Using installation-{id} key for backward compatibility with new per-org cache
-	cacheKey = fmt.Sprintf("installation-%d", installationID)
-	m.clientCache.Put(cacheKey, clients)
+	// Using installation ID directly as cache key (int64)
+	m.clientCache.Put(installationID, clients)
 	// Note: ClientCache publishes its own size metrics via metricsLoop
 
 	logger.Debug().
@@ -594,9 +591,8 @@ func isRetryableError(err error) bool {
 // InvalidateClientCache removes cached clients for a specific installation.
 // This should be called when an installation is deleted or credentials are revoked.
 func (m *InstallationManager) InvalidateClientCache(installationID int64) {
-	// Note: Using installation-{id} key for backward compatibility with new per-org cache
-	cacheKey := fmt.Sprintf("installation-%d", installationID)
-	m.clientCache.Invalidate(cacheKey)
+	// Using installation ID directly as cache key (int64)
+	m.clientCache.Invalidate(installationID)
 }
 
 // GetClientCacheMetrics returns current client cache metrics.

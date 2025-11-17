@@ -32,6 +32,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rcrowley/go-metrics"
 	"github.com/rs/zerolog"
+	"github.com/sony/gobreaker"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -764,10 +765,11 @@ func (p *Processor) processViaDirect(ctx context.Context, sqsMsg *SQSMessage, ha
 
 		err = p.circuitBreaker.Execute(environment, executeHandler)
 
-		// Log circuit breaker rejections
-		if err == errors.New("circuit breaker is open") || err == errors.New("too many requests") {
+		// Log circuit breaker rejections (use gobreaker's exported error variables)
+		if err == gobreaker.ErrOpenState || err == gobreaker.ErrTooManyRequests {
 			logger.Warn().
 				Str("environment", environment).
+				Err(err).
 				Msg("Circuit breaker rejected request - system is unhealthy")
 		}
 	} else {
@@ -830,10 +832,11 @@ func (p *Processor) processViaScheduler(ctx context.Context, sqsMsg *SQSMessage,
 
 		err = p.circuitBreaker.Execute(environment, executeHandler)
 
-		// Log circuit breaker rejections
-		if err == errors.New("circuit breaker is open") || err == errors.New("too many requests") {
+		// Log circuit breaker rejections (use gobreaker's exported error variables)
+		if err == gobreaker.ErrOpenState || err == gobreaker.ErrTooManyRequests {
 			logger.Warn().
 				Str("environment", environment).
+				Err(err).
 				Msg("Circuit breaker rejected scheduler request - system is unhealthy")
 		}
 	} else {

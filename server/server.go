@@ -249,13 +249,12 @@ func New(c *Config) (*Server, error) {
 	// }
 
 	enterpriseBasePolicyHandler := handler.Base{
-		ClientCreator:     enterpriseClientCreator,
-		BaseConfig:        &c.Server,
-		Installations:     githubapp.NewInstallationsService(enterpriseAppClient),
-		InstallationIdMap: make(map[int64]int64),
-		MetricsRegistry:   base.Registry(),
-		Logger:            logger.With().Str("environment", "enterprise").Str("channel", "webhook").Logger(),
-		AppID:             enterpriseApp.GetID(),
+		ClientCreator:   enterpriseClientCreator,
+		BaseConfig:      &c.Server,
+		Installations:   githubapp.NewInstallationsService(enterpriseAppClient),
+		MetricsRegistry: base.Registry(),
+		Logger:          logger.With().Str("environment", "enterprise").Str("channel", "webhook").Logger(),
+		AppID:           enterpriseApp.GetID(),
 
 		PullOpts: &c.EnterpriseOptions,
 		ConfigFetcher: &handler.ConfigFetcher{
@@ -336,13 +335,12 @@ func New(c *Config) (*Server, error) {
 
 	// Create separate base handlers for SQS with rate-limited client creators
 	sqsEnterpriseBasePolicyHandler := handler.Base{
-		ClientCreator:     sqsEnterpriseClientCreator,
-		BaseConfig:        &c.Server,
-		Installations:     githubapp.NewInstallationsService(enterpriseAppClient),
-		InstallationIdMap: make(map[int64]int64),
-		MetricsRegistry:   base.Registry(),
-		Logger:            logger.With().Str("environment", "enterprise").Str("channel", "sqs").Logger(),
-		AppID:             enterpriseApp.GetID(),
+		ClientCreator:   sqsEnterpriseClientCreator,
+		BaseConfig:      &c.Server,
+		Installations:   githubapp.NewInstallationsService(enterpriseAppClient),
+		MetricsRegistry: base.Registry(),
+		Logger:          logger.With().Str("environment", "enterprise").Str("channel", "sqs").Logger(),
+		AppID:           enterpriseApp.GetID(),
 
 		PullOpts: &c.EnterpriseOptions,
 		ConfigFetcher: &handler.ConfigFetcher{

@@ -60,10 +60,11 @@ const (
 // CachedClients represents cached GitHub API clients with expiration metadata.
 // Supports both positive caching (successful lookups) and negative caching (not found).
 type CachedClients struct {
-	Clients    *InstallationClients
-	ExpiresAt  time.Time
-	CreatedAt  time.Time
-	IsNegative bool // True if this caches a "not found" result (no Clients object)
+	Clients        *InstallationClients
+	InstallationID int64     // The GitHub App installation ID for this owner
+	ExpiresAt      time.Time
+	CreatedAt      time.Time
+	IsNegative     bool // True if this caches a "not found" result (no Clients object)
 }
 
 // IsExpired checks if the cached clients have expired
@@ -78,10 +79,10 @@ func (cc *CachedClients) IsExpired() bool {
 // Supports both positive caching (successful lookups) and negative caching (not found results)
 // with separate TTLs for each type.
 //
-// For GHEC: Keys are owner/org names (string), since there's ONE installation per org.
-// For GHES: Keys are still owner/org names for consistency.
+// For GHEC: Keys are owner IDs (int64), since there's ONE installation per org.
+// This eliminates the need for a separate OrgMappingCache - installation ID is stored alongside clients.
 type ClientCache struct {
-	cache       sync.Map // map[string]*CachedClients (key = owner/org name)
+	cache       sync.Map // map[int64]*CachedClients (key = owner ID)
 	ttl         time.Duration
 	negativeTTL time.Duration
 	maxSize     int
@@ -152,14 +153,14 @@ func NewClientCacheWithOptions(ttl, negativeTTL time.Duration, maxSize int, regi
 // Returns nil if not found, expired, or if a negative cache entry exists.
 // Thread-safe and optimized for read-heavy workloads.
 //
-// For GHEC: owner is the org name. For GHES: owner is the org name.
-func (c *ClientCache) Get(owner string) *InstallationClients {
-	if owner == "" {
+// For GHEC: ownerID is the GitHub org/user ID (int64).
+func (c *ClientCache) Get(ownerID int64) *InstallationClients {
+	if ownerID == 0 {
 		c.misses.Add(1)
 		return nil
 	}
 
-	value, ok := c.cache.Load(owner)
+	value, ok := c.cache.Load(ownerID)
 	if !ok {
 		c.misses.Add(1)
 		return nil
@@ -168,7 +169,7 @@ func (c *ClientCache) Get(owner string) *InstallationClients {
 	cached := value.(*CachedClients)
 	if cached.IsExpired() {
 		// Expired entry - remove it and return nil
-		c.cache.Delete(owner)
+		c.cache.Delete(ownerID)
 		c.size.Add(-1)
 		c.misses.Add(1)
 		return nil
@@ -184,21 +185,64 @@ func (c *ClientCache) Get(owner string) *InstallationClients {
 	return cached.Clients
 }
 
+// GetWithInstallationID retrieves clients and installation ID from the cache.
+// Returns (nil, 0) if not found, expired, or if a negative cache entry exists.
+// Thread-safe and optimized for read-heavy workloads.
+func (c *ClientCache) GetWithInstallationID(ownerID int64) (*InstallationClients, int64) {
+	if ownerID == 0 {
+		c.misses.Add(1)
+		return nil, 0
+	}
+
+	value, ok := c.cache.Load(ownerID)
+	if !ok {
+		c.misses.Add(1)
+		return nil, 0
+	}
+
+	cached := value.(*CachedClients)
+	if cached.IsExpired() {
+		// Expired entry - remove it and return nil
+		c.cache.Delete(ownerID)
+		c.size.Add(-1)
+		c.misses.Add(1)
+		return nil, 0
+	}
+
+	// Check if this is a negative cache entry (cached "not found")
+	if cached.IsNegative {
+		c.hits.Add(1) // Still a cache hit (we know it doesn't exist)
+		return nil, 0
+	}
+
+	c.hits.Add(1)
+	return cached.Clients, cached.InstallationID
+}
+
 // Put stores clients in the cache with TTL expiration.
 // If the cache exceeds maxSize, it will evict expired entries first,
 // then least recently created entries if needed. Thread-safe.
-// For GHEC: owner is the org name. For GHES: owner is the org name.
-func (c *ClientCache) Put(owner string, clients *InstallationClients) {
-	if owner == "" || clients == nil {
+// For GHEC: ownerID is the GitHub org/user ID (int64).
+func (c *ClientCache) Put(ownerID int64, clients *InstallationClients) {
+	c.PutWithInstallationID(ownerID, clients, 0)
+}
+
+// PutWithInstallationID stores clients and their installation ID in the cache.
+// If the cache exceeds maxSize, it will evict expired entries first,
+// then least recently created entries if needed. Thread-safe.
+// For GHEC: ownerID is the GitHub org/user ID (int64).
+func (c *ClientCache) PutWithInstallationID(ownerID int64, clients *InstallationClients, installationID int64) {
+	if ownerID == 0 || clients == nil {
 		return
 	}
 
 	now := time.Now()
 	cached := &CachedClients{
-		Clients:    clients,
-		ExpiresAt:  now.Add(c.ttl),
-		CreatedAt:  now,
-		IsNegative: false,
+		Clients:        clients,
+		InstallationID: installationID,
+		ExpiresAt:      now.Add(c.ttl),
+		CreatedAt:      now,
+		IsNegative:     false,
 	}
 
 	// Check if we need to evict before adding
@@ -208,7 +252,7 @@ func (c *ClientCache) Put(owner string, clients *InstallationClients) {
 	}
 
 	// Store the new entry (use Store to override any existing entry including negative cache)
-	existing, loaded := c.cache.Swap(owner, cached)
+	existing, loaded := c.cache.Swap(ownerID, cached)
 	if !loaded {
 		// New entry added
 		c.size.Add(1)
@@ -225,17 +269,18 @@ func (c *ClientCache) Put(owner string, clients *InstallationClients) {
 // Uses shorter TTL since these entries should expire faster.
 // Useful to avoid repeated API calls for non-existent installations.
 // Thread-safe.
-func (c *ClientCache) PutNegative(owner string) {
-	if owner == "" {
+func (c *ClientCache) PutNegative(ownerID int64) {
+	if ownerID == 0 {
 		return
 	}
 
 	now := time.Now()
 	cached := &CachedClients{
-		Clients:    nil, // No clients for negative cache
-		ExpiresAt:  now.Add(c.negativeTTL),
-		CreatedAt:  now,
-		IsNegative: true,
+		Clients:        nil, // No clients for negative cache
+		InstallationID: 0,
+		ExpiresAt:      now.Add(c.negativeTTL),
+		CreatedAt:      now,
+		IsNegative:     true,
 	}
 
 	// Check if we need to evict before adding
@@ -245,7 +290,7 @@ func (c *ClientCache) PutNegative(owner string) {
 	}
 
 	// Store the negative cache entry (use Swap to override any existing entry)
-	_, loaded := c.cache.Swap(owner, cached)
+	_, loaded := c.cache.Swap(ownerID, cached)
 	if !loaded {
 		// New entry added
 		c.size.Add(1)
@@ -255,12 +300,12 @@ func (c *ClientCache) PutNegative(owner string) {
 // IsNegativelyCached returns true if the owner has a negative cache entry
 // (i.e., we know this owner doesn't have an installation).
 // Returns false if not cached or if it's a positive cache entry.
-func (c *ClientCache) IsNegativelyCached(owner string) bool {
-	if owner == "" {
+func (c *ClientCache) IsNegativelyCached(ownerID int64) bool {
+	if ownerID == 0 {
 		return false
 	}
 
-	value, ok := c.cache.Load(owner)
+	value, ok := c.cache.Load(ownerID)
 	if !ok {
 		return false
 	}
@@ -276,11 +321,11 @@ func (c *ClientCache) IsNegativelyCached(owner string) bool {
 
 // Invalidate removes a specific owner's clients from the cache.
 // Useful when installation is deleted or credentials are revoked.
-func (c *ClientCache) Invalidate(owner string) {
-	if owner == "" {
+func (c *ClientCache) Invalidate(ownerID int64) {
+	if ownerID == 0 {
 		return
 	}
-	_, ok := c.cache.LoadAndDelete(owner)
+	_, ok := c.cache.LoadAndDelete(ownerID)
 	if ok {
 		c.size.Add(-1)
 	}
@@ -341,13 +386,13 @@ func (c *ClientCache) cleanupExpired() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	var expiredKeys []string
+	var expiredKeys []int64
 
 	// Find expired entries
 	c.cache.Range(func(key, value interface{}) bool {
 		cached := value.(*CachedClients)
 		if cached.IsExpired() {
-			expiredKeys = append(expiredKeys, key.(string))
+			expiredKeys = append(expiredKeys, key.(int64))
 		}
 		return true
 	})
@@ -378,7 +423,7 @@ func (c *ClientCache) evictOldest() {
 
 	// Collect all entries with their creation times
 	type entry struct {
-		owner     string
+		ownerID   int64
 		createdAt time.Time
 	}
 
@@ -386,7 +431,7 @@ func (c *ClientCache) evictOldest() {
 	c.cache.Range(func(key, value interface{}) bool {
 		cached := value.(*CachedClients)
 		entries = append(entries, entry{
-			owner:     key.(string),
+			ownerID:   key.(int64),
 			createdAt: cached.CreatedAt,
 		})
 		return true
@@ -413,7 +458,7 @@ func (c *ClientCache) evictOldest() {
 	}
 
 	for i := 0; i < evictCount && i < len(entries); i++ {
-		c.cache.Delete(entries[i].owner)
+		c.cache.Delete(entries[i].ownerID)
 		c.size.Add(-1)
 		c.evictions.Add(1)
 	}
