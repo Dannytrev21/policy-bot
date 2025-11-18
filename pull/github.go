@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/go-github/v74/github"
+	"github.com/google/go-github/v75/github"
 	"github.com/pkg/errors"
 	"github.com/shurcooL/githubv4"
 )
@@ -490,14 +490,14 @@ func (ghc *GitHubContext) RepositoryCollaborators() ([]*Collaborator, error) {
 						Permission string
 					}
 					Nodes []v4Actor
-				} `graphql:"direct: collaborators(affiliation: DIRECT, first: 100, after: $directCursor)"`
+				} `graphql:"direct: collaborators(affiliation: DIRECT, first: 50, after: $directCursor)"`
 				AllCollaborators struct {
 					PageInfo v4PageInfo
 					Edges    []struct {
 						Permission string
 					}
 					Nodes []v4Actor
-				} `graphql:"all: collaborators(affiliation: ALL, first: 100, after: $allCursor)"`
+				} `graphql:"all: collaborators(affiliation: ALL, first: 50, after: $allCursor)"`
 			} `graphql:"repository(owner: $owner, name: $name)"`
 		}
 		qvars := map[string]interface{}{

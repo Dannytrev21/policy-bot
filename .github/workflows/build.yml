@@ -78,7 +78,7 @@ jobs:
           ${{ runner.os }}-godel-
 
     - name: Set up Node
-      uses: actions/setup-node@v5
+      uses: actions/setup-node@v6
       with:
         node-version: 20
 
@@ -103,7 +103,7 @@ jobs:
       run: ./godelw docker build --verbose
 
     - name: Archive distribution
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: dist
         path: |
