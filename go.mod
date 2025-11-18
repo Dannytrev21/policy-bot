@@ -11,6 +11,7 @@ require (
 	github.com/bluekeyes/hatpear v0.1.2
 	github.com/bluekeyes/templatetree v0.5.0
 	github.com/c2h5oh/datasize v0.0.0-20231215233829-aa82cc1e6500
+	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/die-net/lrucache v0.0.0-20240714232319-26322ba4bc23
 	github.com/google/go-github/v47 v47.1.0
 	github.com/google/go-querystring v1.1.0
@@ -24,6 +25,7 @@ require (
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9
 	github.com/rs/zerolog v1.34.0
 	github.com/shurcooL/githubv4 v0.0.0-20240727222349-48295856cce7
+	github.com/sony/gobreaker v1.0.0
 	github.com/spf13/cobra v1.10.1
 	github.com/stretchr/testify v1.11.1
 	github.com/vektah/gqlparser v1.3.1
@@ -33,6 +35,8 @@ require (
 	go.opentelemetry.io/otel/trace v1.38.0
 	goji.io v2.0.2+incompatible
 	golang.org/x/oauth2 v0.31.0
+	golang.org/x/sync v0.15.0
+	golang.org/x/time v0.14.0
 	gopkg.in/yaml.v2 v2.4.0
 )
 
@@ -51,7 +55,6 @@ require (
 	github.com/aws/smithy-go v1.23.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bradleyfalzon/ghinstallation/v2 v2.1.0 // indirect
-	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
@@ -70,7 +73,6 @@ require (
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/sergi/go-diff v1.4.0 // indirect
 	github.com/shurcooL/graphql v0.0.0-20230722043721-ed46e5a46466 // indirect
-	github.com/sony/gobreaker v1.0.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
@@ -78,7 +80,6 @@ require (
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	golang.org/x/crypto v0.42.0 // indirect
 	golang.org/x/sys v0.36.0 // indirect
-	golang.org/x/time v0.14.0 // indirect
 	google.golang.org/protobuf v1.36.9 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -30,11 +30,11 @@ import (
 // BenchmarkRateLimiter_StaticMode benchmarks static rate limiting overhead
 func BenchmarkRateLimiter_StaticMode(b *testing.B) {
 	config := handler.RateLimitConfig{
-		InstallationRate:  3.0,
-		InstallationBurst: 10,
-		GlobalRate:        100.0,
-		GlobalBurst:       50,
-		Enabled:           true,
+		OrgRate:     3.0,
+		OrgBurst:    10,
+		GlobalRate:  100.0,
+		GlobalBurst: 50,
+		Enabled:     true,
 		Adaptive: handler.AdaptiveRateLimitConfig{
 			Enabled: false, // Static mode
 		},
@@ -64,9 +64,9 @@ func BenchmarkRateLimiter_StaticMode(b *testing.B) {
 // BenchmarkRateLimiter_AdaptiveMode benchmarks adaptive rate limiting overhead
 func BenchmarkRateLimiter_AdaptiveMode(b *testing.B) {
 	config := handler.RateLimitConfig{
-		InstallationRate:  3.0,
-		InstallationBurst: 10,
-		GlobalRate:        100.0,
+		OrgRate:     3.0,
+		OrgBurst:    10,
+		GlobalRate:  100.0,
 		GlobalBurst:       50,
 		Enabled:           true,
 		Adaptive: handler.AdaptiveRateLimitConfig{
@@ -103,9 +103,9 @@ func BenchmarkRateLimiter_AdaptiveMode(b *testing.B) {
 // BenchmarkRateLimiter_HighConcurrency tests performance under high concurrency
 func BenchmarkRateLimiter_HighConcurrency(b *testing.B) {
 	config := handler.RateLimitConfig{
-		InstallationRate:  3.0,
-		InstallationBurst: 10,
-		GlobalRate:        100.0,
+		OrgRate:     3.0,
+		OrgBurst:    10,
+		GlobalRate:  100.0,
 		GlobalBurst:       50,
 		Enabled:           true,
 	}
@@ -141,9 +141,9 @@ func BenchmarkRateLimiter_HighConcurrency(b *testing.B) {
 // BenchmarkRateLimiter_InstallationIsolation tests per-installation isolation overhead
 func BenchmarkRateLimiter_InstallationIsolation(b *testing.B) {
 	config := handler.RateLimitConfig{
-		InstallationRate:  3.0,
-		InstallationBurst: 10,
-		GlobalRate:        100.0,
+		OrgRate:     3.0,
+		OrgBurst:    10,
+		GlobalRate:  100.0,
 		GlobalBurst:       50,
 		Enabled:           true,
 	}
@@ -195,11 +195,11 @@ func BenchmarkRateLimiter_NoRateLimiting(b *testing.B) {
 // BenchmarkRateLimiter_GlobalLimitContention tests global limit contention
 func BenchmarkRateLimiter_GlobalLimitContention(b *testing.B) {
 	config := handler.RateLimitConfig{
-		InstallationRate:  1000.0, // Very high per-installation (won't be hit)
-		InstallationBurst: 1000,
-		GlobalRate:        10.0, // Low global limit (will be hit)
-		GlobalBurst:       10,
-		Enabled:           true,
+		OrgRate:     1000.0, // Very high per-org (won't be hit)
+		OrgBurst:    1000,
+		GlobalRate:  10.0, // Low global limit (will be hit)
+		GlobalBurst: 10,
+		Enabled:     true,
 	}
 
 	rateLimiter := setupRateLimiter(b, config)
@@ -228,9 +228,9 @@ func BenchmarkRateLimiter_GlobalLimitContention(b *testing.B) {
 // BenchmarkRateLimiter_AdaptiveAdjustment benchmarks adaptive rate adjustment overhead
 func BenchmarkRateLimiter_AdaptiveAdjustment(b *testing.B) {
 	config := handler.RateLimitConfig{
-		InstallationRate:  3.0,
-		InstallationBurst: 10,
-		GlobalRate:        100.0,
+		OrgRate:     3.0,
+		OrgBurst:    10,
+		GlobalRate:  100.0,
 		GlobalBurst:       50,
 		Enabled:           true,
 		Adaptive: handler.AdaptiveRateLimitConfig{

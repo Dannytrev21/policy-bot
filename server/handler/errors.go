@@ -19,8 +19,39 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/google/go-github/v47/github"
 	"github.com/pkg/errors"
 )
+
+// classifyGitHubError inspects common GitHub client errors and returns:
+//   - status code (0 if not an HTTP error)
+//   - isRateLimit: true when the error is a rate limit error (should not trigger auth refresh)
+//   - isAuthRelated: true when the error suggests token/installation problems (401/403/404/410/422)
+//
+// This keeps auth/installation handling reactive to actual failures and avoids unnecessary token creation.
+func classifyGitHubError(err error) (status int, isRateLimit bool, isAuthRelated bool) {
+	if err == nil {
+		return 0, false, false
+	}
+
+	var rlErr *github.RateLimitError
+	if errors.As(err, &rlErr) && rlErr.Response != nil {
+		return rlErr.Response.StatusCode, true, false
+	}
+
+	var er *github.ErrorResponse
+	if errors.As(err, &er) && er.Response != nil {
+		status = er.Response.StatusCode
+		switch status {
+		case 401, 403, 404, 410, 422:
+			return status, false, true
+		default:
+			return status, false, false
+		}
+	}
+
+	return 0, false, false
+}
 
 // IsRetryableError determines if an error is transient and should be retried.
 // It returns true for network errors, 5xx server errors, and rate limiting errors.

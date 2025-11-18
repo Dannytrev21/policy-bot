@@ -305,6 +305,65 @@ clients, err := b.InstallationManager.GetClients(ctx, installationID, repoFullNa
 - Supports multiple installations per organization
 - Repository-level lookup via `Installations.GetByRepository()`
 
+### Reactive Authentication Handling (NEW - November 2025)
+
+**Approach**: Token management is now completely reactive, relying on `ghinstallation.Transport` for lifecycle management:
+
+```go
+// HandleAuthFailure reacts to authentication errors
+func (b *Base) HandleAuthFailure(ctx context.Context, owner string, ownerID int64,
+    repo string, installationID int64, authErr error) (*InstallationClients, int64, error) {
+
+    status, isRateLimit, isAuth := classifyGitHubError(authErr)
+
+    // Rate limit errors pass through (no cache mutation)
+    if !isAuth || isRateLimit {
+        return nil, 0, authErr
+    }
+
+    // Clear stale cache entry
+    if b.ClientCache != nil && ownerID > 0 {
+        b.ClientCache.Invalidate(ownerID)
+        b.recordAuthRefreshMetric(MetricsKeyAuthRefreshCacheHit)
+    }
+
+    // 404/410: Negative cache and return
+    if status == 404 || status == 410 {
+        b.ClientCache.PutNegative(ownerID)
+        return nil, 0, authErr
+    }
+
+    // 401/403/422: Re-resolve and recreate clients
+    return b.retrieveClientAndInstallationId(ctx, 0, ownerID, owner, repo)
+}
+```
+
+**Key Principles:**
+1. **No Proactive Token Creation**: Never call `Apps.CreateInstallationToken` on cache hits
+2. **Let Transport Handle Tokens**: `ghinstallation.Transport` auto-refreshes 1 minute before expiry
+3. **React to Failures**: Only invalidate cache and recreate clients after auth failures
+4. **Preserve Rate Limits**: Never trigger refresh on rate limit errors (403 via RateLimitError)
+
+**Error Classification:**
+- `401 Unauthorized`: Token expired or invalid → Refresh
+- `403 Forbidden` (non-rate-limit): Permission issues → Refresh
+- `404 Not Found`: Installation deleted → Negative cache
+- `410 Gone`: Installation suspended → Negative cache
+- `422 Unprocessable`: Installation issues → Refresh
+- `403 Rate Limit`: API limit hit → Pass through (no refresh)
+
+**Telemetry:**
+- `installation.auth_refresh.attempt`: Refresh attempted
+- `installation.auth_refresh.success`: Refresh succeeded
+- `installation.auth_refresh.failure`: Refresh failed
+- `installation.auth_refresh.cache_evicted`: Cache entry cleared
+
+**Benefits:**
+- Eliminates unnecessary token creation (was ~1000/hour, now near zero)
+- Reduces GitHub API rate limit pressure
+- Faster cache hits (no token validation overhead)
+- Simpler code path (reactive vs proactive)
+
 ### Removed Infrastructure (Jan 2025)
 
 The following components were removed as part of the architectural simplification:

@@ -17,6 +17,8 @@ package handler
 import (
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +29,7 @@ import (
 	"github.com/shurcooL/githubv4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"net/http"
 )
 
 // MockInstallationsService is a mock implementation of githubapp.InstallationsService
@@ -371,6 +374,174 @@ func TestGetClientsByOwner_MultipleOrgs_CachedSeparately(t *testing.T) {
 	assert.Equal(t, clients2, cached2)
 	assert.Equal(t, installationID1, instID1, "Installation ID 1 should be cached")
 	assert.Equal(t, installationID2, instID2, "Installation ID 2 should be cached")
+}
+
+func TestGetClientsByOwner_SingleflightPreventsStampede(t *testing.T) {
+	ctx := zerolog.New(nil).WithContext(context.Background())
+	owner := "test-org"
+	ownerID := int64(9999)
+	installationID := int64(12345)
+
+	var lookupCalls atomic.Int32
+	mockInstallations := &MockInstallationsService{
+		getByOwnerFunc: func(ctx context.Context, o string) (githubapp.Installation, error) {
+			lookupCalls.Add(1)
+			time.Sleep(50 * time.Millisecond) // ensure overlap
+			return githubapp.Installation{
+				ID:      installationID,
+				Owner:   owner,
+				OwnerID: ownerID,
+			}, nil
+		},
+	}
+	mockCreator := NewMockRateLimitedClientCreator()
+
+	base := &Base{
+		ClientCreator:   mockCreator,
+		Installations:   mockInstallations,
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		GithubCloud:     true,
+		MetricsRegistry: gometrics.NewRegistry(),
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	concurrency := 5
+	errs := make([]error, concurrency)
+	results := make([]*InstallationClients, concurrency)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			var err error
+			results[idx], err = base.GetClientsByOwner(ctx, owner, ownerID)
+			errs[idx] = err
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	for _, err := range errs {
+		require.NoError(t, err)
+	}
+	for _, res := range results {
+		require.NotNil(t, res)
+		assert.NotNil(t, res.V3Client)
+		assert.NotNil(t, res.V4Client)
+	}
+
+	assert.Equal(t, int32(1), lookupCalls.Load(), "installation lookup should run once due to singleflight")
+	// Two client creations (v3 + v4) should have been recorded once.
+	require.Len(t, mockCreator.callLog, 2)
+}
+
+func TestHandleAuthFailure_RateLimitPassthrough(t *testing.T) {
+	ctx := zerolog.New(nil).WithContext(context.Background())
+	owner := "test-org"
+	ownerID := int64(5555)
+	installationID := int64(11111)
+
+	mockCreator := NewMockRateLimitedClientCreator()
+	registry := gometrics.NewRegistry()
+	base := &Base{
+		ClientCreator:   mockCreator,
+		Installations:   newMockInstallationsServiceForOwner(owner, installationID),
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		GithubCloud:     true,
+		MetricsRegistry: registry,
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	rateErr := &github.RateLimitError{Response: &http.Response{StatusCode: 403}}
+
+	clients, id, err := base.HandleAuthFailure(ctx, owner, ownerID, "", installationID, rateErr)
+
+	assert.Nil(t, clients)
+	assert.Equal(t, int64(0), id)
+	assert.Equal(t, rateErr, err)
+	assert.False(t, base.ClientCache.IsNegativelyCached(ownerID))
+	// Metrics should not increment on rate-limit path
+	if c := registry.Get(MetricsKeyAuthRefreshAttempt); c != nil {
+		assert.EqualValues(t, 0, c.(gometrics.Counter).Count())
+	}
+}
+
+func TestHandleAuthFailure_404NegativeCaches(t *testing.T) {
+	ctx := zerolog.New(nil).WithContext(context.Background())
+	owner := "test-org"
+	ownerID := int64(5555)
+	installationID := int64(11111)
+
+	mockCreator := NewMockRateLimitedClientCreator()
+	registry := gometrics.NewRegistry()
+	base := &Base{
+		ClientCreator:   mockCreator,
+		Installations:   newMockInstallationsServiceForOwner(owner, installationID),
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		GithubCloud:     true,
+		MetricsRegistry: registry,
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	errResp := &github.ErrorResponse{Response: &http.Response{StatusCode: 404}}
+
+	clients, id, err := base.HandleAuthFailure(ctx, owner, ownerID, "", installationID, errResp)
+
+	assert.Nil(t, clients)
+	assert.Equal(t, int64(0), id)
+	require.Error(t, err)
+	assert.True(t, base.ClientCache.IsNegativelyCached(ownerID))
+	assert.EqualValues(t, 1, registry.Get(MetricsKeyAuthRefreshAttempt).(gometrics.Counter).Count())
+	assert.EqualValues(t, 1, registry.Get(MetricsKeyAuthRefreshFailure).(gometrics.Counter).Count())
+}
+
+func TestHandleAuthFailure_AuthRefreshesClients(t *testing.T) {
+	ctx := zerolog.New(nil).WithContext(context.Background())
+	owner := "test-org"
+	ownerID := int64(5555)
+	installationID := int64(11111)
+
+	mockCreator := NewMockRateLimitedClientCreator()
+	registry := gometrics.NewRegistry()
+	base := &Base{
+		ClientCreator:   mockCreator,
+		Installations:   newMockInstallationsServiceForOwner(owner, installationID),
+		ClientCache:     NewClientCache(10*time.Minute, 1000),
+		GithubCloud:     true,
+		MetricsRegistry: registry,
+		Logger:          zerolog.Nop(),
+	}
+	base.Initialize()
+
+	// Seed cache with stale clients to ensure we invalidate and recreate.
+	staleClients := &InstallationClients{
+		V3Client: github.NewClient(nil),
+		V4Client: githubv4.NewClient(nil),
+	}
+	base.ClientCache.PutWithInstallationID(ownerID, staleClients, installationID)
+
+	authErr := &github.ErrorResponse{Response: &http.Response{StatusCode: 401}}
+
+	clients, id, err := base.HandleAuthFailure(ctx, owner, ownerID, "", installationID, authErr)
+
+	require.NoError(t, err)
+	assert.NotNil(t, clients)
+	assert.Equal(t, installationID, id)
+	assert.NotSame(t, staleClients.V3Client, clients.V3Client, "v3 client should be refreshed after auth failure")
+	assert.NotSame(t, staleClients.V4Client, clients.V4Client, "v4 client should be refreshed after auth failure")
+	assert.Len(t, mockCreator.callLog, 2, "rate-limited creator should have been invoked for v3 and v4")
+
+	cached, cachedID := base.ClientCache.GetWithInstallationID(ownerID)
+	assert.Equal(t, clients, cached)
+	assert.Equal(t, installationID, cachedID)
+	assert.EqualValues(t, 1, registry.Get(MetricsKeyAuthRefreshAttempt).(gometrics.Counter).Count())
+	assert.EqualValues(t, 1, registry.Get(MetricsKeyAuthRefreshSuccess).(gometrics.Counter).Count())
 }
 
 // TestGetClientsByOwner_WithOwnerID_CacheHit tests owner ID-based cache lookup
