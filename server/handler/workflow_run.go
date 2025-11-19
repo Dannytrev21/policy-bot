@@ -38,6 +38,7 @@ func (h *WorkflowRun) Handle(ctx context.Context, eventType, deliveryID string, 
 	if err := json.Unmarshal(payload, &event); err != nil {
 		return errors.Wrap(err, "failed to parse workflow_run event payload")
 	}
+	ownerID := GetOwnerIDFromEvent(&event)
 
 	if event.GetAction() != "completed" {
 		return nil
@@ -67,10 +68,11 @@ func (h *WorkflowRun) Handle(ctx context.Context, eventType, deliveryID string, 
 		}
 
 		if err := h.Evaluate(ctx, installationID, common.TriggerStatus, pull.Locator{
-			Owner:  ownerName,
-			Repo:   repoName,
-			Number: pr.GetNumber(),
-			Value:  pr,
+			Owner:   ownerName,
+			Repo:    repoName,
+			Number:  pr.GetNumber(),
+			Value:   pr,
+			OwnerID: ownerID,
 		}); err != nil {
 			evaluationFailures++
 			logger.Error().Err(err).Msgf("Failed to evaluate pull request '%d' for SHA '%s'", pr.GetNumber(), commitSHA)

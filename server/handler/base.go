@@ -17,6 +17,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"reflect"
 	"sync"
 	"time"
@@ -37,8 +38,17 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+type contextKey string
+
 const (
-	LogKeyGitHubSHA = "github_sha"
+	LogKeyGitHubSHA     = "github_sha"
+	LogKeyGitHubOwnerID = "github_owner_id"
+)
+
+const (
+	contextKeyGitHubOwnerID  contextKey = "github_owner_id"
+	contextKeySQSEventSource            = "sqs_event_source"
+	contextKeySQSQueueName              = "sqs_queue_name"
 
 	// Metric keys for installation client creation
 	MetricsKeyInstallationClientSuccess   = "installation.client.success"
@@ -47,10 +57,13 @@ const (
 	MetricsKeyInstallationV4ClientFailure = "installation.v4client.failure"
 
 	// Metrics for reactive auth refresh
-	MetricsKeyAuthRefreshAttempt  = "installation.auth_refresh.attempt"
-	MetricsKeyAuthRefreshSuccess  = "installation.auth_refresh.success"
-	MetricsKeyAuthRefreshFailure  = "installation.auth_refresh.failure"
-	MetricsKeyAuthRefreshCacheHit = "installation.auth_refresh.cache_evicted"
+	MetricsKeyAuthRefreshAttempt    = "installation.auth_refresh.attempt"
+	MetricsKeyAuthRefreshSuccess    = "installation.auth_refresh.success"
+	MetricsKeyAuthRefreshFailure    = "installation.auth_refresh.failure"
+	MetricsKeyAuthRefreshCacheHit   = "installation.auth_refresh.cache_evicted"
+	MetricsKeySQSAuthRefreshAttempt = "sqs.auth_refresh.attempt"
+	MetricsKeySQSAuthRefreshSuccess = "sqs.auth_refresh.success"
+	MetricsKeySQSAuthRefreshFailure = "sqs.auth_refresh.failure"
 )
 
 // OrgClientCreator defines the interface for creating per-org rate-limited clients.
@@ -95,6 +108,17 @@ type Base struct {
 	DefaultFetchedConfig *FetchedConfig
 	mu                   *sync.RWMutex
 	clientSingleflight   singleflight.Group
+
+	// test hooks
+	authRefreshOverride func(ctx context.Context, owner string, ownerID int64, repo string, installationID int64, authErr error) (*InstallationClients, int64, error)
+}
+
+// AuthMetadata carries GitHub identity information required for auth refresh operations.
+type AuthMetadata struct {
+	Owner          string
+	OwnerID        int64
+	Repo           string
+	InstallationID int64
 }
 
 func (base *Base) Initialize() {
@@ -179,6 +203,20 @@ func (b *Base) recordAuthRefreshMetric(metricKey string) {
 	gometrics.GetOrRegisterCounter(metricKey, b.MetricsRegistry).Inc(1)
 }
 
+// recordSQSAuthMetric records metrics scoped to SQS processing (detected via context values).
+func (b *Base) recordSQSAuthMetric(ctx context.Context, metricKey string) {
+	if b.MetricsRegistry == nil {
+		return
+	}
+	if ctx == nil {
+		return
+	}
+	if source, ok := ctx.Value(contextKeySQSEventSource).(string); !ok || source != "sqs" {
+		return
+	}
+	gometrics.GetOrRegisterCounter(metricKey, b.MetricsRegistry).Inc(1)
+}
+
 // VerifyInstallation checks if the GitHub App is installed for the given installation ID.
 // It returns true if the installation exists and is accessible, false otherwise.
 // This method helps prevent 404 errors by verifying installation status before attempting
@@ -251,7 +289,16 @@ func PostStatus(ctx context.Context, client *github.Client, owner, repo, ref str
 func (b *Base) PreparePRContext(ctx context.Context, installationID int64, pr *github.PullRequest) (context.Context, zerolog.Logger) {
 	ctx, logger := githubapp.PreparePRContext(ctx, installationID, pr.GetBase().GetRepo(), pr.GetNumber())
 
+	ownerID := int64(0)
+	if pr != nil && pr.GetBase() != nil && pr.GetBase().GetRepo() != nil && pr.GetBase().GetRepo().GetOwner() != nil {
+		ownerID = pr.GetBase().GetRepo().GetOwner().GetID()
+	}
+
 	logger = logger.With().Str(LogKeyGitHubSHA, pr.GetHead().GetSHA()).Logger()
+	if ownerID > 0 {
+		logger = logger.With().Int64(LogKeyGitHubOwnerID, ownerID).Logger()
+		ctx = context.WithValue(ctx, contextKeyGitHubOwnerID, ownerID)
+	}
 	ctx = logger.WithContext(ctx)
 
 	return ctx, logger
@@ -296,12 +343,20 @@ func (b *Base) NewEvalContext(ctx context.Context, installationID int64, loc pul
 	if b.GithubCloud && loc.Owner != "" {
 		// GHEC: Use simplified owner-based lookup with per-org caching
 		// This is correct since there's ONE installation per org in GHEC
-		span.SetAttributes(
+		lookupAttrs := []attribute.KeyValue{
 			attribute.String("lookup.type", "owner_based"),
 			attribute.String("lookup.owner", loc.Owner),
-		)
+		}
+		if loc.OwnerID > 0 {
+			lookupAttrs = append(lookupAttrs, attribute.Int64("lookup.owner_id", loc.OwnerID))
+		}
+		span.SetAttributes(lookupAttrs...)
 
-		clients, err = b.GetClientsByOwner(ctx, loc.Owner)
+		if loc.OwnerID > 0 {
+			clients, err = b.GetClientsByOwner(ctx, loc.Owner, loc.OwnerID)
+		} else {
+			clients, err = b.GetClientsByOwner(ctx, loc.Owner)
+		}
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "failed to get clients by owner")
@@ -336,29 +391,51 @@ func (b *Base) NewEvalContext(ctx context.Context, installationID int64, loc pul
 
 	span.AddEvent("clients_created")
 
-	mbrCtx := NewCrossOrgMembershipContext(ctx, clients.V3Client, loc.Owner, b.Installations, b.ClientCreator)
-	prctx, err := pull.NewGitHubContext(ctx, mbrCtx, clients.V3Client, clients.V4Client, loc)
+	meta := AuthMetadata{
+		Owner:          loc.Owner,
+		OwnerID:        loc.OwnerID,
+		Repo:           loc.Repo,
+		InstallationID: installationID,
+	}
+
+	var prctx pull.Context
+	var fetchedConfig FetchedConfig
+
+	clients, err = b.WithAuthRefresh(ctx, meta, clients, func(active *InstallationClients) error {
+		mbrCtx := NewCrossOrgMembershipContext(ctx, active.V3Client, loc.Owner, b.Installations, b.ClientCreator)
+		pc, err := pull.NewGitHubContext(ctx, mbrCtx, active.V3Client, active.V4Client, loc)
+		if err != nil {
+			return err
+		}
+		baseBranch, _ := pc.Branches()
+		owner := pc.RepositoryOwner()
+		repository := pc.RepositoryName()
+
+		fetchedConfig = b.ConfigFetcher.ConfigForRepositoryBranch(ctx, active.V3Client, owner, repository, baseBranch)
+		prctx = pc
+
+		span.AddEvent("pull_context_created")
+		span.SetAttributes(
+			attribute.String("repository.base_branch", baseBranch),
+			attribute.Bool("config.fetched", fetchedConfig.Config != nil),
+		)
+		return nil
+	})
 	if err != nil {
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to create pull context")
+		span.SetStatus(codes.Error, "failed to prepare evaluation context")
 		return nil, err
 	}
-	span.AddEvent("pull_context_created")
-
-	baseBranch, _ := prctx.Branches()
-	owner := prctx.RepositoryOwner()
-	repository := prctx.RepositoryName()
-
-	fetchedConfig := b.ConfigFetcher.ConfigForRepositoryBranch(ctx, clients.V3Client, owner, repository, baseBranch)
-	span.SetAttributes(
-		attribute.String("repository.base_branch", baseBranch),
-		attribute.Bool("config.fetched", fetchedConfig.Config != nil),
-	)
 
 	span.SetStatus(codes.Ok, "eval context created successfully")
 	return &EvalContext{
-		Client:   clients.V3Client,
-		V4Client: clients.V4Client,
+		Base:                b,
+		InstallationID:      installationID,
+		Client:              clients.V3Client,
+		V4Client:            clients.V4Client,
+		OwnerID:             loc.OwnerID,
+		installationClients: clients,
+		postStatusFunc:      PostStatus,
 
 		Options:   b.PullOpts,
 		PublicURL: b.BaseConfig.PublicURL,
@@ -745,6 +822,18 @@ func (b *Base) retrieveClientAndInstallationId(ctx context.Context, installation
 
 		finalInstallationID, resolveErr := b.resolveInstallationID(ctx, installationID, ownerID, ownerName, repo)
 		if resolveErr != nil {
+			// Apply negative caching for 404/410 errors (installation not found/removed)
+			status, _, isAuth := classifyGitHubError(resolveErr)
+			if isAuth && (status == 404 || status == 410) {
+				if b.ClientCache != nil && ownerID > 0 {
+					b.ClientCache.PutNegative(ownerID)
+					logger.Debug().
+						Str("owner", ownerName).
+						Int64("owner_id", ownerID).
+						Int("status", status).
+						Msg("Added negative cache entry for installation lookup failure")
+				}
+			}
 			return nil, resolveErr
 		}
 
@@ -754,6 +843,19 @@ func (b *Base) retrieveClientAndInstallationId(ctx context.Context, installation
 				Str("owner", ownerName).
 				Int64("installation_id", finalInstallationID).
 				Msg("Failed to create clients for installation")
+
+			// Apply negative caching for 404/410 errors (installation removed after lookup)
+			status, _, isAuth := classifyGitHubError(createErr)
+			if isAuth && (status == 404 || status == 410) {
+				if b.ClientCache != nil && ownerID > 0 {
+					b.ClientCache.PutNegative(ownerID)
+					logger.Debug().
+						Str("owner", ownerName).
+						Int64("owner_id", ownerID).
+						Int("status", status).
+						Msg("Added negative cache entry for client creation failure")
+				}
+			}
 			return nil, errors.Wrapf(createErr, "failed to create clients for owner %s (installation %d)", ownerName, finalInstallationID)
 		}
 
@@ -820,6 +922,77 @@ func (b *Base) HandleAuthFailure(ctx context.Context, owner string, ownerID int6
 	}
 	b.recordAuthRefreshMetric(MetricsKeyAuthRefreshSuccess)
 	return clients, refreshedID, nil
+}
+
+// WithAuthRefresh executes the provided API call and retries once if it fails with an auth-related error.
+// The returned InstallationClients pointer reflects the latest clients (original or refreshed).
+func (b *Base) WithAuthRefresh(ctx context.Context, meta AuthMetadata, clients *InstallationClients, call func(*InstallationClients) error) (*InstallationClients, error) {
+	if clients == nil {
+		return nil, errors.New("installation clients cannot be nil")
+	}
+	if call == nil {
+		return clients, nil
+	}
+
+	err := call(clients)
+	if err == nil {
+		return clients, nil
+	}
+
+	_, isRateLimit, isAuth := classifyGitHubError(err)
+	if !isAuth || isRateLimit {
+		return clients, err
+	}
+
+	b.recordSQSAuthMetric(ctx, MetricsKeySQSAuthRefreshAttempt)
+
+	refreshFn := b.HandleAuthFailure
+	if b.authRefreshOverride != nil {
+		refreshFn = b.authRefreshOverride
+	}
+
+	refreshedClients, refreshedID, refreshErr := refreshFn(ctx, meta.Owner, meta.OwnerID, meta.Repo, meta.InstallationID, err)
+	if refreshErr != nil {
+		b.recordSQSAuthMetric(ctx, MetricsKeySQSAuthRefreshFailure)
+		return clients, b.newAuthRefreshError(refreshErr)
+	}
+	if refreshedClients == nil {
+		nilErr := errors.New("auth refresh returned nil clients")
+		b.recordSQSAuthMetric(ctx, MetricsKeySQSAuthRefreshFailure)
+		return clients, b.newAuthRefreshError(nilErr)
+	}
+	if refreshedID != 0 {
+		meta.InstallationID = refreshedID
+	}
+
+	b.recordSQSAuthMetric(ctx, MetricsKeySQSAuthRefreshSuccess)
+
+	retryErr := call(refreshedClients)
+	if retryErr != nil {
+		_, retryRateLimit, retryAuth := classifyGitHubError(retryErr)
+		if retryAuth && !retryRateLimit {
+			return refreshedClients, b.newAuthRefreshError(retryErr)
+		}
+		return refreshedClients, retryErr
+	}
+
+	return refreshedClients, nil
+}
+
+func (b *Base) newAuthRefreshError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	status, _, isAuth := classifyGitHubError(err)
+	permanent := false
+	if isAuth && (status == http.StatusNotFound || status == http.StatusGone) {
+		permanent = true
+	}
+	return &AuthRefreshError{
+		Permanent: permanent,
+		Err:       err,
+	}
 }
 
 // GetClientsForEvent retrieves installation clients using cached lookups when possible.

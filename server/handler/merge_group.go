@@ -100,6 +100,7 @@ func (h *MergeGroup) Handle(ctx context.Context, eventType, devlieryID string, p
 	if err := json.Unmarshal(payload, &event); err != nil {
 		return errors.Wrap(err, "failed to parse merge group event payload")
 	}
+	ownerID := GetOwnerIDFromEvent(&event)
 
 	if event.GetAction() != "checks_requested" {
 		return nil
@@ -110,7 +111,7 @@ func (h *MergeGroup) Handle(ctx context.Context, eventType, devlieryID string, p
 	owner := event.GetRepo().GetOwner().GetLogin()
 
 	// Use cached client lookup instead of creating uncached client
-	clients, err := h.GetClientsForEvent(ctx, owner, installationID)
+	clients, err := h.GetClientsForEvent(ctx, owner, installationID, ownerID)
 	if err != nil {
 		return err
 	}
@@ -130,21 +131,35 @@ func (h *MergeGroup) Handle(ctx context.Context, eventType, devlieryID string, p
 	contextWithBranch := fmt.Sprintf("%s: %s", h.PullOpts.StatusCheckContext, baseBranch)
 	state := "success"
 	message := fmt.Sprintf("%s previously approved original pull request.", h.AppName)
-	status := &github.RepoStatus{
+	status := github.RepoStatus{
 		Context:     &contextWithBranch,
 		State:       &state,
 		Description: &message,
 	}
 
-	if err := PostStatus(ctx, clients.V3Client, owner, repository, headSHA, status); err != nil {
-		logger.Err(errors.WithStack(err)).Msg("Failed to post status check for merge group")
+	meta := AuthMetadata{
+		Owner:          owner,
+		OwnerID:        ownerID,
+		Repo:           repository,
+		InstallationID: installationID,
 	}
 
-	if h.PullOpts.PostInsecureStatusChecks {
-		status.Context = github.String(h.PullOpts.StatusCheckContext)
-		if err := PostStatus(ctx, clients.V3Client, owner, repository, headSHA, status); err != nil {
-			logger.Err(err).Msg("Failed to post insecure repo status")
+	postStatuses := func(active *InstallationClients) error {
+		if err := PostStatus(ctx, active.V3Client, owner, repository, headSHA, &status); err != nil {
+			return err
 		}
+		if h.PullOpts.PostInsecureStatusChecks {
+			insecureStatus := status
+			insecureStatus.Context = github.String(h.PullOpts.StatusCheckContext)
+			if err := PostStatus(ctx, active.V3Client, owner, repository, headSHA, &insecureStatus); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if _, err := h.WithAuthRefresh(ctx, meta, clients, postStatuses); err != nil {
+		logger.Err(errors.WithStack(err)).Msg("Failed to post status check for merge group")
 	}
 
 	return nil

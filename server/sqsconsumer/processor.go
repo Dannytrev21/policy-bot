@@ -17,6 +17,7 @@ package sqsconsumer
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -79,11 +80,11 @@ type SQSMessage struct {
 
 // ProcessorConfig contains configuration for the SQS message processor
 type ProcessorConfig struct {
-	EnableRetry        bool
-	MaxRetries         int
-	VisibilityTimeout  int
-	ProcessingMode     string // "scheduler" or "direct"
-	EnableCircuitBreaker bool // Enable circuit breaker for resilience
+	EnableRetry          bool
+	MaxRetries           int
+	VisibilityTimeout    int
+	ProcessingMode       string                // "scheduler" or "direct"
+	EnableCircuitBreaker bool                  // Enable circuit breaker for resilience
 	CircuitBreakerConfig *CircuitBreakerConfig // Optional custom circuit breaker config
 }
 
@@ -374,6 +375,16 @@ func (p *Processor) ProcessMessage(ctx context.Context, eventType, queueURL stri
 		isNotFound := policyhandler.IsInstallationNotFoundError(err)
 		isAuth := policyhandler.IsAuthenticationError(err)
 
+		var authRefreshErr *policyhandler.AuthRefreshError
+		if stderrors.As(err, &authRefreshErr) {
+			isAuth = true
+			if authRefreshErr.Permanent {
+				isRetryable = false
+			} else {
+				isRetryable = true
+			}
+		}
+
 		// Add error classification to span
 		span.SetAttributes(
 			attribute.Bool("error.retryable", isRetryable),
@@ -388,10 +399,17 @@ func (p *Processor) ProcessMessage(ctx context.Context, eventType, queueURL stri
 				Bool("retryable", false).
 				Msg("GitHub App not installed on repository - will not retry")
 		} else if isAuth {
-			msgLogger.Warn().
-				Err(err).
-				Bool("retryable", false).
-				Msg("Authentication/authorization error - will not retry")
+			if authRefreshErr != nil {
+				msgLogger.Warn().
+					Err(authRefreshErr).
+					Bool("retryable", !authRefreshErr.Permanent).
+					Msg("Authentication refresh failed - governed by auth refresh error type")
+			} else {
+				msgLogger.Warn().
+					Err(err).
+					Bool("retryable", false).
+					Msg("Authentication/authorization error - will not retry")
+			}
 		} else if isRetryable {
 			msgLogger.Warn().
 				Err(err).
@@ -399,14 +417,14 @@ func (p *Processor) ProcessMessage(ctx context.Context, eventType, queueURL stri
 				Int("retry_count", sqsMsg.RetryCount).
 				Msg("Transient error processing GitHub event - will retry")
 		} else {
-			msgLogger.Error().
+			msgLogger.Warn().
 				Err(err).
 				Bool("retryable", false).
 				Msg("Permanent error processing GitHub event - will not retry")
 		}
 
 		// Set span status based on error type
-		if isNotFound || isAuth {
+		if isNotFound || (isAuth && !isRetryable) {
 			span.SetStatus(codes.Error, "non-retryable error")
 		} else if isRetryable {
 			span.SetStatus(codes.Error, "retryable error")

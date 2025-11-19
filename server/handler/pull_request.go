@@ -39,6 +39,7 @@ func (h *PullRequest) Handle(ctx context.Context, eventType, deliveryID string, 
 		return errors.Wrap(err, "failed to parse pull request event payload")
 	}
 
+	ownerID := GetOwnerIDFromEvent(&event)
 	installationID := githubapp.GetInstallationIDFromEvent(&event)
 	ctx, _ = h.PreparePRContext(ctx, installationID, event.GetPullRequest())
 
@@ -57,9 +58,10 @@ func (h *PullRequest) Handle(ctx context.Context, eventType, deliveryID string, 
 	}
 
 	return h.Evaluate(ctx, installationID, t, pull.Locator{
-		Owner:  event.GetRepo().GetOwner().GetLogin(),
-		Repo:   event.GetRepo().GetName(),
-		Number: event.GetPullRequest().GetNumber(),
-		Value:  event.GetPullRequest(),
+		Owner:   event.GetRepo().GetOwner().GetLogin(),
+		Repo:    event.GetRepo().GetName(),
+		Number:  event.GetPullRequest().GetNumber(),
+		Value:   event.GetPullRequest(),
+		OwnerID: ownerID,
 	})
 }

@@ -33,8 +33,13 @@ import (
 // request or event, then call the appropriate methods for each stage of
 // evaluation. Handlers with no special requirements can simply call Evaluate.
 type EvalContext struct {
-	Client   *github.Client
-	V4Client *githubv4.Client
+	Base                *Base
+	InstallationID      int64
+	Client              *github.Client
+	V4Client            *githubv4.Client
+	OwnerID             int64
+	installationClients *InstallationClients
+	postStatusFunc      func(context.Context, *github.Client, string, string, string, *github.RepoStatus) error
 
 	Options   *PullEvaluationOptions
 	PublicURL string
@@ -204,13 +209,61 @@ func (ec *EvalContext) PostStatus(ctx context.Context, state, message string) {
 		return
 	}
 
-	if err := PostStatus(ctx, ec.Client, owner, repo, sha, &status); err != nil {
-		logger.Err(err).Msg("Failed to post repo status")
+	if !ec.PullContext.IsOpen() {
+		logger.Info().Msg("Skipping status update because PR state is not open")
+		return
 	}
-	if ec.Options.PostInsecureStatusChecks {
-		status.Context = github.String(ec.Options.StatusCheckContext)
-		if err := PostStatus(ctx, ec.Client, owner, repo, sha, &status); err != nil {
-			logger.Err(err).Msg("Failed to post insecure repo status")
+
+	postFunc := ec.postStatusFunc
+	if postFunc == nil {
+		postFunc = PostStatus
+	}
+
+	runStatuses := func(client *github.Client) error {
+		if err := postFunc(ctx, client, owner, repo, sha, &status); err != nil {
+			return err
+		}
+		if ec.Options.PostInsecureStatusChecks {
+			insecureStatus := status
+			insecureStatus.Context = github.String(ec.Options.StatusCheckContext)
+			if err := postFunc(ctx, client, owner, repo, sha, &insecureStatus); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if ec.Base == nil {
+		if err := runStatuses(ec.Client); err != nil {
+			logger.Err(err).Msg("Failed to post repo status")
+		}
+		return
+	}
+
+	meta := AuthMetadata{
+		Owner:          owner,
+		OwnerID:        ec.OwnerID,
+		Repo:           repo,
+		InstallationID: ec.InstallationID,
+	}
+
+	currentClients := ec.installationClients
+	if currentClients == nil {
+		currentClients = &InstallationClients{
+			V3Client: ec.Client,
+			V4Client: ec.V4Client,
 		}
 	}
+
+	updatedClients, err := ec.Base.WithAuthRefresh(ctx, meta, currentClients, func(active *InstallationClients) error {
+		return runStatuses(active.V3Client)
+	})
+	if err != nil {
+		logger.Err(err).Msg("Failed to post repo status")
+		return
+	}
+
+	ec.installationClients = updatedClients
+	ec.Client = updatedClients.V3Client
+	ec.V4Client = updatedClients.V4Client
 }

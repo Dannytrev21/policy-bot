@@ -40,20 +40,21 @@ func (h *Status) Handle(ctx context.Context, eventType, deliveryID string, paylo
 	if err := json.Unmarshal(payload, &event); err != nil {
 		return errors.Wrap(err, "failed to parse status event payload")
 	}
+	ownerID := GetOwnerIDFromEvent(&event)
 
 	ownContext := h.PullOpts.StatusCheckContext
 	if event.GetContext() == ownContext || strings.HasPrefix(event.GetContext(), ownContext+":") {
-		return h.processOwn(ctx, event)
+		return h.processOwn(ctx, event, ownerID)
 	}
 
 	if event.GetState() == "success" {
-		return h.processOthers(ctx, event)
+		return h.processOthers(ctx, event, ownerID)
 	}
 
 	return nil
 }
 
-func (h *Status) processOwn(ctx context.Context, event github.StatusEvent) error {
+func (h *Status) processOwn(ctx context.Context, event github.StatusEvent, ownerID int64) error {
 	repo := event.GetRepo()
 	ownerName := repo.GetOwner().GetLogin()
 	repoName := repo.GetName()
@@ -61,7 +62,7 @@ func (h *Status) processOwn(ctx context.Context, event github.StatusEvent) error
 	installationID := githubapp.GetInstallationIDFromEvent(&event)
 
 	// Use cached client lookup instead of creating uncached client
-	clients, err := h.GetClientsForEvent(ctx, ownerName, installationID)
+	clients, err := h.GetClientsForEvent(ctx, ownerName, installationID, ownerID)
 	if err != nil {
 		return err
 	}
@@ -91,17 +92,27 @@ func (h *Status) processOwn(ctx context.Context, event github.StatusEvent) error
 	// unlike in other code, use a single context here because we want to
 	// replace a forged context with a failure, not post a general status
 	// if multiple contexts are forged, we will handle multiple events
-	status := &github.RepoStatus{
+	status := github.RepoStatus{
 		Context:     event.Context,
 		State:       github.String("failure"),
 		Description: &desc,
 	}
 
-	_, _, err = clients.V3Client.Repositories.CreateStatus(ctx, ownerName, repoName, commitSHA, status)
+	meta := AuthMetadata{
+		Owner:          ownerName,
+		OwnerID:        ownerID,
+		Repo:           repoName,
+		InstallationID: installationID,
+	}
+
+	_, err = h.WithAuthRefresh(ctx, meta, clients, func(active *InstallationClients) error {
+		_, _, callErr := active.V3Client.Repositories.CreateStatus(ctx, ownerName, repoName, commitSHA, &status)
+		return callErr
+	})
 	return err
 }
 
-func (h *Status) processOthers(ctx context.Context, event github.StatusEvent) error {
+func (h *Status) processOthers(ctx context.Context, event github.StatusEvent, ownerID int64) error {
 	repo := event.GetRepo()
 	ownerName := repo.GetOwner().GetLogin()
 	repoName := repo.GetName()
@@ -109,7 +120,7 @@ func (h *Status) processOthers(ctx context.Context, event github.StatusEvent) er
 	installationID := githubapp.GetInstallationIDFromEvent(&event)
 
 	// Use cached client lookup instead of creating uncached client
-	clients, err := h.GetClientsForEvent(ctx, ownerName, installationID)
+	clients, err := h.GetClientsForEvent(ctx, ownerName, installationID, ownerID)
 	if err != nil {
 		return err
 	}
@@ -118,14 +129,28 @@ func (h *Status) processOthers(ctx context.Context, event github.StatusEvent) er
 
 	// In practice, there should be well under 100 PRs for a given commit. In exceptional cases, if there are
 	// more than 100 PRs, only process the most recent 100.
-	prs, _, err := clients.V3Client.PullRequests.ListPullRequestsWithCommit(
-		ctx,
-		ownerName,
-		repoName,
-		commitSHA,
-		&github.PullRequestListOptions{
-			ListOptions: github.ListOptions{PerPage: 100},
-		})
+	meta := AuthMetadata{
+		Owner:          ownerName,
+		OwnerID:        ownerID,
+		Repo:           repoName,
+		InstallationID: installationID,
+	}
+	var prs []*github.PullRequest
+	clients, err = h.WithAuthRefresh(ctx, meta, clients, func(active *InstallationClients) error {
+		result, _, listErr := active.V3Client.PullRequests.ListPullRequestsWithCommit(
+			ctx,
+			ownerName,
+			repoName,
+			commitSHA,
+			&github.PullRequestListOptions{
+				ListOptions: github.ListOptions{PerPage: 100},
+			})
+		if listErr != nil {
+			return listErr
+		}
+		prs = result
+		return nil
+	})
 	if err != nil {
 		return errors.Wrapf(err, "failed to list pull requests for SHA %s", commitSHA)
 	}
@@ -135,10 +160,11 @@ func (h *Status) processOthers(ctx context.Context, event github.StatusEvent) er
 	for _, pr := range prs {
 		if pr.GetState() == "open" {
 			err = h.Evaluate(ctx, installationID, common.TriggerStatus, pull.Locator{
-				Owner:  ownerName,
-				Repo:   repoName,
-				Number: pr.GetNumber(),
-				Value:  pr,
+				Owner:   ownerName,
+				Repo:    repoName,
+				Number:  pr.GetNumber(),
+				Value:   pr,
+				OwnerID: ownerID,
 			})
 			if err != nil {
 				evaluationFailures++

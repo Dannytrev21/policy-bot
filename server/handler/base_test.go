@@ -83,8 +83,6 @@ func createTestBase(mockCreator githubapp.ClientCreator) *Base {
 	return base
 }
 
-
-
 func TestBase_VerifyInstallation_AppClientCreationFails(t *testing.T) {
 	// Setup
 	ctx := zerolog.New(nil).WithContext(context.Background())
@@ -136,6 +134,21 @@ func TestBase_Initialize_DoesNotOverwrite(t *testing.T) {
 	assert.Equal(t, existingManager, base.InstallationManager, "Initialize should not overwrite existing InstallationManager")
 }
 
+func TestBase_PreparePRContext_AttachesOwnerID(t *testing.T) {
+	base := &Base{}
+	base.Initialize()
+
+	ctx := zerolog.New(nil).WithContext(context.Background())
+	ownerID := int64(7890)
+	pr := newTestPullRequest("test-owner", ownerID, "test-repo", 1)
+
+	ctx, _ = base.PreparePRContext(ctx, 123, pr)
+
+	value := ctx.Value(contextKeyGitHubOwnerID)
+	require.NotNil(t, value, "owner ID should be stored in context")
+	assert.Equal(t, ownerID, value.(int64), "owner ID in context should match pull request owner")
+}
+
 func TestBase_NewEvalContext_InstallationNotFound(t *testing.T) {
 	// This test verifies that NewEvalContext returns an error when installation is not found
 	ctx := zerolog.New(nil).WithContext(context.Background())
@@ -160,9 +173,6 @@ func TestBase_NewEvalContext_InstallationNotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found or not accessible", "Error should indicate installation not found")
 	assert.Contains(t, err.Error(), "test-owner/test-repo", "Error should include repository information")
 }
-
-
-
 
 // MockClientCreatorWithV4Error extends MockClientCreator to allow testing v4 client errors
 type MockClientCreatorWithV4Error struct {
@@ -228,6 +238,52 @@ func TestBase_RecordInstallationClientMetric(t *testing.T) {
 		if c, ok := counter.(interface{ Count() int64 }); ok {
 			assert.Equal(t, int64(2), c.Count(), "V3 client success metric should be 2 after second increment")
 		}
+	}
+}
+
+func newTestPullRequest(owner string, ownerID int64, repo string, number int) *github.PullRequest {
+	createdAt := time.Now()
+	state := "open"
+	baseRef := "main"
+	headRef := "feature"
+	headSHA := "abc123"
+
+	baseRepo := &github.Repository{
+		ID:   github.Int64(101),
+		Name: github.String(repo),
+		Owner: &github.User{
+			Login: github.String(owner),
+			ID:    github.Int64(ownerID),
+		},
+	}
+
+	headRepo := &github.Repository{
+		ID:   github.Int64(202),
+		Name: github.String(repo),
+		Owner: &github.User{
+			Login: github.String(owner),
+			ID:    github.Int64(ownerID),
+		},
+	}
+
+	return &github.PullRequest{
+		Number:    github.Int(number),
+		Title:     github.String("test pr"),
+		Draft:     github.Bool(false),
+		CreatedAt: &createdAt,
+		State:     github.String(state),
+		User: &github.User{
+			Login: github.String("author"),
+		},
+		Base: &github.PullRequestBranch{
+			Ref:  github.String(baseRef),
+			Repo: baseRepo,
+		},
+		Head: &github.PullRequestBranch{
+			Ref:  github.String(headRef),
+			SHA:  github.String(headSHA),
+			Repo: headRepo,
+		},
 	}
 }
 
@@ -389,11 +445,11 @@ func TestBase_IsOurApp_BothZero(t *testing.T) {
 func TestBase_IsOurApp_RealWorldScenarios(t *testing.T) {
 	// Test with real GitHub App IDs
 	tests := []struct {
-		name          string
-		ourAppID      int64
-		sourceAppID   int64
-		expected      bool
-		description   string
+		name        string
+		ourAppID    int64
+		sourceAppID int64
+		expected    bool
+		description string
 	}{
 		{
 			name:        "PolicyBot event",

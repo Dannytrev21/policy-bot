@@ -102,11 +102,11 @@ func IsRetryableError(err error) bool {
 	// Check for non-retryable error patterns
 	// These are permanent failures that won't be fixed by retrying
 	nonRetryablePatterns := []string{
-		"404",         // Not Found - installation doesn't exist
-		"401",         // Unauthorized - bad credentials
-		"403",         // Forbidden - insufficient permissions
-		"422",         // Unprocessable Entity - bad request
-		"not found",   // Generic not found
+		"404",       // Not Found - installation doesn't exist
+		"401",       // Unauthorized - bad credentials
+		"403",       // Forbidden - insufficient permissions
+		"422",       // Unprocessable Entity - bad request
+		"not found", // Generic not found
 		"unauthorized",
 		"forbidden",
 		"bad request",
@@ -152,4 +152,26 @@ func IsAuthenticationError(err error) bool {
 		strings.Contains(errMsg, "403") ||
 		strings.Contains(errMsg, "unauthorized") ||
 		strings.Contains(errMsg, "forbidden")
+}
+
+// AuthRefreshError is returned when the auth refresh helper fails to recover
+// a GitHub client and needs the caller to take further action.
+// Permanent indicates whether the failure is non-retryable (installation deleted).
+type AuthRefreshError struct {
+	Permanent bool
+	Err       error
+}
+
+func (e *AuthRefreshError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
+func (e *AuthRefreshError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }

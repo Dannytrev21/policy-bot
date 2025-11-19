@@ -15,9 +15,12 @@
 package handler
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
+	"github.com/google/go-github/v47/github"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -180,6 +183,40 @@ func TestInstallation_Handle_DeletedAction_CacheInvalidation(t *testing.T) {
 	// Verify cache was cleared
 	cachedClients = base.ClientCache.Get(ownerID)
 	assert.Nil(t, cachedClients, "Clients should be removed from cache")
+}
+
+func TestInstallationHandleDeletedEventInvalidatesClientCacheWithOwnerID(t *testing.T) {
+	base := &Base{}
+	base.Initialize()
+
+	owner := "deleted-org"
+	ownerID := int64(4242)
+	installationID := int64(9898)
+
+	testClients := &InstallationClients{}
+	base.ClientCache.PutWithInstallationID(ownerID, testClients, installationID)
+
+	handler := &Installation{}
+	handler.Base = *base
+
+	event := &github.InstallationEvent{
+		Action: github.String("deleted"),
+		Installation: &github.Installation{
+			ID: github.Int64(installationID),
+			Account: &github.User{
+				Login: github.String(owner),
+				ID:    github.Int64(ownerID),
+			},
+		},
+	}
+
+	payload, err := json.Marshal(event)
+	require.NoError(t, err, "failed to marshal installation event")
+
+	err = handler.Handle(context.Background(), "installation", "delivery", payload)
+	require.NoError(t, err, "handler should process deleted installation event")
+
+	assert.Nil(t, handler.ClientCache.Get(ownerID), "owner cache entry should be invalidated")
 }
 
 // TestInstallation_Handle_RepositoriesAdded tests repositories added event cache population

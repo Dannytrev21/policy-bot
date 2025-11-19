@@ -37,6 +37,7 @@ func (h *CheckRun) Handle(ctx context.Context, eventType, deliveryID string, pay
 		return errors.Wrap(err, "failed to parse check_run event payload")
 	}
 
+	ownerID := GetOwnerIDFromEvent(&event)
 	if event.GetAction() != "completed" || event.GetCheckRun().GetConclusion() != "success" {
 		return nil
 	}
@@ -72,10 +73,11 @@ func (h *CheckRun) Handle(ctx context.Context, eventType, deliveryID string, pay
 		}
 
 		if err := h.Evaluate(ctx, installationID, common.TriggerStatus, pull.Locator{
-			Owner:  ownerName,
-			Repo:   repoName,
-			Number: pr.GetNumber(),
-			Value:  pr,
+			Owner:   ownerName,
+			Repo:    repoName,
+			Number:  pr.GetNumber(),
+			Value:   pr,
+			OwnerID: ownerID,
 		}); err != nil {
 			evaluationFailures++
 			logger.Error().Err(err).Msgf("Failed to evaluate pull request '%d' for SHA '%s'", pr.GetNumber(), commitSHA)

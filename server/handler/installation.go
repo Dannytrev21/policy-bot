@@ -42,6 +42,7 @@ func (h *Installation) Handle(ctx context.Context, eventType, deliveryID string,
 	var installationID int64
 	var repositories []*github.Repository
 	var owner string
+	var ownerID int64
 
 	switch eventType {
 	case "installation":
@@ -56,6 +57,7 @@ func (h *Installation) Handle(ctx context.Context, eventType, deliveryID string,
 		if event.Installation != nil && event.Installation.Account != nil {
 			owner = event.Installation.Account.GetLogin()
 		}
+		ownerID = GetOwnerIDFromEvent(&event)
 
 	case "installation_repositories":
 		var event github.InstallationRepositoriesEvent
@@ -68,6 +70,7 @@ func (h *Installation) Handle(ctx context.Context, eventType, deliveryID string,
 		if event.Installation != nil && event.Installation.Account != nil {
 			owner = event.Installation.Account.GetLogin()
 		}
+		ownerID = GetOwnerIDFromEvent(&event)
 
 		// Handle both added and removed repositories
 		if action == "added" {
@@ -99,17 +102,17 @@ func (h *Installation) Handle(ctx context.Context, eventType, deliveryID string,
 			Msg("Populated installation caches (created/added)")
 
 		// Use cached client lookup for consistency
-		clients, err := h.GetClientsForEvent(ctx, owner, installationID)
+		clients, err := h.GetClientsForEvent(ctx, owner, installationID, ownerID)
 		if err != nil {
 			return err
 		}
 		for _, repo := range repositories {
-			h.postRepoInstallationStatus(ctx, clients.V3Client, repo)
+			h.postRepoInstallationStatus(ctx, clients, repo, installationID, ownerID)
 		}
 
 	case "deleted":
 		// Clear all cache entries when installation is deleted
-		h.InvalidateInstallationCaches(installationID, owner, repoNames)
+		h.InvalidateInstallationCaches(installationID, owner, repoNames, ownerID)
 		logger.Info().
 			Int64("installation_id", installationID).
 			Str("owner", owner).
@@ -128,35 +131,42 @@ func (h *Installation) Handle(ctx context.Context, eventType, deliveryID string,
 	return nil
 }
 
-func (h *Installation) postRepoInstallationStatus(ctx context.Context, client *github.Client, r *github.Repository) {
+func (h *Installation) postRepoInstallationStatus(ctx context.Context, clients *InstallationClients, r *github.Repository, installationID int64, ownerID int64) {
 	logger := zerolog.Ctx(ctx)
 
 	repoFullName := strings.Split(r.GetFullName(), "/")
 	owner, repo := repoFullName[0], repoFullName[1]
-	// We must make this extra call because the installation event
-	// returns a partial repository object that doesn't include all
-	// the data we need for the repo status context (branch & SHA)
-	repository, _, err := client.Repositories.Get(ctx, owner, repo)
-	if err != nil {
-		return
+	meta := AuthMetadata{
+		Owner:          owner,
+		OwnerID:        ownerID,
+		Repo:           repo,
+		InstallationID: installationID,
 	}
 
-	defaultBranch := repository.GetDefaultBranch()
-	branch, _, err := client.Repositories.GetBranch(ctx, owner, repo, defaultBranch, false)
-	if err != nil {
-		return
-	}
+	_, err := h.WithAuthRefresh(ctx, meta, clients, func(active *InstallationClients) error {
+		repository, _, getErr := active.V3Client.Repositories.Get(ctx, owner, repo)
+		if getErr != nil {
+			return getErr
+		}
 
-	head := branch.GetCommit().GetSHA()
-	contextWithBranch := fmt.Sprintf("%s: %s", h.PullOpts.StatusCheckContext, defaultBranch)
-	state := "success"
-	message := fmt.Sprintf("%s successfully installed.", h.AppName)
-	status := &github.RepoStatus{
-		Context:     &contextWithBranch,
-		State:       &state,
-		Description: &message,
-	}
-	if err := PostStatus(ctx, client, owner, repo, head, status); err != nil {
+		defaultBranch := repository.GetDefaultBranch()
+		branch, _, branchErr := active.V3Client.Repositories.GetBranch(ctx, owner, repo, defaultBranch, false)
+		if branchErr != nil {
+			return branchErr
+		}
+
+		head := branch.GetCommit().GetSHA()
+		contextWithBranch := fmt.Sprintf("%s: %s", h.PullOpts.StatusCheckContext, defaultBranch)
+		state := "success"
+		message := fmt.Sprintf("%s successfully installed.", h.AppName)
+		status := github.RepoStatus{
+			Context:     &contextWithBranch,
+			State:       &state,
+			Description: &message,
+		}
+		return PostStatus(ctx, active.V3Client, owner, repo, head, &status)
+	})
+	if err != nil {
 		logger.Err(errors.WithStack(err)).Msg("Failed to post repo status")
 	}
 }

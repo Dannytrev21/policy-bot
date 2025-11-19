@@ -92,13 +92,19 @@ graph LR
 - 30-50% reduction in scheduler queue pressure
 - 100% test coverage, < 0.0002ms overhead
 
-#### 6. **Architectural Simplification** (v2.0 - January 2025)
+#### 6. **Architectural Simplification** (v2.0 - November 2024)
 - Removed 8,108 lines of installation filtering infrastructure
 - Simplified to per-organization caching for GHEC (1 installation per org)
 - Maintained per-installation caching for GHES (multiple installations per org)
 - 99% reduction in GitHub API calls for typical GHEC workflows
 
-#### 7. **Success-Based Idempotency** (v2.1 - November 2024)
+#### 7. **Automatic Authentication Recovery** (v2.1 - December 2024)
+- Self-healing token management with automatic retry on auth failures
+- Owner ID propagation for deterministic cache invalidation
+- Zero manual intervention required for token expiration
+- Explicit error types for permanent vs transient failures
+
+#### 8. **Success-Based Idempotency** (v2.1 - November 2024)
 - Uses `X-GitHub-Delivery` header (stable across retries) instead of SQS MessageId
 - Messages marked as processed only AFTER successful handling
 - Retryable errors (rate limits, timeouts) allow automatic retry
@@ -151,4 +157,4 @@ This transformation represents industry-leading practices in:
 
 ---
 
-*Last Updated: January 2025 | Version: 2.0.0 (Architectural Simplification)*
+*Last Updated: December 2024 | Version: 2.1.0 (Architectural Simplification + Auth Recovery)*

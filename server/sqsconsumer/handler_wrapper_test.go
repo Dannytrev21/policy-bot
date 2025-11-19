@@ -24,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/palantir/go-githubapp/githubapp"
+	policyhandler "github.com/palantir/policy-bot/server/handler"
 	"github.com/rcrowley/go-metrics"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
@@ -34,10 +35,10 @@ import (
 // TestSelectHandler_CloudDetection tests that cloud handlers are selected for cloud events
 func TestSelectHandler_CloudDetection(t *testing.T) {
 	tests := []struct {
-		name           string
-		headers        map[string]interface{}
-		source         string
-		expectedEnv    string
+		name             string
+		headers          map[string]interface{}
+		source           string
+		expectedEnv      string
 		expectEnterprise bool
 	}{
 		{
@@ -45,7 +46,7 @@ func TestSelectHandler_CloudDetection(t *testing.T) {
 			headers: map[string]interface{}{
 				"SomeOtherHeader": "value",
 			},
-			expectedEnv:    "cloud",
+			expectedEnv:      "cloud",
 			expectEnterprise: false,
 		},
 		{
@@ -53,7 +54,7 @@ func TestSelectHandler_CloudDetection(t *testing.T) {
 			headers: map[string]interface{}{
 				"Host": "ghec-12345.github.com",
 			},
-			expectedEnv:    "cloud",
+			expectedEnv:      "cloud",
 			expectEnterprise: false,
 		},
 		{
@@ -61,7 +62,7 @@ func TestSelectHandler_CloudDetection(t *testing.T) {
 			headers: map[string]interface{}{
 				"Host": "github.company.com",
 			},
-			expectedEnv:    "enterprise",
+			expectedEnv:      "enterprise",
 			expectEnterprise: true,
 		},
 		{
@@ -69,20 +70,20 @@ func TestSelectHandler_CloudDetection(t *testing.T) {
 			headers: map[string]interface{}{
 				"Host": "ghes.internal.net",
 			},
-			expectedEnv:    "enterprise",
+			expectedEnv:      "enterprise",
 			expectEnterprise: true,
 		},
 		{
-			name:           "no_headers_defaults_to_cloud",
-			headers:        nil,
-			expectedEnv:    "cloud",
+			name:             "no_headers_defaults_to_cloud",
+			headers:          nil,
+			expectedEnv:      "cloud",
 			expectEnterprise: false,
 		},
 		{
-			name: "legacy_source_field_enterprise",
-			source: "enterprise",
-			headers: map[string]interface{}{},
-			expectedEnv:    "enterprise",
+			name:             "legacy_source_field_enterprise",
+			source:           "enterprise",
+			headers:          map[string]interface{}{},
+			expectedEnv:      "enterprise",
 			expectEnterprise: true,
 		},
 	}
@@ -644,6 +645,110 @@ func TestProcessMessage_NonRetryableError(t *testing.T) {
 	sqsClient.AssertExpectations(t)
 }
 
+// TestProcessMessage_AuthRefreshPermanentError verifies permanent auth refresh failures are deleted
+func TestProcessMessage_AuthRefreshPermanentError(t *testing.T) {
+	cloudHandler := &MockEventHandler{}
+	cloudHandler.On("Handles").Return([]string{"status"})
+	handlerErr := &policyhandler.AuthRefreshError{
+		Permanent: true,
+		Err:       errors.New("installation removed"),
+	}
+	cloudHandler.On("Handle", mock.Anything, "status", "test-delivery-auth-perm", mock.Anything).Return(handlerErr)
+
+	sqsClient := &MockSQSClient{}
+	sqsClient.On("DeleteMessage", mock.Anything, mock.Anything).Return(&sqs.DeleteMessageOutput{}, nil)
+
+	registry := metrics.NewRegistry()
+	workerPoolMgr := NewWorkerPoolManager(zerolog.Nop(), registry)
+
+	processor := NewProcessor(
+		&ProcessorConfig{
+			ProcessingMode: "direct",
+			EnableRetry:    true,
+		},
+		sqsClient,
+		[]githubapp.EventHandler{},
+		[]githubapp.EventHandler{cloudHandler},
+		&MockScheduler{},
+		&MockScheduler{},
+		&MockScheduler{},
+		workerPoolMgr,
+		zerolog.Nop(),
+		registry,
+	)
+
+	sqsMessage := SQSMessage{
+		EventType:  "status",
+		DeliveryID: "test-delivery-auth-perm",
+		Payload:    json.RawMessage(`{}`),
+	}
+
+	messageBody, _ := json.Marshal(sqsMessage)
+	messageID := "msg-perm"
+	receiptHandle := "receipt-perm"
+	message := types.Message{
+		Body:          aws.String(string(messageBody)),
+		MessageId:     &messageID,
+		ReceiptHandle: &receiptHandle,
+	}
+
+	err := processor.ProcessMessage(context.Background(), "status", "https://sqs.us-east-1.amazonaws.com/123/status", message)
+	assert.NoError(t, err)
+	sqsClient.AssertExpectations(t)
+}
+
+// TestProcessMessage_AuthRefreshRetryableError verifies retryable auth refresh errors bubble up for retry
+func TestProcessMessage_AuthRefreshRetryableError(t *testing.T) {
+	cloudHandler := &MockEventHandler{}
+	cloudHandler.On("Handles").Return([]string{"status"})
+	handlerErr := &policyhandler.AuthRefreshError{
+		Permanent: false,
+		Err:       errors.New("temporary auth refresh issue"),
+	}
+	cloudHandler.On("Handle", mock.Anything, "status", "test-delivery-auth-retry", mock.Anything).Return(handlerErr)
+
+	sqsClient := &MockSQSClient{}
+
+	registry := metrics.NewRegistry()
+	workerPoolMgr := NewWorkerPoolManager(zerolog.Nop(), registry)
+
+	processor := NewProcessor(
+		&ProcessorConfig{
+			ProcessingMode: "direct",
+			EnableRetry:    false,
+		},
+		sqsClient,
+		[]githubapp.EventHandler{},
+		[]githubapp.EventHandler{cloudHandler},
+		&MockScheduler{},
+		&MockScheduler{},
+		&MockScheduler{},
+		workerPoolMgr,
+		zerolog.Nop(),
+		registry,
+	)
+
+	sqsMessage := SQSMessage{
+		EventType:  "status",
+		DeliveryID: "test-delivery-auth-retry",
+		Payload:    json.RawMessage(`{}`),
+	}
+
+	messageBody, _ := json.Marshal(sqsMessage)
+	messageID := "msg-retry"
+	receiptHandle := "receipt-retry"
+	message := types.Message{
+		Body:          aws.String(string(messageBody)),
+		MessageId:     &messageID,
+		ReceiptHandle: &receiptHandle,
+	}
+
+	err := processor.ProcessMessage(context.Background(), "status", "https://sqs.us-east-1.amazonaws.com/123/status", message)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "temporary auth refresh issue")
+	sqsClient.AssertNotCalled(t, "DeleteMessage")
+}
+
 // TestProcessMessage_RetryLogic tests retry with exponential backoff
 func TestProcessMessage_RetryLogic(t *testing.T) {
 	cloudHandler := &MockEventHandler{}
@@ -851,11 +956,11 @@ func TestProcessViaDirect_WorkerPoolError(t *testing.T) {
 // TestParseMessage tests message parsing with various formats
 func TestParseMessage(t *testing.T) {
 	tests := []struct {
-		name           string
-		messageBody    string
-		expectedEvent  string
+		name            string
+		messageBody     string
+		expectedEvent   string
 		expectedPayload string
-		expectError    bool
+		expectError     bool
 	}{
 		{
 			name: "structured_sqs_message",
@@ -865,9 +970,9 @@ func TestParseMessage(t *testing.T) {
 				"headers": {"Host": "api.github.com"},
 				"payload": {"action": "opened"}
 			}`,
-			expectedEvent:  "pull_request",
+			expectedEvent:   "pull_request",
 			expectedPayload: `{"action":"opened"}`,
-			expectError:    false,
+			expectError:     false,
 		},
 		{
 			name: "webhook_with_headers",
@@ -875,16 +980,16 @@ func TestParseMessage(t *testing.T) {
 				"headers": {"Host": "github.company.com"},
 				"payload": {"action": "closed"}
 			}`,
-			expectedEvent:  "status",
+			expectedEvent:   "status",
 			expectedPayload: `{"action":"closed"}`,
-			expectError:    false,
+			expectError:     false,
 		},
 		{
-			name:           "raw_payload",
-			messageBody:    `{"action": "synchronize"}`,
-			expectedEvent:  "status",
+			name:            "raw_payload",
+			messageBody:     `{"action": "synchronize"}`,
+			expectedEvent:   "status",
 			expectedPayload: `{"action": "synchronize"}`,
-			expectError:    false,
+			expectError:     false,
 		},
 	}
 

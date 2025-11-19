@@ -46,6 +46,7 @@ func (h *IssueComment) Handle(ctx context.Context, eventType, deliveryID string,
 	owner := repo.GetOwner().GetLogin()
 	number := event.GetIssue().GetNumber()
 	installationID := githubapp.GetInstallationIDFromEvent(&event)
+	ownerID := GetOwnerIDFromEvent(&event)
 
 	if !event.GetIssue().IsPullRequest() {
 		zerolog.Ctx(ctx).Debug().Msg("Issue comment event is not for a pull request")
@@ -53,12 +54,27 @@ func (h *IssueComment) Handle(ctx context.Context, eventType, deliveryID string,
 	}
 
 	// Use cached client lookup instead of creating uncached client
-	clients, err := h.GetClientsForEvent(ctx, owner, installationID)
+	clients, err := h.GetClientsForEvent(ctx, owner, installationID, ownerID)
 	if err != nil {
 		return err
 	}
 
-	pr, _, err := clients.V3Client.PullRequests.Get(ctx, owner, repo.GetName(), number)
+	meta := AuthMetadata{
+		Owner:          owner,
+		OwnerID:        ownerID,
+		Repo:           repo.GetName(),
+		InstallationID: installationID,
+	}
+
+	var pr *github.PullRequest
+	clients, err = h.WithAuthRefresh(ctx, meta, clients, func(active *InstallationClients) error {
+		result, _, callErr := active.V3Client.PullRequests.Get(ctx, owner, repo.GetName(), number)
+		if callErr != nil {
+			return callErr
+		}
+		pr = result
+		return nil
+	})
 	if err != nil {
 		return errors.Wrapf(err, "failed to get pull request %s/%s#%d", owner, repo.GetName(), number)
 	}
@@ -66,10 +82,11 @@ func (h *IssueComment) Handle(ctx context.Context, eventType, deliveryID string,
 	ctx, logger := h.PreparePRContext(ctx, installationID, pr)
 
 	evalCtx, err := h.NewEvalContext(ctx, installationID, pull.Locator{
-		Owner:  owner,
-		Repo:   repo.GetName(),
-		Number: number,
-		Value:  pr,
+		Owner:   owner,
+		Repo:    repo.GetName(),
+		Number:  number,
+		Value:   pr,
+		OwnerID: ownerID,
 	})
 	if err != nil {
 		return err

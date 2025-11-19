@@ -1,7 +1,7 @@
 # Operations Playbook: Policy Bot Event-Driven System
 
-**Version**: 2.0.0
-**Last Updated**: January 2025
+**Version**: 2.1.0
+**Last Updated**: December 2024
 **Audience**: SRE, Operations Teams, On-Call Engineers
 
 > **Architectural Update (v2.0)**: Policy Bot has been simplified with removal of 8,108 lines of installation filtering infrastructure. The system now uses per-organization caching for GHEC and per-installation caching for GHES.
@@ -33,18 +33,18 @@ gantt
     title Policy Bot SQS Migration
     dateFormat  YYYY-MM-DD
     section GHEC Migration
-    Planning & Setup       :done, ghec1, 2025-01-15, 3d
-    10% Traffic Migration  :done, ghec2, 2025-01-18, 2d
-    50% Traffic Migration  :active, ghec3, 2025-01-20, 2d
-    100% Traffic Migration :ghec4, 2025-01-22, 2d
-    Validation & Monitoring :ghec5, 2025-01-24, 3d
+    Planning & Setup       :done, ghec1, 2024-11-01, 3d
+    10% Traffic Migration  :done, ghec2, 2024-11-04, 2d
+    50% Traffic Migration  :done, ghec3, 2024-11-06, 2d
+    100% Traffic Migration :done, ghec4, 2024-11-08, 2d
+    Validation & Monitoring :done, ghec5, 2024-11-10, 3d
 
     section GHES Migration
-    Planning & Setup       :ghes1, 2025-01-27, 2d
-    10% Traffic Migration  :ghes2, 2025-01-29, 2d
-    50% Traffic Migration  :ghes3, 2025-01-31, 2d
-    100% Traffic Migration :ghes4, 2025-02-02, 2d
-    Validation & Monitoring :ghes5, 2025-02-04, 3d
+    Planning & Setup       :active, ghes1, 2024-12-01, 2d
+    10% Traffic Migration  :ghes2, 2024-12-03, 2d
+    50% Traffic Migration  :ghes3, 2024-12-05, 2d
+    100% Traffic Migration :ghes4, 2024-12-07, 2d
+    Validation & Monitoring :ghes5, 2024-12-09, 3d
 ```
 
 ### 1.2 Traffic Migration Process
@@ -518,12 +518,35 @@ LIMIT 20
 ```
 
 **Common Causes & Fixes**:
-| Error Pattern | Likely Cause | Fix |
-|--------------|-------------|-----|
-| `401 Unauthorized` | App credentials | Rotate GitHub App key |
-| `404 Not Found` | Deleted repos | Update installation cache |
-| `500 Internal` | GitHub issue | Wait/contact GitHub |
-| `Timeout` | Network/load | Scale workers |
+| Error Pattern | Likely Cause | Auto-Recovery | Manual Fix (if auto-recovery fails) |
+|--------------|-------------|--------------|-------------------------------------|
+| `401 Unauthorized` | Token expired | ✅ Automatic refresh & retry | Rotate GitHub App key |
+| `403 Forbidden` | Permission issues | ✅ Automatic refresh & retry | Check app permissions |
+| `404 Not Found` | Installation deleted | ❌ Marked as permanent | Remove from monitoring |
+| `410 Gone` | Installation suspended | ❌ Marked as permanent | Re-enable installation |
+| `422 Unprocessable` | Installation issues | ✅ Automatic refresh & retry | Check installation config |
+| `500 Internal` | GitHub issue | ⏱️ Retried with backoff | Wait/contact GitHub |
+| `Timeout` | Network/load | ⏱️ Retried with backoff | Scale workers |
+
+**Authentication Auto-Recovery**:
+Since v2.1, Policy Bot automatically handles authentication failures:
+1. **First Attempt**: API call with cached client
+2. **On Auth Error**: Clear cache, refresh token, recreate client
+3. **Retry Once**: Single retry with refreshed credentials
+4. **Permanent Failures**: 404/410 errors marked as non-retryable
+
+Monitor auth refresh metrics:
+```sql
+-- Auth refresh success rate
+SELECT
+  rate(sum(installation.auth_refresh.attempt), 1 minute) as attempts_per_min,
+  rate(sum(installation.auth_refresh.success), 1 minute) as success_per_min,
+  percentage(sum(installation.auth_refresh.success), sum(installation.auth_refresh.attempt)) as success_rate
+FROM Metric
+WHERE appName = 'policy-bot'
+SINCE 1 hour ago
+TIMESERIES 5 minutes
+```
 
 #### 🔴 Dropped Events {#dropped-events}
 

@@ -39,6 +39,7 @@ func (h *PullRequestReview) Handle(ctx context.Context, eventType, deliveryID st
 	if err := json.Unmarshal(payload, &event); err != nil {
 		return errors.Wrap(err, "failed to parse pull request review event payload")
 	}
+	ownerID := GetOwnerIDFromEvent(&event)
 
 	// Ignore events triggered by policy-bot (e.g. for dismissing stale reviews)
 	if event.GetSender().GetLogin() == h.AppName+"[bot]" {
@@ -54,10 +55,11 @@ func (h *PullRequestReview) Handle(ctx context.Context, eventType, deliveryID st
 	ctx, logger := h.PreparePRContext(ctx, installationID, pr)
 
 	evalCtx, err := h.NewEvalContext(ctx, installationID, pull.Locator{
-		Owner:  owner,
-		Repo:   repo.GetName(),
-		Number: number,
-		Value:  pr,
+		Owner:   owner,
+		Repo:    repo.GetName(),
+		Number:  number,
+		Value:   pr,
+		OwnerID: ownerID,
 	})
 	if err != nil {
 		return err

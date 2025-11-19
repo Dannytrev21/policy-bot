@@ -1,7 +1,7 @@
 # Technical Architecture: Policy Bot Event-Driven System
 
-**Version**: 2.0.0
-**Last Updated**: January 2025
+**Version**: 2.1.0
+**Last Updated**: December 2024
 **Audience**: Engineering Teams, Platform Architects, SREs
 **Reading Time**: 15 minutes
 
@@ -11,7 +11,7 @@
 
 Policy Bot has been transformed from a fragile synchronous webhook processor to a resilient event-driven system, achieving **zero event loss**, **10x throughput improvement**, and **40% reduction in GitHub API calls**. The system now includes **per-organization caching and rate limiting for GHEC** and **proactive GitHub API rate limiting** preventing 429 errors before they occur.
 
-**Major Architectural Simplification (Jan 2025)**: Removed installation filtering infrastructure (InstallationFilter, InstallationRegistry, InstallationLocator) in favor of direct per-organization caching for GHEC. This eliminated 8,108 lines of code while improving performance and maintainability.
+**Major Architectural Simplification (Nov 2024)**: Removed installation filtering infrastructure (InstallationFilter, InstallationRegistry, InstallationLocator) in favor of direct per-organization caching for GHEC. This eliminated 8,108 lines of code while improving performance and maintainability.
 
 This document details the technical implementation leveraging AWS managed services, resilience patterns, and comprehensive observability.
 
@@ -255,7 +255,7 @@ OrgMappingCache (string → int64)
 - **Simplicity**: No need to track repo→installation mappings
 - **Performance**: Direct O(1) lookup by organization name
 
-#### Negative Caching (NEW - January 2025)
+#### Negative Caching (NEW - November 2024)
 
 The ClientCache now supports **negative caching** - caching "not found" results to avoid repeated API calls for non-existent installations.
 
@@ -305,12 +305,69 @@ clients, err := b.InstallationManager.GetClients(ctx, installationID, repoFullNa
 - Supports multiple installations per organization
 - Repository-level lookup via `Installations.GetByRepository()`
 
-### Reactive Authentication Handling (NEW - November 2025)
+### Reactive Authentication Handling (v2.1 - December 2024)
 
-**Approach**: Token management is now completely reactive, relying on `ghinstallation.Transport` for lifecycle management:
+**Overview**: Token management is completely reactive with automatic retry on auth failures. The system now automatically recovers from expired tokens and installation changes without manual intervention.
 
+#### Core Components
+
+**1. Owner ID Propagation**: All webhook handlers now extract and propagate immutable owner IDs through the request lifecycle:
 ```go
-// HandleAuthFailure reacts to authentication errors
+// Extracted from every webhook event
+ownerID := GetOwnerIDFromEvent(event)
+
+// Propagated through context and structures
+type pull.Locator struct {
+    Owner   string
+    OwnerID int64  // Now included for cache invalidation
+    Repo    string
+    Number  int
+}
+```
+
+**2. Auth-Aware API Wrapper**: All GitHub API calls now use the `WithAuthRefresh` helper:
+```go
+func (b *Base) WithAuthRefresh(
+    ctx context.Context,
+    meta AuthMetadata,
+    clients *InstallationClients,
+    call func(*InstallationClients) error,
+) (*InstallationClients, error) {
+    // 1) Execute the API call with the current clients
+    if err := call(clients); err == nil {
+        return clients, nil
+    } else if status, isRateLimit, isAuth := classifyGitHubError(err); !isAuth || isRateLimit {
+        return clients, err // Not an auth failure – bail out early
+    }
+
+    // 2) Record SQS-aware telemetry when the call originated from queue processing
+    b.recordSQSAuthMetric(ctx, MetricsKeySQSAuthRefreshAttempt)
+
+    // 3) Invalidate caches and rebuild fresh clients
+    refreshed, refreshedID, refreshErr :=
+        b.HandleAuthFailure(ctx, meta.Owner, meta.OwnerID, meta.Repo, meta.InstallationID, err)
+    if refreshErr != nil || refreshed == nil {
+        b.recordSQSAuthMetric(ctx, MetricsKeySQSAuthRefreshFailure)
+        return clients, b.newAuthRefreshError(refreshErr)
+    }
+    b.recordSQSAuthMetric(ctx, MetricsKeySQSAuthRefreshSuccess)
+    if refreshedID != 0 {
+        meta.InstallationID = refreshedID
+    }
+
+    // 4) Retry the caller with the refreshed clients
+    if retryErr := call(refreshed); retryErr != nil {
+        if status, _, retryIsAuth := classifyGitHubError(retryErr); retryIsAuth {
+            return refreshed, b.newAuthRefreshError(retryErr)
+        }
+        return refreshed, retryErr
+    }
+    return refreshed, nil
+}
+```
+
+**3. HandleAuthFailure Implementation**:
+```go
 func (b *Base) HandleAuthFailure(ctx context.Context, owner string, ownerID int64,
     repo string, installationID int64, authErr error) (*InstallationClients, int64, error) {
 
@@ -321,50 +378,59 @@ func (b *Base) HandleAuthFailure(ctx context.Context, owner string, ownerID int6
         return nil, 0, authErr
     }
 
-    // Clear stale cache entry
+    // Clear stale cache entry (uses ownerID for deterministic invalidation)
     if b.ClientCache != nil && ownerID > 0 {
         b.ClientCache.Invalidate(ownerID)
         b.recordAuthRefreshMetric(MetricsKeyAuthRefreshCacheHit)
     }
 
-    // 404/410: Negative cache and return
+    // 404/410: Negative cache and return permanent error
     if status == 404 || status == 410 {
         b.ClientCache.PutNegative(ownerID)
         return nil, 0, authErr
     }
 
-    // 401/403/422: Re-resolve and recreate clients
+    // 401/403/422: Re-resolve installation and recreate clients
     return b.retrieveClientAndInstallationId(ctx, 0, ownerID, owner, repo)
 }
 ```
 
-**Key Principles:**
-1. **No Proactive Token Creation**: Never call `Apps.CreateInstallationToken` on cache hits
-2. **Let Transport Handle Tokens**: `ghinstallation.Transport` auto-refreshes 1 minute before expiry
-3. **React to Failures**: Only invalidate cache and recreate clients after auth failures
-4. **Preserve Rate Limits**: Never trigger refresh on rate limit errors (403 via RateLimitError)
+**Key Improvements:**
+1. **Automatic Retry**: All API calls automatically retry once after auth failures
+2. **Owner ID Tracking**: Immutable owner IDs enable deterministic cache invalidation
+3. **Error Type Signaling**: `AuthRefreshError` type explicitly signals permanent vs transient failures
+4. **SQS Integration**: Queue processor recognizes auth refresh outcomes to optimize retry decisions
 
 **Error Classification:**
-- `401 Unauthorized`: Token expired or invalid → Refresh
-- `403 Forbidden` (non-rate-limit): Permission issues → Refresh
-- `404 Not Found`: Installation deleted → Negative cache
-- `410 Gone`: Installation suspended → Negative cache
-- `422 Unprocessable`: Installation issues → Refresh
-- `403 Rate Limit`: API limit hit → Pass through (no refresh)
+- `401 Unauthorized`: Token expired → Refresh & Retry
+- `403 Forbidden` (non-rate-limit): Permission issues → Refresh & Retry
+- `404 Not Found`: Installation deleted → Negative cache, No retry
+- `410 Gone`: Installation suspended → Negative cache, No retry
+- `422 Unprocessable`: Installation issues → Refresh & Retry
+- `403 Rate Limit`: API limit hit → Pass through, No refresh
 
 **Telemetry:**
 - `installation.auth_refresh.attempt`: Refresh attempted
 - `installation.auth_refresh.success`: Refresh succeeded
 - `installation.auth_refresh.failure`: Refresh failed
 - `installation.auth_refresh.cache_evicted`: Cache entry cleared
+- `sqs.auth_refresh.attempt`: Refresh triggered while processing an SQS message
+- `sqs.auth_refresh.success`: SQS refresh succeeded
+- `sqs.auth_refresh.failure`: SQS refresh failed
 
 **Benefits:**
-- Eliminates unnecessary token creation (was ~1000/hour, now near zero)
-- Reduces GitHub API rate limit pressure
-- Faster cache hits (no token validation overhead)
-- Simpler code path (reactive vs proactive)
+- **Zero Manual Intervention**: Auth failures self-heal automatically
+- **Reduced Message Loss**: SQS no longer drops messages on transient auth failures
+- **Better Cache Efficiency**: Owner IDs enable precise cache invalidation
+- **Clear Error Semantics**: Explicit error types improve debugging and monitoring
 
-### Removed Infrastructure (Jan 2025)
+#### SQS Processor Integration
+
+- `AuthRefreshError` exposes a permanent flag so the SQS processor can decide whether to retry, move to the DLQ, or delete the message immediately when installations are removed.
+- Queue metrics show how often auth refresh happens inside SQS workers, giving parity with the HTTP path.
+- Processor logging differentiates transient refresh failures (“will retry”) from permanent ones (“installation removed”), which feeds directly into the runbooks described in the Operations Playbook.
+
+### Removed Infrastructure (Nov 2024)
 
 The following components were removed as part of the architectural simplification:
 
@@ -804,8 +870,9 @@ circuit_breaker:
 
 ### Technical Debt
 
-- ✅ Remove InstallationFilter infrastructure (COMPLETED Jan 2025)
-- ✅ Consolidate GHEC caching to per-org model (COMPLETED Jan 2025)
+- ✅ Remove InstallationFilter infrastructure (COMPLETED Nov 2024)
+- ✅ Consolidate GHEC caching to per-org model (COMPLETED Nov 2024)
+- ✅ Implement automatic auth recovery (COMPLETED Dec 2024)
 - ⏳ Migrate remaining GHES-specific code to separate package
 - ⏳ Add OpenTelemetry distributed tracing
 - ⏳ Implement cache warming on startup
