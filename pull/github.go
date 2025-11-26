@@ -42,6 +42,7 @@ const (
 type Locator struct {
 	Owner       string
 	Repo        string
+	OwnerID     int64
 	PolicyOwner string
 	PolicyRepo  string
 	Number      int
